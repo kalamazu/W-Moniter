@@ -2,8 +2,8 @@ import { spawn, type ChildProcess } from 'node:child_process'
 import { EventEmitter } from 'node:events'
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
-import { app } from 'electron'
 import { locateNode } from '../storage/locate-node'
+import { resolveRuntimeFile } from '../paths'
 import type { ProxyFlow } from '../../../proxy/correlate.mjs'
 
 /**
@@ -69,12 +69,7 @@ export interface ProxyRule {
 function resolveServerPath(): string | null {
   const override = process.env['MONITOR_PROXY_SERVER']
   if (override) return existsSync(override) ? override : null
-  const candidates = [
-    join(__dirname, '..', '..', 'proxy', 'server.mjs'),
-    join(app.getAppPath(), 'proxy', 'server.mjs'),
-    join(process.resourcesPath ?? '', 'proxy', 'server.mjs')
-  ]
-  return candidates.find((candidate) => existsSync(candidate)) ?? null
+  return resolveRuntimeFile('proxy', 'server.mjs')
 }
 
 export class ProxyClient extends EventEmitter {

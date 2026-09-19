@@ -1,0 +1,42 @@
+appId: com.local.chromium-monitor
+productName: ChromiumMonitor
+copyright: ''
+
+directories:
+  output: dist
+  buildResources: .buildtools
+
+# 只打构建产物：out/main/index.js 已经自包含（只 require electron + node 内置模块），
+# 所以 node_modules / src / work / scripts 都不需要进包
+files:
+  - out/**/*
+  - package.json
+
+# 四个子进程目录 + 内置 Node 运行时。
+# **不能打进 asar**：storage / proxy / control / mcp 都是用 spawn 起的独立 node 进程，
+# 子进程读不了 asar 里的文件，所以走 extraResources 摊在 resources/ 下。
+extraResources:
+  - from: control
+    to: control
+  - from: mcp
+    to: mcp
+  - from: storage
+    to: storage
+  - from: proxy
+    to: proxy
+  - from: .buildtools/node
+    to: node
+
+asar: true
+
+win:
+  target:
+    - portable
+    - zip
+  # 不内置浏览器：被监控的必须是真 Chrome，内置就不是真 Chrome 了（见设计文档 D1）
+  artifactName: ChromiumMonitor-${version}-${arch}.${ext}
+
+portable:
+  artifactName: ChromiumMonitor-${version}-portable.exe
+
+# 不打 NSIS：需要开始菜单/卸载项的场合再加，日常用 portable 就够

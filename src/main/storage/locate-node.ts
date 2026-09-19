@@ -133,6 +133,13 @@ export async function locateNode(): Promise<LocateNodeResult> {
 
   push(process.env['MONITOR_NODE_PATH'])
 
+  // 打包版自带一份 Node（见 docs/多会话监视器设计.md §4.1）：存储/代理/控制服务
+  // 都是 node 子进程且要 node:sqlite，不能指望用户机器上装了 Node 22。
+  // 开发态 process.resourcesPath 指向 electron/dist/resources，那里没有，等于跳过。
+  if (process.resourcesPath) {
+    for (const path of versionCandidates(process.resourcesPath)) push(path)
+  }
+
   const programFiles = process.env['ProgramFiles']
   const programFilesX86 = process.env['ProgramFiles(x86)']
   const programData = process.env['ProgramData']

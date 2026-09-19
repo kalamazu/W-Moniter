@@ -3,6 +3,7 @@ import { existsSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { Controller } from './controller'
 import { ControlBridge } from './control/bridge'
+import { resolveRuntimeFile, resolveRuntimeRoot } from './paths'
 import { locateNode } from './storage/locate-node'
 import { DEFAULT_WINDOW_MS } from '../../proxy/correlate.mjs'
 import { emptyRuleSet, readRuleSet, writeRuleSet } from './rules/store'
@@ -361,7 +362,7 @@ app.whenReady().then(async () => {
       if (!located.candidate) throw new Error('找不到系统 Node（控制服务需要 node >= 22）')
       const nodePath = located.candidate.path
       controlBridge = new ControlBridge({
-        root: join(__dirname, '../..'),
+        root: resolveRuntimeRoot(),
         dataDir: DATA_DIR,
         port: CONTROL_PORT,
         nodePath
@@ -385,7 +386,7 @@ app.whenReady().then(async () => {
       host: CONTROL_API ? '127.0.0.1' : null,
       port: CONTROL_API ? port : null,
       infoPath: CONTROL_API ? join(DATA_DIR, 'control.json') : null,
-      mcp: CONTROL_API ? join(__dirname, '../..', 'mcp', 'server.mjs') : null
+      mcp: CONTROL_API ? resolveRuntimeFile('mcp', 'server.mjs') : null
     }
   }
   publishControl()

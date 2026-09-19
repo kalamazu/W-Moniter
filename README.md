@@ -363,6 +363,7 @@ npm run test:detail        # 请求详情验收（8 项：头 / 发起链 / init
 npm run test:drill         # agent 演练（39 项：只走 MCP stdio，到「规则真的生效」为止）
 npm run test:smoke         # 全量冒烟（59 项：29 条 HTTP 路由 + 25 个 MCP 工具，一条都不落）
 npm run verify             # 采集完整性验收（起受控 origin 对照，会真开浏览器）
+npm run dist:win           # 打 Windows 可执行文件（portable 单文件 + zip），产物在 dist/
 npm run demo -- 30000 15 out.png   # 跑一次看板，15s 后截图到 out.png，30s 后收工
 npm run mcp -- --data-dir=<数据目录>   # 以 MCP server 形式接出去（stdio，给 agent 用）
 node scripts/probe-pipe.mjs        # 单独验证 pipe 是否可用，排查环境问题用
@@ -412,7 +413,8 @@ node scripts/db-sql.mjs <db> "select url,status from requests limit 5"   # 直�
 ## 目录结构
 
 ```
-docs/使用手册.md              使用手册：上手 / 面板 / 任务 recipe / API / MCP / 排障
+electron-builder.yml          打包配置（portable exe / zip；内置 Node 运行时）
+docs/使用手册.md              使用手册：上手 / 面板 / 任务 recipe / API / MCP / 排障 / 打包
 docs/设计文档.md              设计文档：架构 / 模块职责 / 决策记录 / 测试策略
 docs/技术方案.md              需求级完整方案（目标、路线 P0–P7、验收指标）
 docs/P4-P7-待办与阻塞.md       P4（自编译 Profile H）/ P7 的缺口实测与最小推进路径

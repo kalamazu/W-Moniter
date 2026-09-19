@@ -4,6 +4,9 @@ dist/
 .userdata/
 *.log
 
+# 打包用的内置 Node 运行时（85MB，从 npmmirror 下载，见 docs/多会话监视器设计.md §4.1）
+.buildtools/
+
 # work/ 是一次性排查与验收脚本的目录：脚本本身留着（文档里有引用），
 # 但运行产物和临时数据不入库
 work/**/*.out

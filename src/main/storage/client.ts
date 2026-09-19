@@ -3,8 +3,8 @@ import { spawn, type ChildProcess } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
-import { app } from 'electron'
 import { locateNode } from './locate-node'
+import { resolveRuntimeFile } from '../paths'
 import type { RequestRecord, ScriptRecord, StorageHealth } from '../../shared/types'
 
 /**
@@ -157,13 +157,7 @@ function toRow(record: RequestRecord): Record<string, unknown> {
 function resolveServerPath(): string | null {
   const override = process.env['MONITOR_STORAGE_SERVER']
   if (override) return existsSync(override) ? override : null
-
-  const candidates = [
-    join(__dirname, '..', '..', 'storage', 'server.mjs'),
-    join(app.getAppPath(), 'storage', 'server.mjs'),
-    join(process.resourcesPath ?? '', 'storage', 'server.mjs')
-  ]
-  return candidates.find((candidate) => existsSync(candidate)) ?? null
+  return resolveRuntimeFile('storage', 'server.mjs')
 }
 
 export interface InstanceInfo {
