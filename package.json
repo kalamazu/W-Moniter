@@ -1,0 +1,45 @@
+{
+  "name": "chromium-monitor-container",
+  "version": "0.1.0",
+  "private": true,
+  "description": "高隐蔽性 Chromium 监控容器 — 观测与干预",
+  "main": "./out/main/index.js",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
+    "test:storage": "node scripts/test-storage.mjs",
+    "test:scripts": "node scripts/test-scripts.mjs",
+    "test:rules": "node scripts/test-rules.mjs",
+    "test:rules:e2e": "node scripts/test-rules-e2e.mjs",
+    "test:ui-perf": "node scripts/test-ui-perf.mjs",
+    "test:page-perf": "node scripts/test-page-perf.mjs",
+    "test:probe": "node scripts/test-probe.mjs",
+    "test:input": "node scripts/test-input.mjs",
+    "test:dom": "node scripts/test-dom.mjs",
+    "test:sessions": "node scripts/test-sessions.mjs",
+    "test:smoke": "node scripts/test-smoke.mjs",
+    "verify": "node scripts/verify-completeness.mjs",
+    "demo": "node scripts/demo-run.mjs",
+    "test:proxy": "node scripts/test-proxy.mjs",
+    "test:correlate": "node scripts/test-correlate.mjs",
+    "test:control": "node scripts/test-control.mjs",
+    "test:detail": "node scripts/test-detail.mjs",
+    "test:drill": "node scripts/test-agent-drill.mjs",
+    "mcp": "node mcp/server.mjs"
+  },
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "@types/react": "^18.3.18",
+    "@types/react-dom": "^18.3.5",
+    "@vitejs/plugin-react": "^4.3.4",
+    "electron": "^33.3.1",
+    "electron-vite": "^2.3.0",
+    "typescript": "^5.7.2",
+    "vite": "^5.4.11"
+  }
+}

@@ -1,0 +1,11 @@
+import { createServer } from "node:https";
+import { execFileSync } from "node:child_process";
+import { readFileSync } from "node:fs";
+const key = readFileSync("work/spki/nosan.key"), cert = readFileSync("work/spki/nosan.pem");
+const s = createServer({ key, cert }, (q, r) => { console.log("[hit]", q.url, q.headers.host); r.writeHead(200); r.end("MITM-OK") });
+await new Promise(r => s.listen(0, "127.0.0.1", r));
+const port = s.address().port;
+console.log("listening", port);
+const out = execFileSync("curl.exe", ["-sk", "-m", "10", "https://127.0.0.1:" + port + "/"], { encoding: "utf8" });
+console.log("curl ->", JSON.stringify(out));
+s.close();
