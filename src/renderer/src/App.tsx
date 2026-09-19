@@ -9,8 +9,9 @@ import { RulePanel } from './components/RulePanel'
 import { ScriptPanel } from './components/ScriptPanel'
 import { SessionsPanel } from './components/SessionsPanel'
 import { StatsPanel } from './components/StatsPanel'
+import { TitleBar } from './components/TitleBar'
 import { Waterfall } from './components/Waterfall'
-import { buildQuery, formatCount, formatSize, type UiFilters } from './format'
+import { buildQuery, formatSize, type UiFilters } from './format'
 import { useRequests } from './hooks/useRequests'
 
 const DEFAULT_FILTERS: UiFilters = {
@@ -116,37 +117,13 @@ export default function App(): React.JSX.Element {
 
   return (
     <div className="app">
-      <header className="topbar">
-        <div className="brand">
-          <span className={`dot dot-${state}`} />
-          <strong>Chromium 监控容器</strong>
-          <span className="chip">Profile {status?.profile ?? '-'}</span>
-          {status?.browserVersion && <span className="chip chip-dim">{status.browserVersion}</span>}
-          {status?.bodyMode && <span className="chip chip-dim">body: {status.bodyMode}</span>}
-        </div>
-
-        <div className="metrics">
-          <span className="metric">
-            <b>{formatCount(status?.requestCount ?? 0)}</b> 本次采集
-          </span>
-          <span className="metric">
-            <b>{formatCount(requests.total)}</b> 命中筛选
-          </span>
-          <span className="metric">
-            <b>{formatCount(storage?.rowsWritten ?? 0)}</b> 已落库
-          </span>
-          <span className="metric">
-            <b>{formatCount(body?.captured ?? 0)}</b> body
-          </span>
-          <span className="metric">
-            <b>{formatCount(status?.scriptCount ?? 0)}</b> 脚本
-          </span>
-          <span className="metric">
-            <b>{status?.targets.filter((target) => target.attached).length ?? 0}</b>/
-            {status?.targets.length ?? 0} target
-          </span>
-        </div>
-      </header>
+      <TitleBar
+        status={status}
+        state={state}
+        matched={requests.total}
+        targets={status?.targets ?? []}
+        onRefresh={requests.refresh}
+      />
 
       {status?.error && <div className="banner banner-err">{status.error}</div>}
       {state === 'launching' && <div className="banner">正在启动内核…</div>}
@@ -251,9 +228,6 @@ export default function App(): React.JSX.Element {
         <button type="button" className="ghost" onClick={() => setFilters(DEFAULT_FILTERS)}>
           重置
         </button>
-        <button type="button" className="ghost" onClick={requests.refresh}>
-          刷新
-        </button>
       </div>
 
       {tab === 'list' && (
@@ -303,18 +277,7 @@ export default function App(): React.JSX.Element {
 
       <footer className="foot">
         <span className="mono dim">{status?.browserPath ?? '未找到内核'}</span>
-        {storage?.dbPath && (
-          <span className="mono dim">
-            库: {storage.dbPath}
-            <button
-              type="button"
-              className="link"
-              onClick={() => void window.monitor.openDataDir()}
-            >
-              打开目录
-            </button>
-          </span>
-        )}
+        {storage?.dbPath && <span className="mono dim">库: {storage.dbPath}</span>}
         {storage?.enabled && (
           <span className="mono dim">
             node {storage.nodeVersion} · 队列 {storage.queueDepth} · 丢弃{' '}

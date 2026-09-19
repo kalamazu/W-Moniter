@@ -733,6 +733,17 @@ export interface ControllerApi {
   getSessions(): Promise<SessionOverview | null>
   /** 切 Profile 重启：收工 → 换 Profile → 重新起来（库里多一条实例） */
   switchProfile(profile: Profile): Promise<{ ok: boolean; error?: string; profile: Profile }>
+
+  /* ---- 自绘标题栏（frame: false）的窗口控制 ---- */
+  /** 当前是否最大化。打开时用它对齐真实状态（窗口可能被系统或用户改过） */
+  isWindowMaximized(): Promise<boolean>
+  windowMinimize(): Promise<void>
+  /** 切换最大化/还原，返回**切换后**的状态，省得渲染层自己猜 */
+  windowToggleMaximize(): Promise<boolean>
+  /** 关闭控制窗口。走正常关闭流程，落盘与收工逻辑不会被绕过 */
+  windowClose(): Promise<void>
+  /** 最大化状态变化：拖边、双击标题栏、Win+↑ 都会推过来 */
+  onWindowMaximized(cb: (maximized: boolean) => void): () => void
 }
 
 /* ------------------------------------------------------------------ 干预规则 */

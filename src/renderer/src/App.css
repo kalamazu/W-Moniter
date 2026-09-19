@@ -53,28 +53,127 @@ body {
   flex-direction: column;
 }
 
-/* ---------- 顶栏 ---------- */
+/* ---------- 标题栏（窗口是 frame: false，这里是自绘的） ---------- */
 
-.topbar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  padding: 10px 16px;
-  background: var(--panel);
-  border-bottom: 1px solid var(--line);
-  flex: none;
-}
-
-.brand {
+.titlebar {
+  -webkit-app-region: drag;
   display: flex;
   align-items: center;
   gap: 10px;
+  height: 46px;
+  padding-left: 14px;
+  flex: none;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+  user-select: none;
 }
 
-.brand strong {
-  font-size: 14px;
+/*
+ * 拖拽区里所有可点的东西都必须显式声明 no-drag，
+ * 否则点「刷新」会变成拖窗口 —— 这是 frameless 最容易踩的坑。
+ */
+.titlebar button,
+.titlebar input,
+.titlebar select,
+.titlebar a {
+  -webkit-app-region: no-drag;
+}
+
+.tb-mark {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  flex: none;
+  border-radius: 7px;
+  background: linear-gradient(140deg, #2f6fd0, #1d4c9c);
+  color: #dce9ff;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.16);
+}
+
+.tb-name {
+  font-size: 13px;
   font-weight: 600;
+  letter-spacing: 0.2px;
+  white-space: nowrap;
+}
+
+.tb-state {
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+/* 指标靠右推：margin-left:auto 之后的东西（动作区 + 三键）全部贴右 */
+.tb-metrics {
+  display: flex;
+  align-items: baseline;
+  gap: 16px;
+  margin-left: auto;
+  padding-left: 12px;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.tb-metrics .metric {
+  font-size: 11.5px;
+}
+
+.tb-metrics .metric b {
+  font-size: 13px;
+}
+
+.tb-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 12px;
+  flex: none;
+}
+
+.tb-btn {
+  padding: 4px 9px;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--muted);
+  font-family: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.tb-btn:hover {
+  background: var(--panel-2);
+  border-color: var(--line);
+  color: var(--text);
+}
+
+/* 三键铺满标题栏高度，跟原生 Windows 窗口一致（贴边、不缩进） */
+.tb-win {
+  display: flex;
+  align-self: stretch;
+  margin-left: 10px;
+  flex: none;
+}
+
+.tb-win-btn {
+  display: grid;
+  place-items: center;
+  width: 44px;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.tb-win-btn:hover {
+  background: #232a34;
+  color: var(--text);
+}
+
+.tb-win-close:hover {
+  background: #e81123;
+  color: #fff;
 }
 
 .dot {
@@ -96,11 +195,6 @@ body {
 
 .dot-error {
   background: var(--err);
-}
-
-.metrics {
-  display: flex;
-  gap: 18px;
 }
 
 .metric {

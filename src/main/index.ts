@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, shell } from 'electron'
+import { app, BrowserWindow, ipcMain, shell, type IpcMainInvokeEvent } from 'electron'
 import { existsSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { Controller } from './controller'
@@ -112,6 +112,10 @@ function createControlWindow(): BrowserWindow {
     minWidth: 900,
     minHeight: 560,
     show: false,
+    // 自绘标题栏：系统边框一个像素都不留，拖动 / 三键全在渲染层实现
+    // （见 src/renderer/src/components/TitleBar.tsx）。
+    // thickFrame 保持默认 true —— 否则窗口连可拖拽的边缘都没了，最大化也铺不满。
+    frame: false,
     autoHideMenuBar: true,
     backgroundColor: '#0d1014',
     title: 'Chromium 监控容器',
@@ -127,6 +131,15 @@ function createControlWindow(): BrowserWindow {
   win.on('closed', () => {
     controlWindow = null
   })
+
+  // 自绘标题栏的「最大化 / 还原」图标必须跟着窗口的**真实**状态走：
+  // 拖边、双击标题栏、Win+↑、系统吸附都会改状态，只靠点击回调同步会显示错图标。
+  const pushMaximized = (): void => {
+    if (win.isDestroyed()) return
+    win.webContents.send('monitor:window-maximized', win.isMaximized())
+  }
+  win.on('maximize', pushMaximized)
+  win.on('unmaximize', pushMaximized)
 
   const devServerUrl = process.env['ELECTRON_RENDERER_URL']
   const params = new URLSearchParams()
@@ -296,6 +309,40 @@ function wireIpc(): void {
 
   ipcMain.handle('monitor:open-data-dir', async (): Promise<void> => {
     await shell.openPath(dirname(DB_PATH))
+  })
+
+  /* ---- 自绘标题栏（frame: false）的窗口控制 ---- */
+
+  /**
+   * 用 sender 反查窗口，而不是直接用模块级的 controlWindow：
+   * 将来开多个控制窗口（多会话）时各管各的，渲染层不用告诉主进程「我是谁」。
+   */
+  const senderWindow = (event: IpcMainInvokeEvent): BrowserWindow | null => {
+    const win = BrowserWindow.fromWebContents(event.sender)
+    return win && !win.isDestroyed() ? win : null
+  }
+
+  ipcMain.handle(
+    'monitor:window-is-maximized',
+    (event): boolean => senderWindow(event)?.isMaximized() ?? false
+  )
+
+  ipcMain.handle('monitor:window-minimize', (event): void => {
+    senderWindow(event)?.minimize()
+  })
+
+  ipcMain.handle('monitor:window-toggle-maximize', (event): boolean => {
+    const win = senderWindow(event)
+    if (!win) return false
+    if (win.isMaximized()) win.unmaximize()
+    else win.maximize()
+    return win.isMaximized()
+  })
+
+  ipcMain.handle('monitor:window-close', (event): void => {
+    // 用 win.close() 而不是 app.exit()：走正常关闭流程，
+    // window-all-closed 里会停掉控制服务、排空采集队列，不会丢没落盘的数据。
+    senderWindow(event)?.close()
   })
 }
 

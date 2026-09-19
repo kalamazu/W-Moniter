@@ -159,7 +159,27 @@ const api: ControllerApi = {
       ok: boolean
       error?: string
       profile: Profile
-    }>
+    }>,
+
+  /* ---- 自绘标题栏（frame: false）的窗口控制 ---- */
+
+  isWindowMaximized: () =>
+    ipcRenderer.invoke('monitor:window-is-maximized') as Promise<boolean>,
+
+  windowMinimize: () => ipcRenderer.invoke('monitor:window-minimize') as Promise<void>,
+
+  windowToggleMaximize: () =>
+    ipcRenderer.invoke('monitor:window-toggle-maximize') as Promise<boolean>,
+
+  windowClose: () => ipcRenderer.invoke('monitor:window-close') as Promise<void>,
+
+  onWindowMaximized: (callback) => {
+    const listener = (_event: IpcRendererEvent, maximized: boolean): void => callback(maximized)
+    ipcRenderer.on('monitor:window-maximized', listener)
+    return () => {
+      ipcRenderer.removeListener('monitor:window-maximized', listener)
+    }
+  }
 }
 
 contextBridge.exposeInMainWorld('monitor', api)
