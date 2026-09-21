@@ -1,0 +1,13 @@
+<!doctype html>
+<html lang="zh">
+<head><meta charset="utf-8"><title>对话框验收页</title></head>
+<body>
+<h1>dialog probe</h1>
+<script>
+// alert 会挂住渲染进程（采集也跟着停）—— 正是要验的那件事：
+// 只有真的应答了，下面这行才跑得到，服务端才会收到回报
+alert('monitor-dialog-probe')
+fetch('/api/rt-report?dialog=dismissed').catch(() => {})
+</script>
+</body>
+</html>

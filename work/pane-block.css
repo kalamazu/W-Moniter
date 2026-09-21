@@ -1,0 +1,133 @@
+
+/* ---------- 自由工作区：窗格 + 可拖分隔条 ---------- */
+
+.panes {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+  min-width: 0;
+}
+
+.panes-row {
+  flex-direction: row;
+}
+
+.panes-column {
+  flex-direction: column;
+}
+
+.pane {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--bg);
+}
+
+.pane-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 6px 3px 8px;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel-2);
+  flex: none;
+}
+
+.pane-pick {
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  padding: 2px 4px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.pane-pick:hover {
+  border-color: var(--line);
+  background: var(--panel);
+}
+
+.pane-act {
+  background: transparent;
+  border: 0;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1;
+  padding: 3px 6px;
+  border-radius: 4px;
+}
+
+.pane-act:hover {
+  background: #2a3140;
+  color: var(--text);
+}
+
+.pane-body {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+}
+
+/* 面板原先都是「整屏」尺寸写的，进了窗格就铺满这一栏。
+   用 > 是有意的：面板内部自己还有 .detail / .split（比如脚本面板），那些不能被改 */
+.pane-body > * {
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  overflow: auto;
+}
+
+.pane-body > .detail {
+  width: auto;
+  flex: 1;
+  border-left: 0;
+}
+
+.pane-split {
+  flex: none;
+  background: var(--line);
+  position: relative;
+}
+
+/* 分隔条做细一点但热区留够：本体 4px，伪元素往外各扩 3px */
+.pane-split::after {
+  content: '';
+  position: absolute;
+  inset: -3px;
+}
+
+.panes-row > .pane-split {
+  width: 4px;
+  cursor: col-resize;
+}
+
+.panes-column > .pane-split {
+  height: 4px;
+  cursor: row-resize;
+}
+
+.pane-split:hover,
+.pane-split:active {
+  background: var(--accent);
+}
+
+/* 拖动分隔条时，整个窗口都别去抢鼠标指针，也别选中文字 */
+body.is-col-resize,
+body.is-col-resize * {
+  cursor: col-resize !important;
+  user-select: none !important;
+}
+
+body.is-row-resize,
+body.is-row-resize * {
+  cursor: row-resize !important;
+  user-select: none !important;
+}

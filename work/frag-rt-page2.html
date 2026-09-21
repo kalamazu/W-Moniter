@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="zh">
+<head><meta charset="utf-8"><title>实时分析验收页</title></head>
+<body>
+<h1>realtime probe</h1>
+<script>
+(async () => {
+  const params = new URLSearchParams(location.search)
+  const phase = params.get('phase') || '1'
+  const peer = params.get('peer') || ''
+  const out = { phase, ws: '', wsrecv: '', wsmsg: '', api: '', apiStatus: '', echoB: '', dup: '', peer: '', dl: 'no' }
+
+  // 1) WebSocket：只在 phase1 跑 —— 真值日志里就一次握手，判据才是确定的
+  if (phase === '1') {
+    try {
+      const ws = new WebSocket('ws://' + location.host + '/ws-probe')
+      await new Promise((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error('ws timeout')), 8000)
+        ws.onopen = () => { clearTimeout(timer); resolve() }
+        ws.onerror = () => { clearTimeout(timer); reject(new Error('ws error')) }
+      })
+      out.ws = 'open'
+      const got = (predicate) => new Promise((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error('frame timeout')), 8000)
+        ws.addEventListener('message', (event) => {
+          const text = typeof event.data === 'string' ? event.data : '(binary)'
+          if (!predicate(text)) return
+          clearTimeout(timer)
+          resolve(text)
+        })
+      })
+      // 先把两个监听挂上再发，免得回声比监听先到
+      const pushed = got((text) => text.indexOf('server-push') === 0)
+      const echoed = got((text) => text.indexOf('echo:') === 0)
+      ws.send('hello-from-page')
+      out.wsrecv = await pushed
+      out.wsmsg = await echoed
+      ws.close()
+    } catch (error) { out.ws = 'err:' + error.message }
+  }
+
+  // 2) 带 JSON body 的接口：每轮 3 次（「调用节奏」要 >= 3 个样本才算得出来）。
+  //    phase2 的响应多一个字段，契约回归就靠它证明看得见变化
+  try {
+    let last = null
+    for (let i = 0; i < 3; i += 1) {
+      const body = { user: phase === '2' ? 'bob' : 'amy', n: i + 1 }
+      if (phase === '2') body.extra = true
+      const res = await fetch('/api/json-echo?token=tk-1&page=' + phase + '-' + i, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body)
+      })
+      out.apiStatus = String(res.status)
+      last = await res.json()
+      await new Promise((resolve) => setTimeout(resolve, 150))
+    }
+    out.api = JSON.stringify(last)
+  } catch (error) { out.api = 'err:' + error.message }
+
+  // 3) 第二个接口，共用同一个 token —— 关联分析要看得见「同值参数跨端点」
+  try {
+    const res = await fetch('/api/json-echo-b?token=tk-1&phase=' + phase)
+    out.echoB = String((await res.json()).name)
+  } catch (error) { out.echoB = 'err:' + error.message }
+
+  // 4) 同一份响应体被两个不同地址取到 —— 「共享响应体（重复资源）」的靶子
+  try {
+    const a = await fetch('/api/dup-body.json?v=' + phase)
+    const b = await fetch('/api/dup-body.json?v=' + phase + 'b')
+    out.dup = String((await a.text()).length + '+' + (await b.text()).length)
+  } catch (error) { out.dup = 'err:' + error.message }
+
+  // 5) 跨域资源：换一个端口就是另一个 origin，页面 → 域的关联要看得见它。
+  //    用 onload/onerror 都放行的写法：验的是「请求发生了」，不是「图片能解码」
+  if (peer) {
+    try {
+      await new Promise((resolve) => {
+        const img = new Image()
+        const done = () => resolve()
+        img.onload = done
+        img.onerror = done
+        img.src = 'http://127.0.0.1:' + peer + '/img1.png?from=realtime'
+        setTimeout(done, 3000)
+      })
+      out.peer = 'requested'
+    } catch (error) { out.peer = 'err:' + error.message }
+  }
+
+  // 6) 下载：只在 phase2 触发一次（同一个页面里第二次下载会被浏览器拦下来问）
+  if (phase === '2') {
+    try {
+      const link = document.createElement('a')
+      link.href = '/download.txt'
+      link.download = 'monitor-rt-download.txt'
+      document.body.appendChild(link)
+      link.click()
+      out.dl = 'clicked'
+    } catch (error) { out.dl = 'err:' + error.message }
+  }
+
+  await fetch('/api/rt-report?' + new URLSearchParams(out).toString())
+})().catch((error) => {
+  fetch('/api/rt-report?err=' + encodeURIComponent(String(error && error.message)))
+})
+</script>
+</body>
+</html>

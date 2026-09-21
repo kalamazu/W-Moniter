@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="zh">
+<head><meta charset="utf-8"><title>实时分析验收页</title></head>
+<body>
+<h1>realtime probe</h1>
+<script>
+(async () => {
+  const params = new URLSearchParams(location.search)
+  const phase = params.get('phase') || '1'
+  const out = { phase, ws: '', wsrecv: '', wsmsg: '', api: '', apiStatus: '', dl: 'no' }
+
+  // 1) WebSocket：握手 + 双向帧。服务端侧记着同一份真值，两边一对就知道采没采漏
+  try {
+    const ws = new WebSocket('ws://' + location.host + '/ws-probe')
+    await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('ws timeout')), 8000)
+      ws.onopen = () => { clearTimeout(timer); resolve() }
+      ws.onerror = () => { clearTimeout(timer); reject(new Error('ws error')) }
+    })
+    out.ws = 'open'
+    const got = (predicate) => new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('frame timeout')), 8000)
+      ws.addEventListener('message', (event) => {
+        const text = typeof event.data === 'string' ? event.data : '(binary)'
+        if (!predicate(text)) return
+        clearTimeout(timer)
+        resolve(text)
+      })
+    })
+    // 先把两个监听挂上再发，免得回声比监听先到
+    const pushed = got((text) => text.indexOf('server-push') === 0)
+    const echoed = got((text) => text.indexOf('echo:') === 0)
+    ws.send('hello-from-page')
+    out.wsrecv = await pushed
+    out.wsmsg = await echoed
+    ws.close()
+  } catch (error) { out.ws = 'err:' + error.message }
+
+  // 2) 带 JSON body 的接口：给接口画像凑样本；phase 2 的响应会多一个字段，用来验契约回归
+  try {
+    const body = { user: phase === '2' ? 'bob' : 'amy', n: phase === '2' ? 2 : 1 }
+    if (phase === '2') body.extra = true
+    const res = await fetch('/api/json-echo?token=tk-1&page=' + phase, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body)
+    })
+    out.apiStatus = String(res.status)
+    out.api = JSON.stringify(await res.json())
+  } catch (error) { out.api = 'err:' + error.message }
+
+  // 3) 下载：只在 phase 2 触发一次（同一个页面里第二次下载会被浏览器拦下来问）
+  if (phase === '2') {
+    try {
+      const link = document.createElement('a')
+      link.href = '/download.txt'
+      link.download = 'monitor-rt-download.txt'
+      document.body.appendChild(link)
+      link.click()
+      out.dl = 'clicked'
+    } catch (error) { out.dl = 'err:' + error.message }
+  }
+
+  await fetch('/api/rt-report?' + new URLSearchParams(out).toString())
+})().catch((error) => {
+  fetch('/api/rt-report?err=' + encodeURIComponent(String(error && error.message)))
+})
+</script>
+</body>
+</html>
