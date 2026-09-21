@@ -10,6 +10,7 @@ import { locateBrowser } from './browser/locate'
 import { InputAutomation } from './browser/automation'
 import { DomInspector } from './browser/dom'
 import { Screenshotter } from './browser/screenshot'
+import { SiteData, hostOf, originOf, type JarCookie, type OriginScan, type OriginRow } from './browser/site-data'
 import { ProbeChannel, ProbeRunner, probeCapability } from './browser/probe'
 import type { BodyConfig, CapturedBody } from './browser/body-capture'
 import type { ScriptConfig } from './browser/script-capture'
@@ -59,7 +60,39 @@ import type {
   StorageSummary,
   StoredRequest,
   TargetInfo,
-  TimelineRow
+  TimelineRow,
+  ContractDiff,
+  ContractListRow,
+  ContractSummary,
+  CookieChangeDetail,
+  CookieDeleteFilter,
+  CookieInput,
+  CookieQuery,
+  CookieRecord,
+  CookieStats,
+  SiteDataType,
+  SiteDetail,
+  SiteOriginRow,
+  SiteScanReport,
+  SiteSnapshotDiff,
+  SiteSnapshotSummary,
+  StorageChangeDetail,
+  EndpointDetail,
+  EndpointPage,
+  EventPage,
+  EventQuery,
+  EventStats,
+  ExportQuery,
+  HarExportReport,
+  JsonlExportReport,
+  MonitoredEvent,
+  RelationReport,
+  RequestGraph,
+  ResourceExportReport,
+  WsConnectionRow,
+  WsFramePage,
+  WsFrameQuery,
+  WsFrameRecord
 } from '../shared/types'
 
 /** 批量推送给 UI 的间隔。逐条推送会在重页面上打死渲染进程。 */
@@ -101,9 +134,6 @@ const MAX_INLINE_BASE64 = 4 * 1024 * 1024
  */
 const SCREENSHOT_KEEP = 200
 
-/** 默认拦这些类型的响应体。图片/字体/媒体不碰 —— 量大、价值低、拖慢页面。 */
-const DEFAULT_BODY_TYPES = ['Document', 'Script', 'Stylesheet', 'XHR', 'Fetch']
-
 export interface ControllerOptions {
   userDataDir: string
   startUrl: string
@@ -112,9 +142,19 @@ export interface ControllerOptions {
   extraArgs?: string[]
   dbPath: string
   captureBodies: boolean
+  /** 下载落盘目录（默认 <数据目录>/downloads）。设空串就交回浏览器默认行为 */
+  downloadDir?: string
   bodyMaxBytes: number
   bodyStoreMaxBytes: number
   bodyStoreMaxCount: number
+  /**
+   * 响应体采集范围。**空数组 = 全部 resourceType**（默认：图片 / 字体 / 媒体 / WS 握手都采）。
+   *
+   * 想收窄就设 `MONITOR_BODY_TYPES=Document,Script,Stylesheet,XHR,Fetch`（逗号分隔）。
+   * 收窄是有意义的：每多拦一种类型，页面上每条这种响应都要多一次管道往返才能放行，
+   * 而图片/字体/媒体量大、又基本都是二进制（规则改不了），所以早期默认只拦那 5 种。
+   * 现在按「先都拿到，再自己筛」的口径放开了。
+   */
   bodyTypes: string[]
   bodyTimeoutMs: number
   /** 开本地代理（P5）。开了才有 DNS/TLS 时序，也才有大 body 改写 */
@@ -138,10 +178,22 @@ export interface ControllerOptions {
   scriptConcurrency: number
 }
 
+/**
+ * cookie 罐的对账节奏。
+ *
+ * 罐是浏览器级的，问一次很便宜，所以不用抠得太细；但也不能太快 ——
+ * 每次对账都会跟库里现存的行比一遍，纯属白跑。5s 足够跟上变化，又不会把库吵醒。
+ */
+const COOKIE_POLL_MS = 5000
+/** 收到 Set-Cookie 之后再等一会儿才对账：一次导航会连着来好几条，攒着只算一次 */
+const COOKIE_DEBOUNCE_MS = 250
+
 export class Controller extends EventEmitter {
   private status: ControllerStatus
   private requestCount = 0
   private scriptCount = 0
+  private eventCount = 0
+  private wsFrameCount = 0
   private child: ChildProcess | null = null
   private cdp: CdpClient | null = null
   private collector: Collector | null = null
@@ -154,6 +206,18 @@ export class Controller extends EventEmitter {
   private probeRunner: ProbeRunner | null = null
   private input: InputAutomation | null = null
   /** 收工后 collector 会置空，控制台记录得留一份 */
+  /**
+   * 站点资源（cookie 罐 / 站点存储）。
+   * Storage 域不在 §3.4 红线里（红线只有 Runtime / Debugger），两个 Profile 都能建。
+   */
+  private site: SiteData | null = null
+  /** 刚发过 Set-Cookie 的响应，用来给罐对账出来的变化标来源。攒着，对账时一次认领 */
+  private readonly cookieAttribution: Array<{ url: string; names: string[] }> = []
+  private cookieDebounce: NodeJS.Timeout | null = null
+  private sitePoller: NodeJS.Timeout | null = null
+  /** cookie 被带出去的累计（罐内主键 → 发往过的 host）。按批冲库，别一个请求写一次 */
+  private readonly cookieSent = new Map<string, Set<string>>()
+
   private consoleSnapshot: ConsoleEntry[] = []
   private storage: StorageClient
   /** P5：本地代理 + 三源关联。代理没开时两者都是空的 */
@@ -241,7 +305,9 @@ export class Controller extends EventEmitter {
         inFlight: 0,
         continueMethod: 'Fetch.continueResponse'
       },
-      bodyMode: options.captureBodies ? `Fetch 拦截 (${options.bodyTypes.join('/')})` : '关闭',
+      bodyMode: options.captureBodies
+        ? `Fetch 拦截 (${options.bodyTypes.length ? options.bodyTypes.join('/') : '全部类型'})`
+        : '关闭',
       scriptCount: 0,
       proxy: { running: false, host: null, port: null, spki: null, flows: 0, merge: null }
     }
@@ -294,7 +360,7 @@ export class Controller extends EventEmitter {
     this.scriptCount = 0
     // 计数归零了就必须推一次状态：flush() 在队列为空时会提前返回，
     // 只靠它同步的话，清空之后 agent 查 /status 还会读到清空前的旧计数
-    this.patchStatus({ requestCount: 0, scriptCount: 0 })
+    this.patchStatus({ requestCount: 0, scriptCount: 0, eventCount: 0, wsFrameCount: 0 })
   }
 
   /* ---------------------------------------------------------------- 启动 */
@@ -424,6 +490,10 @@ export class Controller extends EventEmitter {
       // DOM 检查器也在这时候建：它的 domain 全是「第一次用才 enable」，起点零开销
       this.dom = new DomInspector(cdp)
       this.shot = new Screenshotter(cdp)
+      // 站点资源走浏览器级命令 + 一个 page 会话，会话也是「用到才要」，和 DOM 检查器一个套路
+      this.site = new SiteData(cdp, () => this.waitPageSession())
+      this.site.onStorageChange = (change) => this.onStorageChange(change)
+      this.site.onLog = (line) => this.emit('log', line)
 
       this.patchStatus({
         state: 'connecting',
@@ -469,7 +539,7 @@ export class Controller extends EventEmitter {
 
       const bodyConfig: BodyConfig = {
         enabled: this.options.captureBodies,
-        resourceTypes: new Set(this.options.bodyTypes.length ? this.options.bodyTypes : DEFAULT_BODY_TYPES),
+        resourceTypes: new Set(this.options.bodyTypes),
         maxBytes: this.options.bodyMaxBytes,
         timeoutMs: this.options.bodyTimeoutMs
       }
@@ -488,8 +558,15 @@ export class Controller extends EventEmitter {
         bodyConfig,
         scriptConfig,
         this.rules,
-        this.probeChannel
+        this.probeChannel,
+        this.options.downloadDir ?? null,
+        {
+          onSetCookie: (url, names) => this.noteSetCookie(url, names),
+          onCookieSent: (host, keys) => this.noteCookieSent(host, keys)
+        }
       )
+      // 站点存储的几个域是按 session 生效的，挂载跟着采集器的会话走
+      this.collector.siteAttach = (sessionId, targetType) => this.site?.attachSession(sessionId, targetType) ?? Promise.resolve()
       // 启动前就设好的注入脚本要在会话建立时生效
       this.collector.setRuleSet(this.rules.ruleSet)
       this.collector.on('record', (record: RequestRecord, first: boolean) => {
@@ -507,6 +584,10 @@ export class Controller extends EventEmitter {
       // 页面换文档后节点编号作废：清掉 DOM 面板缓存的根，下次调用重新取
       this.collector.on('navigated', () => this.dom?.forgetNodes())
       this.collector.on('console', (entry: ConsoleEntry) => this.emit('console', entry))
+      // 事件流与 WS 帧：只入存储队列，不推给 UI —— 分析面板按 since 轮询库，
+      // 同一条数据走两条路迟早会不一致，这里保持单一路径
+      this.collector.on('event', (item: MonitoredEvent) => this.onEvent(item))
+      this.collector.on('wsframe', (frame: WsFrameRecord) => this.onWsFrame(frame))
       this.collector.on(
         'target-attached',
         (info: { type: string; url: string; monitored: boolean }) => {
@@ -523,6 +604,12 @@ export class Controller extends EventEmitter {
       await this.normalizeWindow()
 
       this.flushTimer = setInterval(() => this.flush(), FLUSH_INTERVAL_MS)
+
+      // 站点资源的两件事搭同一趟车：cookie 罐对账 + 把「cookie 被发到过哪些站点」冲进库。
+      // 都不用等页面加载完 —— 罐是浏览器级的，起来的就能问
+      this.sitePoller = setInterval(() => void this.pollSite(), COOKIE_POLL_MS)
+      this.sitePoller.unref?.()
+      void this.pollSite()
 
       const fetchError = this.collector.getFetchError()
       this.patchStatus({
@@ -553,6 +640,13 @@ export class Controller extends EventEmitter {
   stop(): void {
     if (this.flushTimer) clearInterval(this.flushTimer)
     this.flushTimer = null
+    if (this.cookieDebounce) clearTimeout(this.cookieDebounce)
+    this.cookieDebounce = null
+    if (this.sitePoller) clearInterval(this.sitePoller)
+    this.sitePoller = null
+    this.site = null
+    this.cookieAttribution.length = 0
+    this.cookieSent.clear()
 
     // summary() 在收工之后才打，这里先把注入统计留下来（collector 随后就置空了）
     this.injectionSnapshot = this.collector?.getInjectionStats() ?? null
@@ -638,6 +732,8 @@ export class Controller extends EventEmitter {
       input: this.cdp !== null,
       captureScripts: runtime && this.options.captureScripts,
       dom: runtime ? 'full' : 'ondemand',
+      // 站点资源走 Storage / DOMStorage / IndexedDB 这几个域，都不在 §3.4 红线里
+      siteData: this.site !== null,
       // 截图走 Page domain（采集本来就开了），两个 Profile 都能用
       screenshot: true
     }
@@ -1034,6 +1130,16 @@ export class Controller extends EventEmitter {
     }
   }
 
+  private onEvent(item: MonitoredEvent): void {
+    this.eventCount += 1
+    this.storage.appendEvent(item)
+  }
+
+  private onWsFrame(frame: WsFrameRecord): void {
+    this.wsFrameCount += 1
+    this.storage.appendWsFrame(frame)
+  }
+
   private onBody(body: CapturedBody): void {
     if (body.bytes && body.bytes.byteLength > 0) {
       this.storage.appendBody(body.seq, body.bytes, false)
@@ -1054,6 +1160,10 @@ export class Controller extends EventEmitter {
 
   private flush(): void {
     if (this.collector) this.patchStatus({ body: this.collector.getBodyStats() })
+    // 计数变了才推：这两个数字涨得很快，没必要每 150ms 都发一次同样的值
+    if (this.eventCount !== this.status.eventCount || this.wsFrameCount !== this.status.wsFrameCount) {
+      this.patchStatus({ eventCount: this.eventCount, wsFrameCount: this.wsFrameCount })
+    }
     // 必须在「队列为空就返回」之前：修正记录本身就是要入队的东西
     if (this.proxy) this.applyRevisions()
     if (this.queue.length === 0) return
@@ -1158,6 +1268,545 @@ export class Controller extends EventEmitter {
     }
   }
 
+  /* --------------------------------------------------- 站点资源（cookie / 存储） */
+
+  private async siteCall(op: string, args: Record<string, unknown> = {}): Promise<unknown> {
+    return this.storage.call(op, { inst: this.storage.getInstId(), ...args })
+  }
+
+  /** 定时那一趟：先把「cookie 被发到过哪些站点」冲进库，再给罐对一次账 */
+  private async pollSite(): Promise<void> {
+    try {
+      await this.flushCookieSent()
+      await this.refreshCookieJar()
+    } catch (error) {
+      this.emit('log', `[site] 轮询失败：${(error as Error).message}`)
+    }
+  }
+
+  private noteSetCookie(url: string, names: string[]): void {
+    if (!url) return
+    this.cookieAttribution.push({ url, names })
+    if (this.cookieAttribution.length > 64) {
+      this.cookieAttribution.splice(0, this.cookieAttribution.length - 64)
+    }
+    this.scheduleCookieRefresh()
+  }
+
+  private noteCookieBlocked(url: string, names: string[]): void {
+    this.onEvent({
+      ts: Date.now(),
+      kind: 'cookie',
+      level: 'warn',
+      url,
+      detail: {
+        action: 'blocked',
+        name: names[0] ?? '',
+        names,
+        domain: hostOf(url),
+        path: '/',
+        source: 'set-cookie',
+        url,
+        reason: '第三方 cookie 被策略拦下'
+      }
+    })
+  }
+
+  private noteCookieSent(host: string, keys: string[]): void {
+    for (const key of keys) {
+      const set = this.cookieSent.get(key) ?? new Set<string>()
+      set.add(host)
+      this.cookieSent.set(key, set)
+    }
+  }
+
+  private async flushCookieSent(): Promise<void> {
+    if (this.cookieSent.size === 0 || !this.storage.isEnabled()) return
+    const items: Array<{ key: string; host: string }> = []
+    for (const [key, hosts] of this.cookieSent) {
+      for (const host of hosts) items.push({ key, host })
+    }
+    this.cookieSent.clear()
+    // 冲失败不重试：下一次请求还会把同一条 cookie 带出去，信息自己会回来
+    await this.siteCall('cookieRememberSent', { items }).catch(() => undefined)
+  }
+
+  /**
+   * cookie 罐对账。**判定以浏览器为准** —— 我们只负责把差异找出来。
+   *
+   * 为什么是「对账」而不是「解析 Set-Cookie」：domain/path 匹配、Max-Age 换算、
+   * SameSite 默认值、删除语义，每一条自己实现一遍都会和浏览器对不上。
+   * 直接问罐、跟上一轮比，天生正确；Set-Cookie 只用来回答「是谁改的」。
+   */
+  async refreshCookieJar(): Promise<{ total: number; added: number; changed: number; removed: number } | null> {
+    const site = this.site
+    if (!site || !this.storage.isEnabled()) return null
+    let cookies: JarCookie[]
+    try {
+      cookies = await site.listCookies()
+    } catch (error) {
+      this.emit('log', `[cookie] 读罐失败：${(error as Error).message}`)
+      return null
+    }
+    const attribution = this.cookieAttribution.splice(0, this.cookieAttribution.length)
+    try {
+      const result = (await this.siteCall('cookieSync', { now: Date.now(), cookies, attribution })) as {
+        total: number
+        added: number
+        changed: number
+        removed: number
+        changes: CookieChangeDetail[]
+      }
+      for (const change of result.changes) {
+        this.onEvent({ ts: Date.now(), kind: 'cookie', level: 'info', url: change.url, detail: change })
+      }
+      return { total: result.total, added: result.added, changed: result.changed, removed: result.removed }
+    } catch (error) {
+      this.emit('log', `[cookie] 对账失败：${(error as Error).message}`)
+      return null
+    }
+  }
+
+  private scheduleCookieRefresh(): void {
+    if (this.cookieDebounce || !this.site) return
+    this.cookieDebounce = setTimeout(() => {
+      this.cookieDebounce = null
+      void this.refreshCookieJar().catch(() => undefined)
+    }, COOKIE_DEBOUNCE_MS)
+    this.cookieDebounce.unref?.()
+  }
+
+  private onStorageChange(change: StorageChangeDetail): void {
+    this.onEvent({ ts: Date.now(), kind: 'storage', level: 'info', url: change.origin, detail: change })
+  }
+
+  async listCookies(options: { query?: CookieQuery } = {}): Promise<Page<CookieRecord> | null> {
+    if (!this.storage.isEnabled()) return null
+    try {
+      return (await this.siteCall('cookieList', { query: options.query ?? {} })) as Page<CookieRecord>
+    } catch {
+      return null
+    }
+  }
+
+  async getCookieStats(): Promise<CookieStats | null> {
+    if (!this.storage.isEnabled()) return null
+    try {
+      return (await this.siteCall('cookieStats', { now: Date.now() })) as CookieStats
+    } catch {
+      return null
+    }
+  }
+
+  async getSiteOrigins(options: { limit?: number; onlyScanned?: boolean } = {}): Promise<{ rows: SiteOriginRow[]; total: number } | null> {
+    if (!this.storage.isEnabled()) return null
+    try {
+      return (await this.siteCall('siteOverview', { limit: options.limit, onlyScanned: options.onlyScanned })) as {
+        rows: SiteOriginRow[]
+        total: number
+      }
+    } catch {
+      return null
+    }
+  }
+
+  async getSiteDetail(origin: string): Promise<SiteDetail | null> {
+    if (!this.storage.isEnabled()) return null
+    try {
+      return (await this.siteCall('siteDetail', { origin })) as SiteDetail
+    } catch {
+      return null
+    }
+  }
+
+  /** 该扫哪些域：给定就用给定的，否则「最近有流量的前 N 个」 */
+  private async resolveScanTargets(options: { origin?: string; limit?: number }): Promise<string[]> {
+    if (options.origin) {
+      const origin = originOf(options.origin) ?? hostOf(options.origin)
+      return origin ? [origin] : []
+    }
+    const limit = Math.min(Math.max(options.limit ?? 20, 1), 200)
+    const seen = (await this.siteCall('siteOriginsSeen', { limit })) as { rows: Array<{ origin: string }> }
+    return seen.rows.map((row) => row.origin)
+  }
+
+  private toOriginRow(scan: OriginScan): OriginRow {
+    const bytes = (list: Array<{ bytes: number }>): number => list.reduce((sum, item) => sum + (item.bytes ?? 0), 0)
+    return {
+      origin: scan.origin,
+      localStorageCount: scan.localStorage.length,
+      localStorageBytes: bytes(scan.localStorage),
+      sessionStorageCount: scan.sessionStorage.length,
+      sessionStorageBytes: bytes(scan.sessionStorage),
+      idbNames: scan.idb.map((item) => item.name),
+      idbStores: scan.idb.reduce((sum, item) => sum + item.objectStores.length, 0),
+      cacheNames: scan.caches.map((item) => item.name),
+      cacheEntries: scan.caches.reduce((sum, item) => sum + item.count, 0),
+      swCount: scan.serviceWorkers.filter((item) => !item.isDeleted).length,
+      usageBytes: scan.usageBytes,
+      quotaBytes: scan.quotaBytes,
+      usageBreakdown: scan.usageBreakdown,
+      detail: {
+        localStorage: scan.localStorage,
+        sessionStorage: scan.sessionStorage,
+        idb: scan.idb,
+        caches: scan.caches,
+        serviceWorkers: scan.serviceWorkers
+      }
+    }
+  }
+
+  /**
+   * 去浏览器里真扫一遍。cookie 罐每次都对（浏览器级命令，很便宜），
+   * 站点存储按域扫 —— 每个域要连着问好几次 CDP，全站扫一遍不是免费的。
+   */
+  async scanSiteData(options: { origin?: string; limit?: number; cookies?: boolean } = {}): Promise<SiteScanReport> {
+    const started = Date.now()
+    const report: SiteScanReport = {
+      ok: true,
+      scannedAt: started,
+      durationMs: 0,
+      origins: [],
+      cookies: { total: 0, added: 0, changed: 0, removed: 0 }
+    }
+    const site = this.site
+    if (!site) {
+      report.ok = false
+      report.error = '浏览器还没起来'
+      report.durationMs = Date.now() - started
+      return report
+    }
+    try {
+      if (options.cookies !== false) {
+        const sync = await this.refreshCookieJar()
+        if (sync) report.cookies = sync
+      }
+      if (!this.storage.isEnabled()) {
+        report.durationMs = Date.now() - started
+        return report
+      }
+      const targets = await this.resolveScanTargets(options)
+      const rows: OriginRow[] = []
+      for (const origin of targets) {
+        const scan = await site.scanOrigin(origin)
+        for (const warning of scan.warnings) this.emit('log', `[site] ${origin} ${warning}`)
+        rows.push(this.toOriginRow(scan))
+      }
+      if (rows.length > 0) await this.siteCall('siteUpsert', { rows })
+      report.origins = targets
+    } catch (error) {
+      report.ok = false
+      report.error = (error as Error).message
+    }
+    report.durationMs = Date.now() - started
+    return report
+  }
+
+  async setCookie(input: CookieInput): Promise<{ ok: boolean; error?: string; scanned?: number }> {
+    if (!this.site) return { ok: false, error: '浏览器还没起来' }
+    const result = await this.site.setCookie(input)
+    if (result.ok) await this.refreshCookieJar().catch(() => undefined)
+    return result
+  }
+
+  async deleteCookies(filter: CookieDeleteFilter): Promise<{ ok: boolean; error?: string; deleted: number }> {
+    if (!this.site) return { ok: false, error: '浏览器还没起来', deleted: 0 }
+    let effective = filter
+    if (filter.crossSiteOnly) {
+      // 「跨站使用过」只有库知道 —— 查出来把主键清单交下去，别在两层各写一套匹配规则
+      const rows = await this.listCookies({ query: { crossSite: true, limit: 2000 } })
+      const keys = (rows?.rows ?? []).map((cookie) => cookie.key)
+      if (keys.length === 0) return { ok: true, deleted: 0 }
+      effective = { ...filter, crossSiteOnly: undefined, extraKeys: keys }
+    }
+    const result = await this.site.deleteCookies(effective)
+    if (result.deleted > 0) await this.refreshCookieJar().catch(() => undefined)
+    return result
+  }
+
+  async clearSiteData(
+    origin: string,
+    types: SiteDataType[]
+  ): Promise<{ ok: boolean; error?: string; origin: string; types: string[] }> {
+    if (!this.site) return { ok: false, error: '浏览器还没起来', origin, types: [] }
+    const wanted = types.length > 0 ? types : ['all']
+    const result = await this.site.clearOrigin(origin, wanted)
+    if (result.ok) {
+      await this.refreshCookieJar().catch(() => undefined)
+      // 清完立刻重扫：不然报告里还留着已经不存在的东西
+      await this.scanSiteData({ origin }).catch(() => undefined)
+    }
+    return { ...result, origin }
+  }
+
+  async editStorage(input: {
+    origin: string
+    area: 'local' | 'session'
+    action: 'set' | 'remove' | 'clear'
+    key?: string
+    value?: string
+  }): Promise<{ ok: boolean; error?: string }> {
+    if (!this.site) return { ok: false, error: '浏览器还没起来' }
+    const result = await this.site.editStorage(input)
+    if (result.ok) await this.scanSiteData({ origin: input.origin, cookies: false }).catch(() => undefined)
+    return result
+  }
+
+  async deleteIdbDatabase(origin: string, name: string): Promise<{ ok: boolean; error?: string }> {
+    if (!this.site) return { ok: false, error: '浏览器还没起来' }
+    const result = await this.site.deleteIdbDatabase(origin, name)
+    if (result.ok) await this.scanSiteData({ origin, cookies: false }).catch(() => undefined)
+    return result
+  }
+
+  async deleteCache(origin: string, name: string, url?: string): Promise<{ ok: boolean; error?: string }> {
+    if (!this.site) return { ok: false, error: '浏览器还没起来' }
+    const result = await this.site.deleteCache(origin, name, url)
+    if (result.ok) await this.scanSiteData({ origin, cookies: false }).catch(() => undefined)
+    return result
+  }
+
+  async unregisterServiceWorker(scopeURL: string): Promise<{ ok: boolean; error?: string }> {
+    if (!this.site) return { ok: false, error: '浏览器还没起来' }
+    const origin = originOf(scopeURL)
+    const result = await this.site.unregisterServiceWorker(scopeURL)
+    if (result.ok && origin) await this.scanSiteData({ origin, cookies: false }).catch(() => undefined)
+    return result
+  }
+
+  async siteSnapshot(options: { label?: string } = {}): Promise<SiteSnapshotSummary> {
+    if (!this.storage.isEnabled()) return { id: 0, label: options.label ?? null, createdAt: Date.now(), origins: 0, cookies: 0, bytes: 0 }
+    // 拍快照前先扫一遍默认那批：拿一份「上次扫描时的陈旧数据」当基线，回归就没有意义
+    await this.scanSiteData({}).catch(() => undefined)
+    return (await this.siteCall('siteSnapshot', { label: options.label })) as SiteSnapshotSummary
+  }
+
+  async listSiteSnapshots(limit = 50): Promise<SiteSnapshotSummary[] | null> {
+    if (!this.storage.isEnabled()) return null
+    try {
+      const result = (await this.siteCall('siteSnapshotList', { limit })) as { rows: SiteSnapshotSummary[] }
+      return result.rows
+    } catch {
+      return null
+    }
+  }
+
+  async siteSnapshotDiff(baseId: number): Promise<SiteSnapshotDiff | null> {
+    if (!this.storage.isEnabled()) return null
+    try {
+      return (await this.siteCall('siteSnapshotDiff', { baseId })) as SiteSnapshotDiff
+    } catch {
+      return null
+    }
+  }
+
+  async deleteSiteSnapshot(id: number): Promise<{ deleted: number }> {
+    if (!this.storage.isEnabled()) return { deleted: 0 }
+    try {
+      return (await this.siteCall('siteSnapshotDelete', { id })) as { deleted: number }
+    } catch {
+      return { deleted: 0 }
+    }
+  }
+
+  /* -------------------------------------------- 事件流 / WS / 分析 / 导出 */
+
+  async queryEvents(query: EventQuery): Promise<EventPage | null> {
+    if (!this.storage.isEnabled()) return null
+    try {
+      return (await this.storage.call('queryEvents', {
+        inst: this.storage.getInstId(),
+        ...query
+      })) as EventPage
+    } catch {
+      return null
+    }
+  }
+
+  async getEventStats(): Promise<EventStats | null> {
+    if (!this.storage.isEnabled()) return null
+    try {
+      return (await this.storage.call('eventStats', { inst: this.storage.getInstId() })) as EventStats
+    } catch {
+      return null
+    }
+  }
+
+  async queryWsFrames(query: WsFrameQuery): Promise<WsFramePage | null> {
+    if (!this.storage.isEnabled()) return null
+    try {
+      return (await this.storage.call('queryWsFrames', {
+        inst: this.storage.getInstId(),
+        ...query
+      })) as WsFramePage
+    } catch {
+      return null
+    }
+  }
+
+  async getWsConnections(limit = 50): Promise<{ rows: WsConnectionRow[]; total: number } | null> {
+    if (!this.storage.isEnabled()) return null
+    try {
+      return (await this.storage.call('wsConnections', {
+        inst: this.storage.getInstId(),
+        limit
+      })) as { rows: WsConnectionRow[]; total: number }
+    } catch {
+      return null
+    }
+  }
+
+  /* 分析类查询的超时给得比平时宽：一次画像要扫几万行，20 秒不够 */
+  private static readonly ANALYSIS_TIMEOUT_MS = 120_000
+
+  async getEndpointProfiles(options: {
+    query?: RequestQuery
+    sort?: string
+    minCalls?: number
+    limit?: number
+    maxRows?: number
+  } = {}): Promise<EndpointPage | null> {
+    if (!this.storage.isEnabled()) return null
+    const { query, ...rest } = options
+    try {
+      return (await this.storage.call(
+        'endpointProfiles',
+        { inst: this.storage.getInstId(), filter: query, ...rest },
+        Controller.ANALYSIS_TIMEOUT_MS
+      )) as EndpointPage
+    } catch (error) {
+      this.emit('log', `[分析] 接口画像失败: ${(error as Error).message}`)
+      return null
+    }
+  }
+
+  async getEndpointDetail(
+    key: string,
+    options: { query?: RequestQuery; sampleLimit?: number; callLimit?: number; maxRows?: number } = {}
+  ): Promise<EndpointDetail | null> {
+    if (!this.storage.isEnabled()) return null
+    const { query, ...rest } = options
+    try {
+      return (await this.storage.call(
+        'endpointDetail',
+        { inst: this.storage.getInstId(), key, filter: query, ...rest },
+        Controller.ANALYSIS_TIMEOUT_MS
+      )) as EndpointDetail
+    } catch {
+      return null
+    }
+  }
+
+  async getRequestGraph(options: { query?: RequestQuery; maxRows?: number; maxNodes?: number } = {}): Promise<RequestGraph | null> {
+    if (!this.storage.isEnabled()) return null
+    const { query, ...rest } = options
+    try {
+      return (await this.storage.call(
+        'requestGraph',
+        { inst: this.storage.getInstId(), filter: query, ...rest },
+        Controller.ANALYSIS_TIMEOUT_MS
+      )) as RequestGraph
+    } catch (error) {
+      this.emit('log', `[分析] 调用图失败: ${(error as Error).message}`)
+      return null
+    }
+  }
+
+  async getRelations(options: { query?: RequestQuery; maxRows?: number; limit?: number } = {}): Promise<RelationReport | null> {
+    if (!this.storage.isEnabled()) return null
+    const { query, ...rest } = options
+    try {
+      return (await this.storage.call(
+        'relations',
+        { inst: this.storage.getInstId(), filter: query, ...rest },
+        Controller.ANALYSIS_TIMEOUT_MS
+      )) as RelationReport
+    } catch (error) {
+      this.emit('log', `[分析] 关联分析失败: ${(error as Error).message}`)
+      return null
+    }
+  }
+
+  /*
+   * 导出类不吞异常：它是用户/agent 明确点的一次动作，失败必须说清楚
+   * 是「没有数据」还是「写不进去」，返回一个空的成功结果最误事。
+   */
+
+  async exportHar(options: ExportQuery = {}): Promise<HarExportReport> {
+    const { query, ...rest } = options
+    return (await this.storage.call(
+      'exportHar',
+      { inst: this.storage.getInstId(), filter: query, ...rest },
+      Controller.ANALYSIS_TIMEOUT_MS
+    )) as HarExportReport
+  }
+
+  async exportJsonl(options: ExportQuery = {}): Promise<JsonlExportReport> {
+    const { query, ...rest } = options
+    return (await this.storage.call(
+      'exportJsonl',
+      { inst: this.storage.getInstId(), filter: query, ...rest },
+      Controller.ANALYSIS_TIMEOUT_MS
+    )) as JsonlExportReport
+  }
+
+  async exportBodies(options: ExportQuery & { dir?: string } = {}): Promise<ResourceExportReport> {
+    const { query, ...rest } = options
+    return (await this.storage.call(
+      'exportBodies',
+      { inst: this.storage.getInstId(), filter: query, ...rest },
+      Controller.ANALYSIS_TIMEOUT_MS
+    )) as ResourceExportReport
+  }
+
+  /* ------------------------------------------------------------ 契约回归 */
+
+  async contractSnapshot(options: { label?: string; query?: RequestQuery; sampleLimit?: number } = {}): Promise<ContractSummary> {
+    const { query, ...rest } = options
+    return (await this.storage.call(
+      'contractSnapshot',
+      { inst: this.storage.getInstId(), filter: query, ...rest },
+      Controller.ANALYSIS_TIMEOUT_MS
+    )) as ContractSummary
+  }
+
+  async listContracts(limit = 50): Promise<ContractListRow[] | null> {
+    if (!this.storage.isEnabled()) return null
+    try {
+      const result = (await this.storage.call('contractList', { limit })) as { rows: ContractListRow[] }
+      return result.rows
+    } catch {
+      return null
+    }
+  }
+
+  async getContract(id: number, withSchema = true): Promise<unknown> {
+    return this.storage.call('contractGet', { id, withSchema }, Controller.ANALYSIS_TIMEOUT_MS)
+  }
+
+  async deleteContract(id: number): Promise<{ deleted: number }> {
+    return (await this.storage.call('contractDelete', { id })) as { deleted: number }
+  }
+
+  async contractDiff(options: { baseId: number; query?: RequestQuery; sampleLimit?: number }): Promise<ContractDiff> {
+    const { query, ...rest } = options
+    return (await this.storage.call(
+      'contractDiff',
+      { inst: this.storage.getInstId(), filter: query, ...rest },
+      Controller.ANALYSIS_TIMEOUT_MS
+    )) as ContractDiff
+  }
+
+  /**
+   * 应答 JS 对话框。
+   *
+   * 对话框会把渲染进程挂住 —— 页面从此不再前进，采集也停了。
+   * 所以「记录到了」还不够，必须有一条放行的路，否则监控对象会卡死在那里。
+   */
+  async handleDialog(accept: boolean, promptText?: string): Promise<{ ok: boolean; error?: string }> {
+    if (!this.collector) return { ok: false, error: '没有正在运行的浏览器' }
+    return this.collector.handleDialog(accept, promptText)
+  }
   async getTimeline(query: RequestQuery, limit: number): Promise<TimelineRow[]> {
     if (!this.storage.isEnabled()) return []
     try {

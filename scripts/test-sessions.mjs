@@ -110,7 +110,7 @@ try {
       `库大小：面板 ${overview.storage.dbBytes} / 磁盘 ${onDisk}`
     )
     const tables = Object.fromEntries(overview.storage.tables.map((t) => [t.name, t.rows]))
-    for (const name of ['instances', 'requests', 'bodies', 'scripts', 'script_refs', 'events']) {
+    for (const name of ['instances', 'requests', 'bodies', 'scripts', 'script_refs', 'events', 'cookies', 'site_origins', 'site_snapshots']) {
       const inDb = countOf(`SELECT COUNT(*) AS n FROM ${name}`)
       assert(tables[name] === inDb, `${name} 行数：面板 ${tables[name]} / 库 ${inDb}`)
     }

@@ -18,15 +18,15 @@
 
 import { DatabaseSync } from 'node:sqlite'
 import { createHash } from 'node:crypto'
-import { mkdirSync, statSync } from 'node:fs'
-import { dirname } from 'node:path'
+import { mkdirSync, statSync, writeFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
 
 // node:sqlite 在 22.x 仍标记 experimental，会往 stderr 吐警告。
 // stderr 是日志通道，别让它被警告淹没。
 process.removeAllListeners('warning')
 process.on('warning', () => {})
 
-const SCHEMA_VERSION = 6
+const SCHEMA_VERSION = 8
 
 const config = {
   /** 单条 body 落盘上限，超过只留 hash + size */
@@ -192,12 +192,130 @@ CREATE TABLE IF NOT EXISTS events (
   inst INTEGER NOT NULL,
   ts REAL NOT NULL,
   kind TEXT NOT NULL,
+  /* info / warn / error。事件流面板要能只看告警，别让详情里塞 */
+  level TEXT DEFAULT 'info',
   target_type TEXT,
   url TEXT,
   detail TEXT
 );
 
 CREATE INDEX IF NOT EXISTS ix_events_inst_ts ON events (inst, ts);
+
+/*
+ * WebSocket / SSE 的帧。握手本身还是 requests 表里的一行（resourceType=WebSocket），
+ * 这里只放「握手之后双向跑的东西」—— 那部分 CDP 只在帧事件里给，别处拿不到。
+ * payload 对二进制帧是 base64（CDP 的约定），用 binary 列标出来，读的人不用猜。
+ */
+CREATE TABLE IF NOT EXISTS ws_frames (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  inst INTEGER NOT NULL,
+  seq INTEGER,
+  ts REAL NOT NULL,
+  request_id TEXT,
+  url TEXT,
+  direction TEXT NOT NULL,
+  opcode INTEGER,
+  payload TEXT,
+  size INTEGER,
+  truncated INTEGER DEFAULT 0,
+  binary INTEGER DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS ix_ws_inst_id ON ws_frames (inst, id);
+CREATE INDEX IF NOT EXISTS ix_ws_req ON ws_frames (inst, request_id);
+
+/*
+ * 接口契约快照。json 列存的是整份契约（端点 + 状态码 + 字段表 + 响应形状），
+ * 回归时拿它和「当前」比出增删 —— 存结构化查询条件而不是原始行，
+ * 是因为契约的意义就是「压缩成可比对的形式」。
+ */
+CREATE TABLE IF NOT EXISTS contracts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  label TEXT,
+  inst INTEGER,
+  created_at INTEGER NOT NULL,
+  json TEXT NOT NULL
+);
+
+/*
+ * Cookie 罐的镜像。**权威来源是浏览器**（Storage.getCookies），这里只是把每次对账的
+ * 结果留一份，好让 agent 在浏览器已经关了的时候还能查、还能做跨会话对比。
+ *
+ * 主键用 domain|path|name|partition 而不是 id：同一条 cookie 被改写时应该原地更新
+ * （change_count +1），而不是多出一行 —— 「现在罐里有什么」和「历史上变过几次」
+ * 是两个问题，前者靠这张表，后者靠事件流。
+ */
+CREATE TABLE IF NOT EXISTS cookies (
+  key TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  domain TEXT NOT NULL,
+  host TEXT NOT NULL,
+  path TEXT,
+  value TEXT,
+  value_len INTEGER DEFAULT 0,
+  trunc INTEGER DEFAULT 0,
+  expires REAL,
+  session INTEGER DEFAULT 0,
+  secure INTEGER DEFAULT 0,
+  http_only INTEGER DEFAULT 0,
+  same_site TEXT,
+  priority TEXT,
+  source_scheme TEXT,
+  source_port INTEGER,
+  partition_key TEXT,
+  size INTEGER DEFAULT 0,
+  first_seen INTEGER NOT NULL,
+  last_seen INTEGER NOT NULL,
+  first_inst INTEGER,
+  last_inst INTEGER,
+  change_count INTEGER DEFAULT 1,
+  sent_count INTEGER DEFAULT 0,
+  sent_hosts TEXT,
+  cross_site INTEGER DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS ix_cookies_domain ON cookies (domain);
+CREATE INDEX IF NOT EXISTS ix_cookies_host ON cookies (host);
+CREATE INDEX IF NOT EXISTS ix_cookies_name ON cookies (name);
+CREATE INDEX IF NOT EXISTS ix_cookies_size ON cookies (size);
+
+/*
+ * 站点资源（按 origin 一行，覆盖式更新）。
+ * detail 存整份明细的 JSON（localStorage 键值 / IndexedDB 结构 / 缓存列表 / SW 注册），
+ * 列出来的那几个数字是为了让「总览」不用把 detail 全解一遍 —— 总览要扫几百个 origin。
+ */
+CREATE TABLE IF NOT EXISTS site_origins (
+  origin TEXT PRIMARY KEY,
+  first_seen INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  last_inst INTEGER,
+  cookie_count INTEGER DEFAULT 0,
+  local_count INTEGER DEFAULT 0,
+  local_bytes INTEGER DEFAULT 0,
+  session_count INTEGER DEFAULT 0,
+  session_bytes INTEGER DEFAULT 0,
+  idb_names TEXT,
+  idb_stores INTEGER DEFAULT 0,
+  cache_names TEXT,
+  cache_entries INTEGER DEFAULT 0,
+  sw_count INTEGER DEFAULT 0,
+  usage_bytes INTEGER,
+  quota_bytes INTEGER,
+  usage_breakdown TEXT,
+  detail TEXT
+);
+
+/*
+ * 站点资源快照。和契约快照一个道理：拍一份、改点东西、再拍一份，diff 出「多了什么」。
+ * 存的是站点清单的全量 JSON，不是查询条件 —— 站点资源不像请求那样有个天然的过滤口径。
+ */
+CREATE TABLE IF NOT EXISTS site_snapshots (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  label TEXT,
+  inst INTEGER,
+  created_at INTEGER NOT NULL,
+  json TEXT NOT NULL
+);
 `
 
 const REQUEST_COLUMNS = [
@@ -258,6 +376,8 @@ function openDatabase(dbPath) {
   ensureColumn(handle, 'requests', 'initiator_stack', 'TEXT')
   // P5：老库没有代理那几列。CREATE TABLE IF NOT EXISTS 不会补列，必须显式迁移
   for (const [column, decl] of PROXY_COLUMNS) ensureColumn(handle, 'requests', column, decl)
+  // v7：事件流加了 level（info/warn/error），老库的 events 没有这一列
+  ensureColumn(handle, 'events', 'level', "TEXT DEFAULT 'info'")
   handle
     .prepare('INSERT INTO meta (k, v) VALUES (?, ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v')
     .run('schema_version', String(SCHEMA_VERSION))
@@ -272,6 +392,36 @@ function ensureColumn(handle, table, column, declaration) {
 
 function buildStatements() {
   return {
+    /* 站点资源：cookie 罐的四条基本操作 */
+    insertCookie: db.prepare(
+      'INSERT INTO cookies (key, name, domain, host, path, value, value_len, trunc, expires, session, secure, ' +
+        'http_only, same_site, priority, source_scheme, source_port, partition_key, size, first_seen, last_seen, ' +
+        'first_inst, last_inst, change_count) VALUES (' +
+        new Array(23).fill('?').join(', ') + ')'
+    ),
+    updateCookie: db.prepare(
+      'UPDATE cookies SET value = ?, value_len = ?, trunc = ?, expires = ?, session = ?, secure = ?, http_only = ?, ' +
+        'same_site = ?, priority = ?, source_scheme = ?, source_port = ?, partition_key = ?, size = ?, ' +
+        'last_seen = ?, last_inst = ?, change_count = change_count + 1, host = ? WHERE key = ?'
+    ),
+    touchCookie: db.prepare('UPDATE cookies SET last_seen = ?, last_inst = ? WHERE key = ?'),
+    deleteCookie: db.prepare('DELETE FROM cookies WHERE key = ?'),
+    cookieSent: db.prepare('UPDATE cookies SET sent_count = ?, sent_hosts = ?, cross_site = ? WHERE key = ?'),
+    upsertSiteOrigin: db.prepare(
+      'INSERT INTO site_origins (origin, first_seen, updated_at, last_inst, cookie_count, local_count, local_bytes, ' +
+        'session_count, session_bytes, idb_names, idb_stores, cache_names, cache_entries, sw_count, usage_bytes, ' +
+        'quota_bytes, usage_breakdown, detail) VALUES (' +
+        new Array(18).fill('?').join(', ') + ') ' +
+        'ON CONFLICT(origin) DO UPDATE SET updated_at = excluded.updated_at, last_inst = excluded.last_inst, ' +
+        'cookie_count = excluded.cookie_count, local_count = excluded.local_count, local_bytes = excluded.local_bytes, ' +
+        'session_count = excluded.session_count, session_bytes = excluded.session_bytes, idb_names = excluded.idb_names, ' +
+        'idb_stores = excluded.idb_stores, cache_names = excluded.cache_names, cache_entries = excluded.cache_entries, ' +
+        'sw_count = excluded.sw_count, usage_bytes = excluded.usage_bytes, quota_bytes = excluded.quota_bytes, ' +
+        'usage_breakdown = excluded.usage_breakdown, detail = excluded.detail'
+    ),
+    insertSiteSnapshot: db.prepare(
+      'INSERT INTO site_snapshots (label, inst, created_at, json) VALUES (?, ?, ?, ?)'
+    ),
     insertRequest: db.prepare(INSERT_REQUEST_SQL),
     countInstRequests: db.prepare('SELECT COUNT(*) AS c FROM requests WHERE inst = ?'),
     setBody: db.prepare(
@@ -305,7 +455,11 @@ function buildStatements() {
         'ON CONFLICT(inst, hash) DO UPDATE SET seen_count = seen_count + 1'
     ),
     insertEvent: db.prepare(
-      'INSERT INTO events (inst, ts, kind, target_type, url, detail) VALUES (?, ?, ?, ?, ?, ?)'
+      'INSERT INTO events (inst, ts, kind, level, target_type, url, detail) VALUES (?, ?, ?, ?, ?, ?, ?)'
+    ),
+    insertWsFrame: db.prepare(
+      'INSERT INTO ws_frames (inst, seq, ts, request_id, url, direction, opcode, payload, size, truncated, binary) ' +
+        'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
     ),
     bodyBudget: db.prepare(
       'SELECT COUNT(*) AS n, COALESCE(SUM(size), 0) AS bytes FROM bodies WHERE stored = 1'
@@ -681,6 +835,2330 @@ function scriptStats(args) {
   }
 }
 
+/* ==========================================================================
+ * 分析层：事件流 / WebSocket / 接口画像 / 调用图 / 关联 / 导出 / 契约回归
+ *
+ * 三条共同约定：
+ *   1) 只读。这一层不写业务表（契约快照除外，它有自己一张表）——
+ *      分析结果坏了可以随时重算，不给它污染采集数据的机会。
+ *   2) 上限显式。每次扫描都带 maxRows，超了如实报 truncated：
+ *      「少看了一眼」和「看全了」必须在结果里分得清。
+ *   3) 单位进字段名（*Ms / *Bytes / *Count）。agent 拿到的数字要能直接用。
+ * ======================================================================== */
+
+/** 一次分析默认扫多少行。它同时是「这次 RPC 要花多久」的总闸门 */
+const ANALYZE_ROWS_DEFAULT = 20000
+const ANALYZE_ROWS_MAX = 100000
+/** 路径模板最多保留几段，超长路径只做前缀 */
+const TEMPLATE_MAX_SEGMENTS = 8
+/** 每个 query / body 字段最多留几个样本取值 */
+const VALUE_SAMPLES_PER_KEY = 6
+/** 一次返回的端点 / 节点上限 */
+const LIST_LIMIT_MAX = 1000
+/** 参与 schema 推断的单条 body 上限 */
+const SCHEMA_SAMPLE_BYTES = 256 * 1024
+/** 导出目录：放在库文件旁边，跟着数据目录一起被备份或清理 */
+const EXPORT_DIR_NAME = 'exports'
+/** HAR 里的 creator 字段。写死成常量，是给下游工具认「这是谁导的」 */
+const EXPORT_CREATOR = { name: 'chromium-monitor', version: '0.1.0' }
+
+function clampInt(value, fallback, min, max) {
+  const n = Number(value)
+  if (!Number.isFinite(n)) return fallback
+  return Math.min(Math.max(Math.trunc(n), min), max)
+}
+
+function bumpMap(map, key, amount = 1) {
+  if (key === undefined || key === null || key === '') return
+  map.set(key, (map.get(key) ?? 0) + amount)
+}
+
+/** Map 计数 → 排序后的行。排序稳定（同计数按名字），两次调用结果不会飘 */
+function mapRows(map, limit = 30) {
+  return [...map.entries()]
+    .map(([key, count]) => ({ key, count }))
+    .sort((a, b) => b.count - a.count || String(a.key).localeCompare(String(b.key)))
+    .slice(0, limit)
+}
+
+function decodeLoose(text) {
+  try {
+    return decodeURIComponent(String(text).replace(/\+/g, ' '))
+  } catch {
+    return String(text)
+  }
+}
+
+/**
+ * 路径模板化。
+ *
+ * 接口画像要按「同一个接口」聚合，而 REST 路径里带的是实例 id；
+ * 不归一化的话每个用户、每条消息都是一个独立端点，画像就散了。
+ * 只做保守替换：宁可少归一（多出两个模板），也不要错归一
+ * （把 /users/me 和 /users/1 并成一个，那种分析结论是错的）。
+ */
+function templateSegment(segment) {
+  if (!segment) return segment
+  if (/^[0-9]+$/.test(segment)) return '{int}'
+  if (/^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(segment)) return '{uuid}'
+  if (/^[0-9a-fA-F]{16,}$/.test(segment)) return '{hex}'
+  if (/^[0-9]{4}-[0-9]{2}(-[0-9]{2})?/.test(segment)) return '{date}'
+  if (segment.length >= 20 && /^[A-Za-z0-9_~+=-]+$/.test(segment)) return '{token}'
+  // bundle.8f3a2b1c.js 这类：只把中间那段 hash 换掉
+  return segment.replace(/\.([0-9a-fA-F]{8,})\./, '.{hash}.')
+}
+
+function templatePath(pathname) {
+  const raw = pathname || '/'
+  const parts = raw.split('/')
+  const out = []
+  for (let i = 0; i < parts.length && i < TEMPLATE_MAX_SEGMENTS; i++) out.push(templateSegment(parts[i]))
+  if (parts.length > out.length) out.push('...')
+  return out.join('/') || '/'
+}
+
+function endpointKeyOf(method, host, template) {
+  return String(method || 'GET').toUpperCase() + ' ' + (host || '') + template
+}
+
+function parseQueryPairs(query) {
+  const out = []
+  if (!query) return out
+  for (const pair of String(query).split('&')) {
+    if (!pair) continue
+    const eq = pair.indexOf('=')
+    out.push([
+      decodeLoose(eq === -1 ? pair : pair.slice(0, eq)),
+      eq === -1 ? '' : decodeLoose(pair.slice(eq + 1))
+    ])
+  }
+  return out
+}
+
+function isJsonMime(mime) {
+  return typeof mime === 'string' && mime.toLowerCase().includes('json')
+}
+
+/** 百分位。durations 必须已排序；空数组给 null，别用 0 冒充「很快」 */
+function percentile(sorted, p) {
+  if (!sorted || sorted.length === 0) return null
+  const index = Math.min(sorted.length - 1, Math.max(0, Math.ceil((p / 100) * sorted.length) - 1))
+  return sorted[index]
+}
+
+/* ------------------------------------------------------------ 形状推断 */
+
+/**
+ * JSON → 结构化形状。画像要回答的是「这个接口返回的结构稳不稳」，
+ * 所以数组只看元素形状的合并，对象只记字段名与类型的合并 + 出现次数。
+ * 深度和宽度都设上限：一份 5MB 的响应不能把一次 RPC 拖成秒级。
+ */
+function inferSchema(value, depth = 0) {
+  if (value === null) return { t: 'null' }
+  if (Array.isArray(value)) {
+    let items = null
+    if (depth < 6) {
+      for (const item of value.slice(0, 16)) {
+        const one = inferSchema(item, depth + 1)
+        items = items ? mergeSchema(items, one) : one
+      }
+    }
+    return { t: 'array', items, len: value.length }
+  }
+  const kind = typeof value
+  if (kind === 'object') {
+    const fields = {}
+    if (depth < 6) {
+      for (const [key, item] of Object.entries(value)) {
+        fields[key] = { ...inferSchema(item, depth + 1), seen: 1 }
+      }
+    }
+    return { t: 'object', count: 1, fields }
+  }
+  if (kind === 'number') return { t: Number.isInteger(value) ? 'int' : 'float' }
+  if (kind === 'boolean') return { t: 'bool' }
+  if (kind === 'string') return { t: 'string' }
+  return { t: 'unknown' }
+}
+
+/** 两份形状合并。类型不同退化成 union，而不是随便挑一个 —— 类型漂移是重要信号 */
+function mergeSchema(a, b) {
+  if (!a) return b
+  if (!b) return a
+  if (a.t !== b.t) {
+    const of = []
+    for (const one of [a, b]) {
+      if (one.t === 'union') for (const item of one.of) of.push(item)
+      else of.push(one)
+    }
+    const uniq = []
+    for (const item of of) if (!uniq.some((other) => other.t === item.t)) uniq.push(item)
+    return { t: 'union', of: uniq.sort((x, y) => x.t.localeCompare(y.t)) }
+  }
+  if (a.t === 'object') {
+    const fields = {}
+    const keys = new Set([...Object.keys(a.fields || {}), ...Object.keys(b.fields || {})])
+    for (const key of keys) {
+      const left = a.fields?.[key]
+      const right = b.fields?.[key]
+      const merged = { ...(left && right ? mergeSchema(left, right) : left || right) }
+      merged.seen = (left?.seen ?? 0) + (right?.seen ?? 0)
+      fields[key] = merged
+    }
+    return { t: 'object', count: (a.count ?? 1) + (b.count ?? 1), fields }
+  }
+  if (a.t === 'array') {
+    return {
+      t: 'array',
+      items: a.items && b.items ? mergeSchema(a.items, b.items) : a.items || b.items || null,
+      len: Math.max(a.len ?? 0, b.len ?? 0)
+    }
+  }
+  return { ...a }
+}
+/**
+ * 形状 → 扁平路径表。契约回归比对的就是这张表（字段增删 / 类型变化）。
+ *
+ * 每条路径只出现一次：optional 由父层算出来再往下传。早先父层推一条、
+ * 递归又推一条，同一字段会以「有 optional」和「没 optional」两种样子出现两次，
+ * 下游按 path 建索引时谁覆盖谁全看顺序。
+ */
+function schemaToPaths(schema, prefix = '', out = [], optional = false) {
+  if (!schema) return out
+  if (schema.t === 'object') {
+    for (const [key, child] of Object.entries(schema.fields || {})) {
+      const path = prefix ? prefix + '.' + key : key
+      // seen 少于样本数 = 不是每个样本里都有。契约里「必现」和「可选」是两回事。
+      // 父层已经判成可选时得并上（or）—— 不然 bonus.deep 这种「整个 bonus 只在一半样本里」
+      // 的字段会被子层自己的 seen==count 抹成必现，契约回归就漏报
+      schemaToPaths(child, path, out, optional || (child.seen ?? 0) < (schema.count ?? 1))
+    }
+    return out
+  }
+  if (schema.t === 'array') {
+    const path = prefix ? prefix + '[]' : '[]'
+    out.push({ path, type: 'array', optional })
+    if (schema.items) schemaToPaths(schema.items, path, out, optional)
+    return out
+  }
+  out.push({ path: prefix || '(root)', type: schema.t, optional })
+  return out
+}
+
+/** 两份形状比出增删与类型漂移。这是契约回归的核心判据 */
+function diffSchema(base, current) {
+  const before = new Map(schemaToPaths(base).map((item) => [item.path, item]))
+  const after = new Map(schemaToPaths(current).map((item) => [item.path, item]))
+  const added = []
+  const removed = []
+  const typeChanged = []
+  for (const [path, item] of after) {
+    if (!before.has(path)) added.push(item)
+    else if (before.get(path).type !== item.type) {
+      typeChanged.push({ path, from: before.get(path).type, to: item.type })
+    }
+  }
+  for (const [path, item] of before) if (!after.has(path)) removed.push(item)
+  return { added, removed, typeChanged }
+}
+
+/* -------------------------------------------------------- 画像的原料 */
+
+/**
+ * req_body 是一段字符串。只做三种识别：JSON、表单、原样。
+ * 认不出来本身也是信息，记成 (raw) —— 不能因为解析失败就当没这个 body。
+ */
+function bodyFieldKind(text) {
+  const trimmed = text.trim()
+  if (trimmed.startsWith('{') || trimmed.startsWith('[')) return 'json'
+  if (trimmed.length > 0 && trimmed.length < 8192 && /^[^=&]+=([^&]*)(&[^=&]+=([^&]*))*$/.test(trimmed)) {
+    return 'form'
+  }
+  return 'raw'
+}
+
+/** 字段取值分布。样本只留前几个不同值 —— 画像看的是「长什么样」，不是全量数据 */
+function bumpField(fields, name, value, total) {
+  let slot = fields.get(name)
+  if (!slot) {
+    slot = { count: 0, seen: 0, values: [] }
+    fields.set(name, slot)
+  }
+  slot.count += 1
+  const text = typeof value === 'string' ? value : value === undefined ? '' : JSON.stringify(value)
+  if (text !== undefined && text !== '') {
+    const clipped = text.length > 120 ? text.slice(0, 120) + '…' : text
+    if (slot.values.length < VALUE_SAMPLES_PER_KEY && !slot.values.includes(clipped)) slot.values.push(clipped)
+  }
+}
+
+function fieldsToRows(fields, sampleTotal, limit = 40) {
+  return [...fields.entries()]
+    .map(([name, slot]) => ({
+      name,
+      count: slot.count,
+      // 必填 = 每一次「有 body/query 的样本」里都出现
+      required: sampleTotal > 0 && slot.count >= sampleTotal,
+      values: slot.values
+    }))
+    .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name))
+    .slice(0, limit)
+}
+
+/** 扫一批请求行。maxRows 之外的行数会如实报出来 */
+function scanRequests(inst, filter, columns, maxRows) {
+  const where = buildWhere({ ...(filter || {}), inst })
+  const limit = clampInt(maxRows, ANALYZE_ROWS_DEFAULT, 1, ANALYZE_ROWS_MAX)
+  const total = db.prepare('SELECT COUNT(*) AS c FROM requests ' + where.sql).get(...where.params).c
+  const rows = db
+    .prepare(
+      'SELECT ' + columns.join(', ') + ' FROM requests ' + where.sql +
+        ' ORDER BY start_ts DESC, seq DESC LIMIT ?'
+    )
+    .all(...where.params, limit)
+  // 上面按时间倒序取「最近的 N 行」，这里翻回时间正序 —— 调用方按时间累积状态才自然
+  rows.reverse()
+  return { rows, total, truncated: total > rows.length }
+}
+
+const ENDPOINT_SCAN_COLUMNS = [
+  'seq', 'method', 'host', 'path', 'query', 'status', 'duration_ms', 'ttfb_ms',
+  'encoded_len', 'decoded_len', 'mime_type', 'resource_type', 'url', 'from_cache',
+  'from_sw', 'failed', 'req_body', 'body_hash', 'body_state', 'body_size',
+  'start_ts', 'target_type', 'frame_url', 'initiator_stack', 'initiator_type',
+  // request_id 是重定向链的分组键（同一 requestId 的多跳），漏了它关联分析就只能瞎猜
+  'request_id'
+]
+
+const EXPORT_SCAN_COLUMNS = ENDPOINT_SCAN_COLUMNS.concat([
+  'inst', 'request_id', 'session_id', 'protocol', 'remote_ip', 'remote_port',
+  'status_text', 'req_headers', 'resp_headers', 'end_ts', 'canceled', 'body_trunc',
+  'merge_state', 'proxy_flow_id', 'net_dns_ms', 'net_connect_ms', 'net_tls_ms',
+  'upstream_ip', 'tls_version', 'tls_cipher', 'upstream_alpn', 'scheme'
+])
+
+function newEndpointSlot(key) {
+  return {
+    key,
+    calls: 0,
+    urls: new Set(),
+    statuses: new Map(),
+    mimeTypes: new Map(),
+    resourceTypes: new Map(),
+    targetTypes: new Map(),
+    durations: [],
+    bytes: 0,
+    decodedBytes: 0,
+    failed: 0,
+    cached: 0,
+    fromSw: 0,
+    withBody: 0,
+    queryFields: new Map(),
+    querySamples: 0,
+    bodyFields: new Map(),
+    bodySamples: 0,
+    bodyKinds: new Map(),
+    intervals: [],
+    lastTs: null,
+    firstTs: null,
+    samples: []
+  }
+}
+
+function addRowToSlot(slot, row) {
+  slot.calls += 1
+  if (row.url) slot.urls.add(row.url)
+  bumpMap(slot.statuses, row.status === null || row.status === undefined ? '(pending)' : String(row.status))
+  if (row.mime_type) bumpMap(slot.mimeTypes, row.mime_type)
+  if (row.resource_type) bumpMap(slot.resourceTypes, row.resource_type)
+  if (row.target_type) bumpMap(slot.targetTypes, row.target_type)
+  if (typeof row.duration_ms === 'number') slot.durations.push(row.duration_ms)
+  slot.bytes += Number(row.encoded_len) || 0
+  slot.decodedBytes += Number(row.decoded_len) || 0
+  if (row.failed) slot.failed += 1
+  if (row.from_cache) slot.cached += 1
+  if (row.from_sw) slot.fromSw += 1
+  if (row.body_state === 'stored') slot.withBody += 1
+
+  const pairs = parseQueryPairs(row.query)
+  if (pairs.length > 0) {
+    slot.querySamples += 1
+    for (const [name, value] of pairs) bumpField(slot.queryFields, name, value)
+  }
+
+  const slot2 = row.req_body ? String(row.req_body) : ''
+  if (slot2) {
+    const kind = bodyFieldKind(slot2)
+    bumpMap(slot.bodyKinds, kind)
+    try {
+      if (kind === 'json') {
+        const parsed = JSON.parse(slot2)
+        slot.bodySamples += 1
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+          for (const [key, value] of Object.entries(parsed)) bumpField(slot.bodyFields, key, value)
+        } else {
+          bumpField(slot.bodyFields, Array.isArray(parsed) ? '(数组)' : '(标量)', Array.isArray(parsed) ? parsed.length + ' 项' : parsed)
+        }
+      } else if (kind === 'form') {
+        slot.bodySamples += 1
+        for (const [name, value] of parseQueryPairs(slot2)) bumpField(slot.bodyFields, name, value)
+      } else {
+        bumpField(slot.bodyFields, '(raw)', slot2.slice(0, 120))
+      }
+    } catch {
+      bumpField(slot.bodyFields, '(raw)', slot2.slice(0, 120))
+    }
+  }
+
+  if (typeof row.start_ts === 'number') {
+    if (slot.firstTs === null || row.start_ts < slot.firstTs) slot.firstTs = row.start_ts
+    if (slot.lastTs === null || row.start_ts > slot.lastTs) slot.lastTs = row.start_ts
+    slot.intervals.push(row.start_ts)
+  }
+  if (slot.samples.length < 20) slot.samples.push(row.seq)
+}
+
+/**
+ * 调用节奏：看的是「这个接口是不是在被轮询」。
+ * 用中位间隔而不是平均间隔 —— 平均值会被一次长暂停彻底带偏。
+ */
+function callRhythm(intervals) {
+  if (!intervals || intervals.length < 3) return null
+  const sorted = intervals.slice().sort((a, b) => a - b)
+  const gaps = []
+  for (let i = 1; i < sorted.length; i++) gaps.push(sorted[i] - sorted[i - 1])
+  if (gaps.length === 0) return null
+  gaps.sort((a, b) => a - b)
+  const median = gaps[Math.floor(gaps.length / 2)]
+  return { medianGapMs: Math.round(median), spanMs: Math.round(sorted[sorted.length - 1] - sorted[0]) }
+}
+
+function finalizeEndpointSlot(slot) {
+  const durations = slot.durations.slice().sort((a, b) => a - b)
+  return {
+    key: slot.key,
+    calls: slot.calls,
+    distinctUrls: slot.urls.size,
+    sampleUrls: [...slot.urls].slice(0, 3),
+    samples: slot.samples.slice(0, 5),
+    statuses: mapRows(slot.statuses),
+    mimeTypes: mapRows(slot.mimeTypes, 5),
+    resourceTypes: mapRows(slot.resourceTypes, 5),
+    targetTypes: mapRows(slot.targetTypes, 5),
+    durationMs: {
+      p50: percentile(durations, 50),
+      p95: percentile(durations, 95),
+      min: durations.length ? durations[0] : null,
+      max: durations.length ? durations[durations.length - 1] : null
+    },
+    bytes: slot.bytes,
+    decodedBytes: slot.decodedBytes,
+    failed: slot.failed,
+    cached: slot.cached,
+    fromSw: slot.fromSw,
+    withBody: slot.withBody,
+    query: fieldsToRows(slot.queryFields, slot.querySamples),
+    requestBody: { samples: slot.bodySamples, kinds: mapRows(slot.bodyKinds, 5), fields: fieldsToRows(slot.bodyFields, slot.bodySamples) },
+    rhythm: callRhythm(slot.intervals),
+    firstTs: slot.firstTs,
+    lastTs: slot.lastTs
+  }
+}
+
+/** 一批行 → 端点画像。所有画像类操作都从这里出，保证口径一致 */
+function buildEndpointSlots(rows) {
+  const slots = new Map()
+  for (const row of rows) {
+    const key = endpointKeyOf(row.method, row.host, templatePath(row.path))
+    let slot = slots.get(key)
+    if (!slot) {
+      slot = newEndpointSlot(key)
+      slots.set(key, slot)
+    }
+    addRowToSlot(slot, row)
+  }
+  return slots
+}
+/* ============================================================ 事件流查询 */
+
+/** detail 列存的是字符串；能解析成结构就交结构出去，agent 少一层解析 */
+function parseDetail(raw) {
+  if (typeof raw !== 'string' || raw.length === 0) return raw ?? null
+  const first = raw[0]
+  if (first !== '{' && first !== '[') return raw
+  try {
+    return JSON.parse(raw)
+  } catch {
+    return raw
+  }
+}
+
+function toEventRow(row) {
+  return {
+    id: row.id,
+    ts: row.ts,
+    kind: row.kind,
+    level: row.level ?? 'info',
+    targetType: row.target_type ?? null,
+    url: row.url ?? null,
+    detail: parseDetail(row.detail)
+  }
+}
+
+function eventFilter(args) {
+  const clauses = ['inst = ?']
+  const params = [norm(args.inst)]
+  const since = Number(args.since)
+  if (Number.isFinite(since)) {
+    clauses.push('id > ?')
+    params.push(since)
+  }
+  const until = Number(args.until)
+  if (Number.isFinite(until)) {
+    clauses.push('id <= ?')
+    params.push(until)
+  }
+  const kinds = Array.isArray(args.kinds) ? args.kinds.filter(Boolean) : args.kind ? [args.kind] : []
+  if (kinds.length > 0) {
+    clauses.push('kind IN (' + kinds.map(() => '?').join(',') + ')')
+    params.push(...kinds.map((kind) => String(kind)))
+  }
+  if (args.level) {
+    clauses.push('level = ?')
+    params.push(String(args.level))
+  }
+  if (args.targetType) {
+    clauses.push('target_type = ?')
+    params.push(String(args.targetType))
+  }
+  if (args.search) {
+    const like = '%' + args.search + '%'
+    clauses.push('(url LIKE ? OR detail LIKE ? OR kind LIKE ?)')
+    params.push(like, like, like)
+  }
+  return { sql: 'WHERE ' + clauses.join(' AND '), params }
+}
+
+/**
+ * 事件流查询。增量拉取的契约是 `since` = 上一次拿到的最后一条 id：
+ * id 是自增主键，天然单调 + 不会因为时钟回拨而乱序 —— 时间戳做不到这一点。
+ */
+function queryEvents(args) {
+  const where = eventFilter(args)
+  const limit = clampInt(args.limit, 200, 1, 5000)
+  const desc = args.order === 'desc'
+  const rows = db
+    .prepare(
+      'SELECT id, ts, kind, level, target_type, url, detail FROM events ' + where.sql +
+        ' ORDER BY id ' + (desc ? 'DESC' : 'ASC') + ' LIMIT ?'
+    )
+    .all(...where.params, limit)
+  // 统一按 id 升序交出去：调用方拿到的批次不该因为 order 改变行的顺序语义
+  rows.sort((a, b) => a.id - b.id)
+  const inst = norm(args.inst)
+  const latest = db.prepare('SELECT COALESCE(MAX(id), 0) AS id FROM events WHERE inst = ?').get(inst).id
+  return {
+    rows: rows.map(toEventRow),
+    latest,
+    nextSince: rows.length > 0 ? rows[rows.length - 1].id : Number(args.since) || 0,
+    total: db.prepare('SELECT COUNT(*) AS c FROM events WHERE inst = ?').get(inst).c
+  }
+}
+
+function eventStats(args) {
+  const inst = norm(args.inst)
+  return {
+    rows: db
+      .prepare(
+        'SELECT kind, level, COUNT(*) AS count, MIN(ts) AS firstTs, MAX(ts) AS lastTs, ' +
+          'MAX(id) AS latestId FROM events WHERE inst = ? GROUP BY kind, level ORDER BY count DESC'
+      )
+      .all(inst),
+    latest: db.prepare('SELECT COALESCE(MAX(id), 0) AS id FROM events WHERE inst = ?').get(inst).id,
+    total: db.prepare('SELECT COUNT(*) AS c FROM events WHERE inst = ?').get(inst).c
+  }
+}
+
+/* ========================================================= WebSocket 帧 */
+
+const OPCODE_NAMES = {
+  0: 'continuation',
+  1: 'text',
+  2: 'binary',
+  8: 'close',
+  9: 'ping',
+  10: 'pong'
+}
+
+function queryWsFrames(args) {
+  const clauses = ['inst = ?']
+  const params = [norm(args.inst)]
+  const since = Number(args.since)
+  if (Number.isFinite(since)) {
+    clauses.push('id > ?')
+    params.push(since)
+  }
+  if (args.direction) {
+    clauses.push('direction = ?')
+    params.push(String(args.direction))
+  }
+  if (args.requestId) {
+    clauses.push('request_id = ?')
+    params.push(String(args.requestId))
+  }
+  const opcode = Number(args.opcode)
+  if (Number.isFinite(opcode)) {
+    clauses.push('opcode = ?')
+    params.push(opcode)
+  }
+  if (args.search) {
+    const like = '%' + args.search + '%'
+    clauses.push('(url LIKE ? OR payload LIKE ?)')
+    params.push(like, like)
+  }
+  const where = 'WHERE ' + clauses.join(' AND ')
+  const limit = clampInt(args.limit, 200, 1, 5000)
+  const rows = db
+    .prepare(
+      'SELECT id, seq, ts, request_id, url, direction, opcode, payload, size, truncated, binary ' +
+        'FROM ws_frames ' + where + ' ORDER BY id ' + (args.order === 'desc' ? 'DESC' : 'ASC') + ' LIMIT ?'
+    )
+    .all(...params, limit)
+  rows.sort((a, b) => a.id - b.id)
+  const inst = norm(args.inst)
+  const latest = db.prepare('SELECT COALESCE(MAX(id), 0) AS id FROM ws_frames WHERE inst = ?').get(inst).id
+  return {
+    rows: rows.map((row) => ({
+      id: row.id,
+      seq: row.seq,
+      ts: row.ts,
+      requestId: row.request_id,
+      url: row.url,
+      direction: row.direction,
+      opcode: row.opcode,
+      opcodeName: OPCODE_NAMES[row.opcode] ?? String(row.opcode),
+      binary: Boolean(row.binary),
+      size: row.size,
+      truncated: Boolean(row.truncated),
+      payload: row.payload
+    })),
+    latest,
+    nextSince: rows.length > 0 ? rows[rows.length - 1].id : Number(args.since) || 0,
+    total: db.prepare('SELECT COUNT(*) AS c FROM ws_frames WHERE inst = ?').get(inst).c
+  }
+}
+
+/** 按连接汇总。面板先列连接、点开再看帧，几千帧的会话才不会一上来就糊一屏 */
+function wsConnections(args) {
+  const inst = norm(args.inst)
+  const limit = clampInt(args.limit, 50, 1, 500)
+  const rows = db
+    .prepare(
+      'SELECT request_id AS requestId, url, ' +
+        'COUNT(*) AS frames, ' +
+        "SUM(CASE WHEN direction = 'sent' THEN 1 ELSE 0 END) AS sent, " +
+        "SUM(CASE WHEN direction = 'received' THEN 1 ELSE 0 END) AS received, " +
+        'SUM(CASE WHEN binary = 1 THEN 1 ELSE 0 END) AS binaryFrames, ' +
+        'SUM(CASE WHEN truncated = 1 THEN 1 ELSE 0 END) AS truncatedFrames, ' +
+        'COALESCE(SUM(size), 0) AS bytes, ' +
+        'MIN(ts) AS firstTs, MAX(ts) AS lastTs, MIN(seq) AS seq ' +
+        'FROM ws_frames WHERE inst = ? GROUP BY request_id, url ORDER BY MAX(ts) DESC LIMIT ?'
+    )
+    .all(inst, limit)
+  return { rows, total: rows.length }
+}
+/* ============================================================== 接口画像 */
+
+const ENDPOINT_SORTS = {
+  calls: (a, b) => b.calls - a.calls || a.key.localeCompare(b.key),
+  p95: (a, b) => (b.durationMs.p95 ?? 0) - (a.durationMs.p95 ?? 0) || a.key.localeCompare(b.key),
+  bytes: (a, b) => b.bytes - a.bytes || a.key.localeCompare(b.key),
+  failed: (a, b) => b.failed - a.failed || a.key.localeCompare(b.key),
+  recent: (a, b) => (b.lastTs ?? 0) - (a.lastTs ?? 0) || a.key.localeCompare(b.key),
+  name: (a, b) => a.key.localeCompare(b.key)
+}
+
+/** 按「方法 + 主机 + 路径模板」聚类，给出调用次数/耗时分布/字段分布 */
+function endpointProfiles(args) {
+  const inst = norm(args.inst)
+  const scan = scanRequests(inst, args.filter, ENDPOINT_SCAN_COLUMNS, args.maxRows)
+  const minCalls = clampInt(args.minCalls, 1, 1, Number.MAX_SAFE_INTEGER)
+  const list = [...buildEndpointSlots(scan.rows).values()]
+    .map(finalizeEndpointSlot)
+    .filter((item) => item.calls >= minCalls)
+  list.sort(ENDPOINT_SORTS[args.sort] ?? ENDPOINT_SORTS.calls)
+  const limit = clampInt(args.limit, 200, 1, LIST_LIMIT_MAX)
+  return {
+    endpoints: list.slice(0, limit),
+    matched: list.length,
+    scanned: scan.rows.length,
+    total: scan.total,
+    truncated: scan.truncated,
+    sort: ENDPOINT_SORTS[args.sort] ? args.sort : 'calls'
+  }
+}
+
+/**
+ * sqlite 的 blob 是 Uint8Array，不是 Buffer —— 对它调 .toString('utf8')
+ * 得到的是 "1,2,3" 这种逗号串，不是文本。这里统一包成 Buffer 再交出去，
+ * 免得每个调用点各错一遍（这个坑在 HAR、JSONL、schema 抽样上同时踩过）。
+ */
+function readBodyBytes(hash) {
+  const row = db.prepare('SELECT size, stored, blob FROM bodies WHERE hash = ?').get(norm(hash))
+  if (!row || !row.stored || !row.blob) return null
+  const raw = row.blob
+  const bytes = Buffer.isBuffer(raw)
+    ? raw
+    : Buffer.from(raw.buffer, raw.byteOffset, raw.byteLength)
+  return { bytes, size: row.size }
+}
+
+/**
+ * 从最近的若干条响应体推一份合并形状。
+ *
+ * 只吃 JSON：HTML/JS 推出来的「形状」没有契约价值，二进制更不行 ——
+ * 硬推只会得到一堆看着像字段的噪音。没样本时如实返回 null，别编一个 {}。
+ */
+function sampleResponseSchema(rows, limit) {
+  const shapes = []
+  let skipped = 0
+  for (let i = rows.length - 1; i >= 0 && shapes.length < limit; i--) {
+    const row = rows[i]
+    if (!isJsonMime(row.mime_type) || !row.body_hash) continue
+    const body = readBodyBytes(row.body_hash)
+    if (!body) {
+      skipped += 1
+      continue
+    }
+    if (body.size > SCHEMA_SAMPLE_BYTES) {
+      skipped += 1
+      continue
+    }
+    let value
+    try {
+      value = JSON.parse(body.bytes.toString('utf8'))
+    } catch {
+      skipped += 1
+      continue
+    }
+    shapes.push(inferSchema(value))
+  }
+  let schema = null
+  for (const shape of shapes) schema = schema ? mergeSchema(schema, shape) : shape
+  return { schema, samples: shapes.length, skipped }
+}
+
+/** 请求体的形状：直接吃 req_body 字符串（JSON 才推） */
+function sampleRequestSchema(rows, limit) {
+  const shapes = []
+  for (let i = rows.length - 1; i >= 0 && shapes.length < limit; i--) {
+    const text = rows[i].req_body
+    if (!text || bodyFieldKind(String(text)) !== 'json') continue
+    try {
+      shapes.push(inferSchema(JSON.parse(String(text))))
+    } catch {
+      /* 声明是 JSON 但解析不了：不值得为它停下 */
+    }
+  }
+  let schema = null
+  for (const shape of shapes) schema = schema ? mergeSchema(schema, shape) : shape
+  return { schema, samples: shapes.length }
+}
+
+function endpointDetail(args) {
+  const inst = norm(args.inst)
+  const key = String(args.key ?? '')
+  if (!key) return { key, found: false, error: 'key 必填，形如 "GET api.example.com/api/user/{int}"（从 endpointProfiles 拿）' }
+  // 这里必须扫全量而不是走 maxRows 的默认值：端点详情是「点进去看」的场景，
+  // 少一行都可能让 p95 和字段分布对不上画像列表里的数字
+  const scan = scanRequests(inst, args.filter, ENDPOINT_SCAN_COLUMNS, args.maxRows ?? ANALYZE_ROWS_MAX)
+  const rows = []
+  for (const row of scan.rows) {
+    if (endpointKeyOf(row.method, row.host, templatePath(row.path)) === key) rows.push(row)
+  }
+  if (rows.length === 0) return { key, found: false, calls: 0, scanned: scan.rows.length, truncated: scan.truncated }
+
+  const slots = buildEndpointSlots(rows)
+  const profile = finalizeEndpointSlot(slots.get(key))
+  const sampleLimit = clampInt(args.sampleLimit, 3, 1, 20)
+  const response = sampleResponseSchema(rows, sampleLimit)
+  const request = sampleRequestSchema(rows, sampleLimit)
+
+  const callLimit = clampInt(args.callLimit, 30, 1, 200)
+  const calls = []
+  for (let i = rows.length - 1; i >= 0 && calls.length < callLimit; i--) {
+    const row = rows[i]
+    calls.push({
+      seq: row.seq,
+      ts: row.start_ts,
+      url: row.url,
+      status: row.status,
+      durationMs: row.duration_ms,
+      ttfbMs: row.ttfb_ms,
+      bytes: row.encoded_len,
+      fromCache: Boolean(row.from_cache),
+      fromSw: Boolean(row.from_sw),
+      bodyState: row.body_state,
+      targetType: row.target_type,
+      failed: row.failed ?? null
+    })
+  }
+
+  return {
+    key,
+    found: true,
+    calls: calls.length,
+    totalCalls: rows.length,
+    profile,
+    recent: calls,
+    responseSchema: response.schema,
+    // 扁平字段表是给 agent 直接用的：嵌套形状要递归才能回答「有没有 foo.bar」
+    responseFields: schemaToPaths(response.schema),
+    responseSamples: response.samples,
+    responseSamplesSkipped: response.skipped,
+    requestSchema: request.schema,
+    requestSamples: request.samples,
+    truncated: scan.truncated
+  }
+}
+
+/* ================================================================ 调用图 */
+
+function hostOf(url) {
+  if (typeof url !== 'string' || url.length === 0) return null
+  const match = /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\/([^/?#]+)/.exec(url)
+  return match ? match[1] : null
+}
+
+function shortUrl(url, max = 90) {
+  if (typeof url !== 'string') return ''
+  return url.length > max ? url.slice(0, max) + '…' : url
+}
+
+/**
+ * 一条请求的「发起方」节点。
+ *
+ * 优先级：有 initiator.url（脚本或文档 URL）就用它；没有就用 frame_url；
+ * 再没有就只能按 initiator.type 归一类。把 XHR 的 initiator.type=script 直接
+ * 当节点会得到一个巨大的 "script" 中心节点 —— 那种图没有信息量。
+ */
+function initiatorNode(row) {
+  let info = null
+  if (row.initiator_stack) {
+    try {
+      info = JSON.parse(row.initiator_stack)
+    } catch {
+      info = null
+    }
+  }
+  const type = row.initiator_type || info?.type || 'other'
+  const frame = info?.frames?.[0]
+  const url = info?.url || frame?.url || ''
+  if (!url) {
+    if (row.frame_url) {
+      return { key: 'document|' + row.frame_url, kind: 'document', label: shortUrl(row.frame_url), url: row.frame_url }
+    }
+    return { key: 'kind|' + type, kind: type, label: '(' + type + ' 发起，无 URL)', url: null }
+  }
+  if (type === 'parser') {
+    return { key: 'document|' + (row.frame_url || url), kind: 'document', label: shortUrl(row.frame_url || url), url: row.frame_url || url }
+  }
+  if (type === 'script' || /\.m?js(\?|$)/.test(url)) {
+    return {
+      key: 'script|' + url,
+      kind: 'script',
+      label: shortUrl(url),
+      url,
+      functionName: frame?.functionName ? String(frame.functionName) : null
+    }
+  }
+  return { key: 'url|' + url, kind: type, label: shortUrl(url), url }
+}
+
+/** 并查集：把「谁触发谁」连成的无向连通分量当作一个功能簇 */
+function findRoot(parents, key) {
+  let root = key
+  while (parents.get(root) !== root) root = parents.get(root)
+  let cursor = key
+  while (parents.get(cursor) !== root) {
+    const next = parents.get(cursor)
+    parents.set(cursor, root)
+    cursor = next
+  }
+  return root
+}
+
+function requestGraph(args) {
+  const inst = norm(args.inst)
+  const scan = scanRequests(inst, args.filter, ENDPOINT_SCAN_COLUMNS, args.maxRows)
+  const nodes = new Map()
+  const edges = new Map()
+  const ensure = (key, init) => {
+    let node = nodes.get(key)
+    if (!node) {
+      node = {
+        key,
+        kind: init.kind,
+        label: init.label,
+        url: init.url ?? null,
+        host: init.host ?? null,
+        method: init.method ? String(init.method).toUpperCase() : null,
+        functionName: init.functionName ?? null,
+        outCalls: 0,
+        inCalls: 0
+      }
+      nodes.set(key, node)
+    }
+    return node
+  }
+
+  for (const row of scan.rows) {
+    const template = templatePath(row.path)
+    const method = String(row.method || 'GET').toUpperCase()
+    const targetKey = 'endpoint|' + endpointKeyOf(method, row.host, template)
+    ensure(targetKey, { kind: 'endpoint', label: method + ' ' + (row.host || '') + template, host: row.host, method }).inCalls += 1
+
+    const source = initiatorNode(row)
+    ensure(source.key, source).outCalls += 1
+
+    const edgeKey = source.key + '\u0000' + targetKey
+    let edge = edges.get(edgeKey)
+    if (!edge) {
+      edge = { from: source.key, to: targetKey, count: 0, failures: 0, durations: [], kinds: new Map(), samples: [], firstTs: null, lastTs: null }
+      edges.set(edgeKey, edge)
+    }
+    edge.count += 1
+    if (row.failed) edge.failures += 1
+    if (typeof row.duration_ms === 'number') edge.durations.push(row.duration_ms)
+    bumpMap(edge.kinds, row.initiator_type || source.kind)
+    if (edge.samples.length < 5) edge.samples.push(row.seq)
+    if (typeof row.start_ts === 'number') {
+      if (edge.firstTs === null || row.start_ts < edge.firstTs) edge.firstTs = row.start_ts
+      if (edge.lastTs === null || row.start_ts > edge.lastTs) edge.lastTs = row.start_ts
+    }
+  }
+
+  const maxNodes = clampInt(args.maxNodes, 300, 5, 5000)
+  let droppedNodes = 0
+  if (nodes.size > maxNodes) {
+    const ranked = [...nodes.values()].sort((a, b) => b.inCalls + b.outCalls - (a.inCalls + a.outCalls))
+    const keep = new Set(ranked.slice(0, maxNodes).map((node) => node.key))
+    for (const key of [...nodes.keys()]) {
+      if (!keep.has(key)) {
+        nodes.delete(key)
+        droppedNodes += 1
+      }
+    }
+  }
+
+  const finalEdges = []
+  for (const edge of edges.values()) {
+    if (!nodes.has(edge.from) || !nodes.has(edge.to)) continue
+    const durations = edge.durations.slice().sort((a, b) => a - b)
+    finalEdges.push({
+      from: edge.from,
+      to: edge.to,
+      count: edge.count,
+      failures: edge.failures,
+      avgMs: durations.length ? Math.round(durations.reduce((sum, value) => sum + value, 0) / durations.length) : null,
+      p95Ms: percentile(durations, 95),
+      initiatorTypes: mapRows(edge.kinds, 5),
+      samples: edge.samples,
+      firstTs: edge.firstTs,
+      lastTs: edge.lastTs
+    })
+  }
+  finalEdges.sort((a, b) => b.count - a.count)
+
+  // 连通分量：把互相关联的端点/脚本归成「功能簇」，是「关联分析」的落点
+  const parents = new Map()
+  for (const node of nodes.values()) parents.set(node.key, node.key)
+  for (const edge of finalEdges) {
+    const left = findRoot(parents, edge.from)
+    const right = findRoot(parents, edge.to)
+    if (left !== right) parents.set(left, right)
+  }
+  const grouped = new Map()
+  for (const node of nodes.values()) {
+    const root = findRoot(parents, node.key)
+    if (!grouped.has(root)) grouped.set(root, [])
+    grouped.get(root).push(node.key)
+  }
+  const clusters = [...grouped.values()]
+    .map((keys) => ({ size: keys.length, nodes: keys.slice(0, 40) }))
+    .sort((a, b) => b.size - a.size)
+    .slice(0, 20)
+
+  return {
+    nodes: [...nodes.values()],
+    edges: finalEdges,
+    clusters,
+    scanned: scan.rows.length,
+    total: scan.total,
+    truncated: scan.truncated,
+    droppedNodes
+  }
+}
+/* ============================================================== 关联分析 */
+
+/**
+ * 每刷新一次就变、又没有分析价值的 query 参数。不带这个名单的话
+ * 「共享参数」会被缓存击穿参数淹没，全是噪音。
+ */
+const PARAM_NOISE = new Set(['_', '_t', '_v', 'ts', 'timestamp', 'rand', 'random', 'nonce', 'callback', 'cb', '__x'])
+
+function relations(args) {
+  const inst = norm(args.inst)
+  const scan = scanRequests(inst, args.filter, ENDPOINT_SCAN_COLUMNS, args.maxRows)
+  const limit = clampInt(args.limit, 30, 1, 200)
+  const bodies = new Map()
+  const chains = new Map()
+  const links = new Map()
+  const params = new Map()
+
+  for (const row of scan.rows) {
+    const endpoint = endpointKeyOf(row.method, row.host, templatePath(row.path))
+    if (row.body_hash) {
+      let slot = bodies.get(row.body_hash)
+      if (!slot) {
+        slot = { hash: row.body_hash, refs: 0, size: row.body_size ?? null, urls: new Set(), endpoints: new Set(), seqs: [] }
+        bodies.set(row.body_hash, slot)
+      }
+      slot.refs += 1
+      if (row.url) slot.urls.add(row.url)
+      slot.endpoints.add(endpoint)
+      if (slot.seqs.length < 5) slot.seqs.push(row.seq)
+    }
+    if (row.request_id) {
+      let chain = chains.get(row.request_id)
+      if (!chain) {
+        chain = []
+        chains.set(row.request_id, chain)
+      }
+      chain.push(row)
+    }
+    const frameHost = hostOf(row.frame_url)
+    if (frameHost && row.host && frameHost !== row.host) {
+      let byHost = links.get(frameHost)
+      if (!byHost) {
+        byHost = new Map()
+        links.set(frameHost, byHost)
+      }
+      bumpMap(byHost, row.host)
+    }
+    for (const [name, value] of parseQueryPairs(row.query)) {
+      if (PARAM_NOISE.has(name.toLowerCase()) || value.length === 0 || value.length > 128) continue
+      const key = name + '=' + value
+      let slot = params.get(key)
+      if (!slot) {
+        if (params.size >= 20000) continue
+        slot = { name, value, endpoints: new Set(), hosts: new Set(), count: 0 }
+        params.set(key, slot)
+      }
+      slot.count += 1
+      slot.endpoints.add(endpoint)
+      if (row.host) slot.hosts.add(row.host)
+    }
+  }
+
+  const sharedBodies = [...bodies.values()]
+    .filter((slot) => slot.refs > 1)
+    .sort((a, b) => b.refs - a.refs)
+    .slice(0, limit)
+    .map((slot) => ({
+      hash: slot.hash,
+      refs: slot.refs,
+      size: slot.size,
+      distinctUrls: slot.urls.size,
+      sampleUrls: [...slot.urls].slice(0, 5),
+      endpoints: [...slot.endpoints].slice(0, 5),
+      samples: slot.seqs
+    }))
+
+  const redirectChains = [...chains.values()]
+    .filter((chain) => chain.length > 1)
+    .sort((a, b) => b.length - a.length)
+    .slice(0, limit)
+    .map((chain) => ({
+      requestId: chain[0].request_id,
+      hops: chain.length,
+      steps: chain.map((row) => ({ seq: row.seq, method: row.method, url: row.url, status: row.status }))
+    }))
+
+  const domainLinks = []
+  for (const [frameHost, byHost] of links) {
+    for (const [host, count] of byHost) domainLinks.push({ frameHost, host, count })
+  }
+  domainLinks.sort((a, b) => b.count - a.count)
+
+  const sharedParams = [...params.values()]
+    .filter((slot) => slot.endpoints.size >= 2 || slot.hosts.size >= 2)
+    .sort((a, b) => b.endpoints.size - a.endpoints.size || b.count - a.count)
+    .slice(0, limit)
+    .map((slot) => ({
+      name: slot.name,
+      value: slot.value,
+      count: slot.count,
+      endpoints: [...slot.endpoints].slice(0, 5),
+      endpointCount: slot.endpoints.size,
+      hosts: [...slot.hosts],
+      crossHost: slot.hosts.size > 1
+    }))
+
+  return {
+    sharedBodies,
+    redirectChains,
+    domainLinks: domainLinks.slice(0, limit),
+    sharedParams,
+    scanned: scan.rows.length,
+    total: scan.total,
+    truncated: scan.truncated
+  }
+}
+
+/* ================================================================= 导出 */
+
+function exportDir() {
+  const base = dbFilePath && dbFilePath !== ':memory:' ? dirname(dbFilePath) : '.'
+  const dir = join(base, EXPORT_DIR_NAME)
+  mkdirSync(dir, { recursive: true })
+  return dir
+}
+
+function stampText() {
+  return new Date().toISOString().replace(/[:.]/g, '-')
+}
+
+function harHeaders(rawJson) {
+  if (!rawJson) return []
+  let parsed
+  try {
+    parsed = JSON.parse(rawJson)
+  } catch {
+    return []
+  }
+  const out = []
+  for (const [name, value] of Object.entries(parsed || {})) {
+    // HAR 不允许伪头（:method / :authority），DevTools 打开时会直接报错
+    if (name.startsWith(':')) continue
+    if (Array.isArray(value)) for (const one of value) out.push({ name, value: String(one) })
+    else out.push({ name, value: String(value) })
+  }
+  return out
+}
+
+function headerValue(rawJson, wanted) {
+  for (const header of harHeaders(rawJson)) {
+    if (header.name.toLowerCase() === wanted) return header.value
+  }
+  return null
+}
+
+function isTextMime(mime) {
+  const text = String(mime || '').toLowerCase()
+  if (text.startsWith('text/')) return true
+  return (
+    text.includes('json') ||
+    text.includes('javascript') ||
+    text.includes('xml') ||
+    text.includes('urlencoded') ||
+    text.includes('graphql') ||
+    text.includes('+json')
+  )
+}
+
+function harTimings(row) {
+  const wait = typeof row.ttfb_ms === 'number' ? row.ttfb_ms : -1
+  const receive = typeof row.duration_ms === 'number' && typeof row.ttfb_ms === 'number'
+    ? Math.max(0, row.duration_ms - row.ttfb_ms)
+    : -1
+  const dns = typeof row.net_dns_ms === 'number' ? row.net_dns_ms : -1
+  const tcp = typeof row.net_connect_ms === 'number' ? row.net_connect_ms : -1
+  const tls = typeof row.net_tls_ms === 'number' ? row.net_tls_ms : -1
+  return {
+    blocked: -1,
+    dns,
+    // HAR 约定 connect 是「建连总耗时」，含 TLS；ssl 单独再报一次
+    connect: tcp < 0 && tls < 0 ? -1 : Math.max(0, (tcp < 0 ? 0 : tcp) + (tls < 0 ? 0 : tls)),
+    ssl: tls,
+    send: 0,
+    wait,
+    receive
+  }
+}
+
+function harContent(row, body) {
+  const content = {
+    size: Number(row.decoded_len ?? row.body_size ?? 0) || 0,
+    mimeType: row.mime_type || 'application/octet-stream'
+  }
+  if (!body) return content
+  content.size = body.size
+  if (isTextMime(row.mime_type)) content.text = body.bytes.toString('utf8')
+  else {
+    content.text = body.bytes.toString('base64')
+    content.encoding = 'base64'
+  }
+  if (row.body_trunc) content.comment = '采集时超过单条上限，正文被截断'
+  return content
+}
+
+function harPostData(row) {
+  if (!row.req_body) return undefined
+  const text = String(row.req_body)
+  const kind = bodyFieldKind(text)
+  const mimeType = kind === 'json'
+    ? 'application/json'
+    : kind === 'form'
+      ? 'application/x-www-form-urlencoded'
+      : 'text/plain'
+  const post = { mimeType, text }
+  if (kind === 'form') post.params = parseQueryPairs(text).map(([name, value]) => ({ name, value }))
+  return post
+}
+
+function monitorExtra(row) {
+  return {
+    seq: row.seq,
+    inst: row.inst,
+    targetType: row.target_type ?? null,
+    frameUrl: row.frame_url ?? null,
+    initiatorType: row.initiator_type ?? null,
+    fromCache: Boolean(row.from_cache),
+    fromSw: Boolean(row.from_sw),
+    canceled: Boolean(row.canceled),
+    bodyState: row.body_state ?? null,
+    mergeState: row.merge_state ?? null,
+    proxyFlowId: row.proxy_flow_id ?? null,
+    tlsVersion: row.tls_version ?? null,
+    upstreamIp: row.upstream_ip ?? null,
+    failed: row.failed ?? null
+  }
+}
+
+function exportHar(args) {
+  const inst = norm(args.inst)
+  const scan = scanRequests(inst, args.filter, EXPORT_SCAN_COLUMNS, args.maxRows)
+  const includeBodies = args.includeBodies !== false
+  const pages = new Map()
+  const entries = []
+  let bodyMissing = 0
+
+  for (const row of scan.rows) {
+    const pageUrl = row.frame_url || row.url || '(unknown)'
+    if (!pages.has(pageUrl)) pages.set(pageUrl, { id: 'page_' + (pages.size + 1), url: pageUrl, firstTs: row.start_ts })
+    const page = pages.get(pageUrl)
+    if (typeof row.start_ts === 'number' && row.start_ts < page.firstTs) page.firstTs = row.start_ts
+
+    const body = includeBodies && row.body_hash ? readBodyBytes(row.body_hash) : null
+    if (includeBodies && row.body_hash && !body) bodyMissing += 1
+
+    const request = {
+      method: String(row.method || 'GET'),
+      url: row.url,
+      httpVersion: row.protocol || 'HTTP/1.1',
+      cookies: [],
+      headers: harHeaders(row.req_headers),
+      queryString: parseQueryPairs(row.query).map(([name, value]) => ({ name, value })),
+      headersSize: -1,
+      bodySize: row.req_body ? String(row.req_body).length : 0
+    }
+    const postData = harPostData(row)
+    if (postData) request.postData = postData
+
+    const response = {
+      status: Number(row.status ?? 0),
+      statusText: row.status_text || '',
+      httpVersion: row.protocol || 'HTTP/1.1',
+      cookies: [],
+      headers: harHeaders(row.resp_headers),
+      content: harContent(row, body),
+      redirectURL: headerValue(row.resp_headers, 'location') || '',
+      headersSize: -1,
+      bodySize: typeof row.encoded_len === 'number' ? row.encoded_len : -1
+    }
+
+    entries.push({
+      pageref: page.id,
+      startedDateTime: new Date(Number(row.start_ts) || Date.now()).toISOString(),
+      time: Math.max(0, Number(row.duration_ms) || 0),
+      request,
+      response,
+      cache: {},
+      timings: harTimings(row),
+      serverIPAddress: row.upstream_ip || row.remote_ip || undefined,
+      connection: row.remote_port === null || row.remote_port === undefined ? undefined : String(row.remote_port),
+      _resourceType: row.resource_type ?? undefined,
+      _monitor: monitorExtra(row)
+    })
+  }
+
+  const har = {
+    log: {
+      version: '1.2',
+      creator: EXPORT_CREATOR,
+      pages: [...pages.values()].map((page) => ({
+        id: page.id,
+        startedDateTime: new Date(Number(page.firstTs) || Date.now()).toISOString(),
+        title: page.url,
+        pageTimings: {}
+      })),
+      entries
+    }
+  }
+
+  const text = JSON.stringify(har)
+  const file = join(exportDir(), 'har-inst' + (inst ?? 0) + '-' + stampText() + '.har')
+  writeFileSync(file, text, 'utf8')
+  return {
+    path: file,
+    bytes: Buffer.byteLength(text),
+    entries: entries.length,
+    pages: pages.size,
+    bodyMissing,
+    scanned: scan.rows.length,
+    total: scan.total,
+    truncated: scan.truncated,
+    sample: entries.slice(0, 2).map((entry) => ({ url: entry.request.url, status: entry.response.status, resourceType: entry._resourceType }))
+  }
+}
+
+/** JSONL：一行一条，带完整 body。给 agent 做批量分析用（HAR 的嵌套结构不好流式读） */
+function exportJsonl(args) {
+  const inst = norm(args.inst)
+  const scan = scanRequests(inst, args.filter, EXPORT_SCAN_COLUMNS, args.maxRows)
+  const includeBodies = args.includeBodies !== false
+  const lines = []
+  let bodyMissing = 0
+  for (const row of scan.rows) {
+    const record = {
+      seq: row.seq,
+      inst: row.inst,
+      ts: row.start_ts,
+      endTs: row.end_ts,
+      method: row.method,
+      url: row.url,
+      host: row.host,
+      status: row.status,
+      statusText: row.status_text,
+      mimeType: row.mime_type,
+      resourceType: row.resource_type,
+      targetType: row.target_type,
+      frameUrl: row.frame_url,
+      initiatorType: row.initiator_type,
+      durationMs: row.duration_ms,
+      ttfbMs: row.ttfb_ms,
+      requestBytes: row.encoded_len,
+      responseBytes: row.decoded_len,
+      fromCache: Boolean(row.from_cache),
+      fromSw: Boolean(row.from_sw),
+      failed: row.failed ?? null,
+      requestHeaders: harHeaders(row.req_headers),
+      responseHeaders: harHeaders(row.resp_headers),
+      requestBody: row.req_body ?? null
+    }
+    if (includeBodies && row.body_hash) {
+      const body = readBodyBytes(row.body_hash)
+      if (!body) bodyMissing += 1
+      else if (isTextMime(row.mime_type)) record.responseBody = body.bytes.toString('utf8')
+      else {
+        record.responseBody = body.bytes.toString('base64')
+        record.responseBodyEncoding = 'base64'
+      }
+    }
+    lines.push(JSON.stringify(record))
+  }
+  const text = lines.join('\n') + (lines.length ? '\n' : '')
+  const file = join(exportDir(), 'requests-inst' + (inst ?? 0) + '-' + stampText() + '.jsonl')
+  writeFileSync(file, text, 'utf8')
+  return {
+    path: file,
+    bytes: Buffer.byteLength(text),
+    lines: lines.length,
+    bodyMissing,
+    scanned: scan.rows.length,
+    total: scan.total,
+    truncated: scan.truncated
+  }
+}
+
+/** 资源分类：离线镜像时按类型分目录，比全堆一起好找 */
+function resourceBucket(resourceType, mimeType) {
+  const type = String(resourceType || '').toLowerCase()
+  const known = ['document', 'stylesheet', 'script', 'image', 'font', 'media', 'xhr', 'fetch', 'websocket', 'manifest']
+  if (known.includes(type)) return type
+  const mime = String(mimeType || '').toLowerCase()
+  if (mime.startsWith('image/')) return 'image'
+  if (mime.startsWith('font/') || mime.includes('woff')) return 'font'
+  if (mime.startsWith('audio/') || mime.startsWith('video/')) return 'media'
+  if (mime.startsWith('text/css')) return 'stylesheet'
+  if (mime.includes('javascript')) return 'script'
+  if (mime.startsWith('text/html')) return 'document'
+  if (mime.includes('json')) return 'json'
+  return 'other'
+}
+
+function safeName(text, max = 80) {
+  const cleaned = String(text).replace(/[^A-Za-z0-9._-]+/g, '_').replace(/^_+|_+$/g, '')
+  return (cleaned || 'file').slice(0, max)
+}
+
+const MIME_EXT = {
+  'text/html': 'html',
+  'text/css': 'css',
+  'application/javascript': 'js',
+  'text/javascript': 'js',
+  'application/json': 'json',
+  'image/png': 'png',
+  'image/jpeg': 'jpg',
+  'image/gif': 'gif',
+  'image/svg+xml': 'svg',
+  'image/webp': 'webp',
+  'font/woff2': 'woff2',
+  'font/woff': 'woff',
+  'application/octet-stream': 'bin'
+}
+
+function bodyFileName(url, hash, mimeType) {
+  let base = 'resource'
+  try {
+    const pathname = new URL(url).pathname
+    const last = pathname.split('/').filter(Boolean).pop()
+    if (last) base = safeName(last)
+  } catch {
+    base = safeName(String(url).slice(0, 60))
+  }
+  const hasExt = /\.[A-Za-z0-9]{1,8}$/.test(base)
+  if (!hasExt) {
+    const ext = MIME_EXT[String(mimeType || '').toLowerCase().split(';')[0].trim()] ?? 'bin'
+    base = base + '.' + ext
+  }
+  // 同 URL 不同内容（版本更新）靠 hash 前缀区分，重复内容天然同名
+  return String(hash || 'nohash').slice(0, 8) + '-' + base
+}
+
+/**
+ * 资源采集 / 离线镜像：把匹配到的响应体落成目录里的真文件 + 一份 manifest。
+ * 为什么要 manifest：文件系统里的东西一旦离开这张表就没法回溯「它是哪次请求来的」。
+ */
+function exportBodies(args) {
+  const inst = norm(args.inst)
+  const scan = scanRequests(inst, args.filter, EXPORT_SCAN_COLUMNS, args.maxRows)
+  const dir = args.dir ? String(args.dir) : join(exportDir(), 'resources-inst' + (inst ?? 0) + '-' + stampText())
+  mkdirSync(dir, { recursive: true })
+  const manifest = []
+  const written = new Map()
+  let bytes = 0
+  let skipped = 0
+
+  for (const row of scan.rows) {
+    if (!row.body_hash) {
+      skipped += 1
+      continue
+    }
+    let entry = written.get(row.body_hash)
+    if (!entry) {
+      const body = readBodyBytes(row.body_hash)
+      if (!body) {
+        skipped += 1
+        continue
+      }
+      const bucket = resourceBucket(row.resource_type, row.mime_type)
+      const bucketDir = join(dir, bucket)
+      mkdirSync(bucketDir, { recursive: true })
+      const relative = bucket + '/' + bodyFileName(row.url, row.body_hash, row.mime_type)
+      writeFileSync(join(dir, relative), body.bytes)
+      bytes += body.bytes.byteLength
+      entry = { file: relative, bytes: body.bytes.byteLength, hash: row.body_hash, refs: 0, urls: [] }
+      written.set(row.body_hash, entry)
+      manifest.push({ ...entry, mimeType: row.mime_type, resourceType: row.resource_type, urls: [] })
+    }
+    const seen = manifest.find((item) => item.hash === row.body_hash)
+    if (seen) {
+      if (seen.urls.length < 5) seen.urls.push(row.url)
+      seen.refs += 1
+    }
+  }
+
+  const summary = {
+    inst,
+    createdAt: Date.now(),
+    dir,
+    files: written.size,
+    bytes,
+    skipped,
+    entries: manifest,
+    total: scan.total,
+    truncated: scan.truncated
+  }
+  writeFileSync(join(dir, 'manifest.json'), JSON.stringify(summary, null, 2), 'utf8')
+  return { dir, manifest: join(dir, 'manifest.json'), files: written.size, bytes, skipped, total: scan.total, truncated: scan.truncated }
+}
+
+/* ======================================================== 契约快照与回归 */
+
+/** key 形如 "GET api.example.com/api/user/{int}"。这里拆回三元组 */
+function splitEndpointKey(key) {
+  const text = String(key || '')
+  const space = text.indexOf(' ')
+  const method = space === -1 ? text : text.slice(0, space)
+  const rest = space === -1 ? '' : text.slice(space + 1)
+  const slash = rest.indexOf('/')
+  return {
+    method,
+    host: slash === -1 ? rest : rest.slice(0, slash),
+    template: slash === -1 ? '/' : rest.slice(slash)
+  }
+}
+
+function buildContract(inst, filter, maxRows, sampleLimit) {
+  const scan = scanRequests(inst, filter, ENDPOINT_SCAN_COLUMNS, maxRows)
+  const slots = buildEndpointSlots(scan.rows)
+  const rowsByKey = new Map()
+  for (const row of scan.rows) {
+    const key = endpointKeyOf(row.method, row.host, templatePath(row.path))
+    let list = rowsByKey.get(key)
+    if (!list) {
+      list = []
+      rowsByKey.set(key, list)
+    }
+    list.push(row)
+  }
+  const endpoints = []
+  for (const slot of slots.values()) {
+    const profile = finalizeEndpointSlot(slot)
+    const info = splitEndpointKey(slot.key)
+    const rows = rowsByKey.get(slot.key) ?? []
+    const response = sampleResponseSchema(rows, sampleLimit)
+    endpoints.push({
+      key: slot.key,
+      method: info.method,
+      host: info.host,
+      template: info.template,
+      calls: profile.calls,
+      statuses: profile.statuses.map((item) => item.key).sort(),
+      statusCounts: profile.statuses,
+      mimeTypes: profile.mimeTypes.map((item) => item.key).sort(),
+      resourceTypes: profile.resourceTypes.map((item) => item.key).sort(),
+      query: profile.query,
+      requestBody: profile.requestBody,
+      responseSchema: response.schema,
+      responseSchemaSamples: response.samples,
+      durationMs: profile.durationMs,
+      firstTs: profile.firstTs,
+      lastTs: profile.lastTs
+    })
+  }
+  endpoints.sort((a, b) => a.key.localeCompare(b.key))
+  return { inst, createdAt: Date.now(), calls: scan.rows.length, truncated: scan.truncated, endpoints }
+}
+
+function loadContract(id) {
+  const row = db.prepare('SELECT id, label, inst, created_at, json FROM contracts WHERE id = ?').get(norm(id))
+  if (!row) return null
+  try {
+    return { ...JSON.parse(row.json), id: row.id, label: row.label, inst: row.inst, createdAt: row.created_at }
+  } catch {
+    return { id: row.id, label: row.label, inst: row.inst, createdAt: row.created_at, endpoints: [], broken: true }
+  }
+}
+
+/** 参数/字段表比对：看的是「名字出现/消失」和「必填性翻转」 */
+function diffFields(before, after) {
+  const beforeMap = new Map((before || []).map((item) => [item.name, item]))
+  const afterMap = new Map((after || []).map((item) => [item.name, item]))
+  const added = (after || [])
+    .filter((item) => !beforeMap.has(item.name))
+    .map((item) => ({ name: item.name, required: Boolean(item.required), samples: item.values ?? [] }))
+  const removed = (before || []).filter((item) => !afterMap.has(item.name)).map((item) => ({ name: item.name }))
+  const requiredChanged = []
+  for (const [name, item] of afterMap) {
+    const oldOne = beforeMap.get(name)
+    if (!oldOne) continue
+    if (Boolean(oldOne.required) !== Boolean(item.required)) {
+      requiredChanged.push({ name, from: Boolean(oldOne.required), to: Boolean(item.required) })
+    }
+  }
+  return { added, removed, requiredChanged }
+}
+
+function diffContracts(base, current) {
+  const before = new Map(base.endpoints.map((item) => [item.key, item]))
+  const after = new Map(current.endpoints.map((item) => [item.key, item]))
+  const added = []
+  const removed = []
+  const changed = []
+
+  for (const [key, item] of after) {
+    if (!before.has(key)) added.push({ key, calls: item.calls, statuses: item.statuses, mimeTypes: item.mimeTypes })
+  }
+  for (const [key, item] of before) {
+    if (!after.has(key)) removed.push({ key, calls: item.calls, statuses: item.statuses, mimeTypes: item.mimeTypes })
+  }
+  for (const [key, oldOne] of before) {
+    const newOne = after.get(key)
+    if (!newOne) continue
+    const statuses = {
+      added: newOne.statuses.filter((item) => !oldOne.statuses.includes(item)),
+      removed: oldOne.statuses.filter((item) => !newOne.statuses.includes(item))
+    }
+    const mimeTypes = {
+      added: newOne.mimeTypes.filter((item) => !oldOne.mimeTypes.includes(item)),
+      removed: oldOne.mimeTypes.filter((item) => !newOne.mimeTypes.includes(item))
+    }
+    const query = diffFields(oldOne.query, newOne.query)
+    const requestFields = diffFields(oldOne.requestBody?.fields, newOne.requestBody?.fields)
+    const response = diffSchema(oldOne.responseSchema, newOne.responseSchema)
+    const meaningful =
+      statuses.added.length > 0 || statuses.removed.length > 0 ||
+      mimeTypes.added.length > 0 || mimeTypes.removed.length > 0 ||
+      query.added.length > 0 || query.removed.length > 0 || query.requiredChanged.length > 0 ||
+      requestFields.added.length > 0 || requestFields.removed.length > 0 || requestFields.requiredChanged.length > 0 ||
+      response.added.length > 0 || response.removed.length > 0 || response.typeChanged.length > 0
+    if (meaningful) {
+      changed.push({
+        key,
+        statuses,
+        mimeTypes,
+        query,
+        requestFields,
+        response,
+        callsBefore: oldOne.calls,
+        callsAfter: newOne.calls
+      })
+    }
+  }
+
+  const changedKeys = new Set(changed.map((item) => item.key))
+  // 状态码的增删按「全量集合」算，而不是只看 changed：
+  // 一个新端点带着新状态码进来，「这个状态码是新的」这件事同样成立。
+  const baseStatuses = new Set(base.endpoints.flatMap((item) => item.statuses))
+  const currentStatuses = new Set(current.endpoints.flatMap((item) => item.statuses))
+  return {
+    base: { id: base.id ?? null, label: base.label ?? null, createdAt: base.createdAt, endpoints: base.endpoints.length },
+    current: { createdAt: current.createdAt, endpoints: current.endpoints.length, calls: current.calls },
+    added,
+    removed,
+    changed,
+    summary: {
+      addedEndpoints: added.length,
+      removedEndpoints: removed.length,
+      changedEndpoints: changed.length,
+      unchangedEndpoints: [...after.keys()].filter((key) => before.has(key) && !changedKeys.has(key)).length,
+      addedEndpointKeys: added.map((item) => item.key),
+      removedEndpointKeys: removed.map((item) => item.key),
+      newStatusCodes: [...currentStatuses].filter((item) => !baseStatuses.has(item)).sort(),
+      droppedStatusCodes: [...baseStatuses].filter((item) => !currentStatuses.has(item)).sort(),
+      newResponseFields: [...new Set(changed.flatMap((item) => item.response.added.map((one) => item.key + ' ' + one.path)))],
+      droppedResponseFields: [...new Set(changed.flatMap((item) => item.response.removed.map((one) => item.key + ' ' + one.path)))],
+      newRequestFields: [...new Set(changed.flatMap((item) => item.requestFields.added.map((one) => item.key + ' ' + one.name)))],
+      newQueryParams: [...new Set(changed.flatMap((item) => item.query.added.map((one) => item.key + ' ' + one.name)))]
+    }
+  }
+}
+
+function contractSnapshot(args) {
+  const inst = norm(args.inst)
+  const label = String(args.label ?? '') || new Date().toISOString()
+  const built = buildContract(inst, args.filter, args.maxRows ?? ANALYZE_ROWS_MAX, clampInt(args.sampleLimit, 3, 1, 20))
+  const info = db
+    .prepare('INSERT INTO contracts (label, inst, created_at, json) VALUES (?, ?, ?, ?)')
+    .run(label, inst, built.createdAt, JSON.stringify(built))
+  return {
+    id: Number(info.lastInsertRowid),
+    label,
+    inst,
+    createdAt: built.createdAt,
+    endpoints: built.endpoints.length,
+    calls: built.calls,
+    truncated: built.truncated
+  }
+}
+
+function contractList(args) {
+  return {
+    rows: db
+      .prepare('SELECT id, label, inst, created_at AS createdAt, LENGTH(json) AS bytes FROM contracts ORDER BY id DESC LIMIT ?')
+      .all(clampInt(args.limit, 50, 1, 500))
+  }
+}
+
+function contractGet(args) {
+  const contract = loadContract(args.id)
+  if (!contract) return { found: false, id: norm(args.id) }
+  if (args.withSchema === false) {
+    return {
+      found: true,
+      id: contract.id,
+      label: contract.label,
+      inst: contract.inst,
+      createdAt: contract.createdAt,
+      endpoints: contract.endpoints.map((item) => ({ key: item.key, calls: item.calls, statuses: item.statuses }))
+    }
+  }
+  return { found: true, ...contract }
+}
+
+function contractDelete(args) {
+  const info = db.prepare('DELETE FROM contracts WHERE id = ?').run(norm(args.id))
+  return { deleted: Number(info.changes) || 0 }
+}
+
+function contractDiff(args) {
+  const base = loadContract(args.baseId ?? args.id)
+  if (!base) return { error: '没有这个契约快照：' + String(args.baseId ?? args.id) }
+  const current = buildContract(norm(args.inst), args.filter, args.maxRows ?? ANALYZE_ROWS_MAX, clampInt(args.sampleLimit, 3, 1, 20))
+  return diffContracts(base, current)
+}
+
+/* ==================================================== 站点资源（cookie / 存储） */
+
+/** cookie 罐里的主键：domain|path|name|partition。同一条 cookie 更新时靠它原地更新 */
+function cookieKeyOf(item) {
+  const domain = stripLeadingDots(String(item.domain ?? item.host ?? '')).toLowerCase()
+  const path = item.path || '/'
+  return domain + '|' + path + '|' + String(item.name ?? '') + '|' + String(item.partitionKey ?? '')
+}
+
+/** 不用正则，避免在 spec 里被转义吃掉（这一类坑踩过） */
+function stripLeadingDots(text) {
+  let i = 0
+  while (i < text.length && text[i] === '.') i += 1
+  return text.slice(i)
+}
+
+/** 值超过这个长度就截断落库。cookie 本身有 4KB 上限，正常不会到 */
+const COOKIE_VALUE_MAX = 4096
+
+function cookieJson(row) {
+  return {
+    key: row.key,
+    name: row.name,
+    value: row.value ?? '',
+    ...(row.trunc ? { truncated: true } : {}),
+    valueLen: row.value_len ?? 0,
+    domain: row.domain,
+    path: row.path ?? '/',
+    ...(row.expires === null || row.expires === undefined ? {} : { expires: row.expires }),
+    session: Boolean(row.session),
+    secure: Boolean(row.secure),
+    httpOnly: Boolean(row.http_only),
+    ...(row.same_site ? { sameSite: row.same_site } : {}),
+    ...(row.priority ? { priority: row.priority } : {}),
+    ...(row.source_scheme ? { sourceScheme: row.source_scheme } : {}),
+    ...(row.source_port === null || row.source_port === undefined ? {} : { sourcePort: row.source_port }),
+    ...(row.partition_key ? { partitionKey: row.partition_key } : {}),
+    size: row.size ?? 0,
+    firstSeen: row.first_seen,
+    lastSeen: row.last_seen,
+    changeCount: row.change_count ?? 1,
+    sentCount: row.sent_count ?? 0,
+    sentHosts: parseJsonArray(row.sent_hosts),
+    crossSite: Boolean(row.cross_site)
+  }
+}
+
+function parseJsonArray(text) {
+  if (!text) return []
+  try {
+    const parsed = JSON.parse(text)
+    return Array.isArray(parsed) ? parsed : []
+  } catch {
+    return []
+  }
+}
+
+/**
+ * cookie 罐对账。
+ *
+ * 传进来的就是「浏览器此刻的罐」——全量替换语义。跟库里现有的比一遍：
+ *   库里没有 → added；值或属性变了 → changed；库里多出来的 → removed。
+ * 只有真的变了才产生事件，光 last_seen 变化不产生 —— 否则每轮对账都刷屏。
+ *
+ * attribution 是「刚刚收到过 Set-Cookie 的响应」，用来给变化标一个来源 URL。
+ * 这里不做 Set-Cookie 语义解析（domain/path 匹配、Max-Age 这些坑太多），
+ * 只把「谁改的」对上号 —— 判定本身以浏览器的罐为准，天然正确。
+ */
+function cookieSync(args) {
+  const now = Number(args.now) || Date.now()
+  const inst = norm(args.inst)
+  const incoming = new Map()
+  for (const item of args.cookies || []) incoming.set(cookieKeyOf(item), item)
+
+  const existing = new Map()
+  for (const row of db
+    .prepare('SELECT * FROM cookies')
+    .all()) {
+    existing.set(row.key, row)
+  }
+
+  const attributions = Array.isArray(args.attribution) ? args.attribution : []
+  const sourceFor = (name) => {
+    for (let i = attributions.length - 1; i >= 0; i -= 1) {
+      const item = attributions[i]
+      if (!item || !item.url) continue
+      if (!Array.isArray(item.names) || item.names.length === 0) return { source: 'set-cookie', url: item.url }
+      if (item.names.includes(name)) return { source: 'set-cookie', url: item.url }
+    }
+    return { source: 'scan' }
+  }
+
+  const changes = []
+  let added = 0
+  let changed = 0
+  let removed = 0
+  let touched = 0
+
+  db.exec('BEGIN')
+  try {
+    for (const [key, item] of incoming) {
+      const domain = stripLeadingDots(String(item.domain ?? item.host ?? '')).toLowerCase()
+      const host = stripLeadingDots(String(item.host ?? item.domain ?? '')).toLowerCase()
+      const rawValue = String(item.value ?? '')
+      const truncated = rawValue.length > COOKIE_VALUE_MAX
+      const stored = truncated ? rawValue.slice(0, COOKIE_VALUE_MAX) : rawValue
+      const path = item.path || '/'
+      const prev = existing.get(key)
+      if (!prev) {
+        S.insertCookie.run(
+          key, String(item.name ?? ''), domain, host, path, stored, rawValue.length, truncated ? 1 : 0,
+          norm(item.expires), item.session ? 1 : 0, item.secure ? 1 : 0, item.httpOnly ? 1 : 0,
+          norm(item.sameSite), norm(item.priority), norm(item.sourceScheme), norm(item.sourcePort),
+          norm(item.partitionKey), norm(item.size) ?? stored.length, now, now, inst, inst, 1
+        )
+        added += 1
+        const from = sourceFor(String(item.name ?? ''))
+        changes.push({
+          action: 'added', name: String(item.name ?? ''), domain, path,
+          value: stored, valueLen: rawValue.length, ...from
+        })
+        continue
+      }
+      existing.delete(key)
+      const valueMoved = (prev.value ?? '') !== stored || (prev.value_len ?? 0) !== rawValue.length
+      const metaMoved =
+        (prev.expires ?? null) !== (norm(item.expires) ?? null) ||
+        Boolean(prev.session) !== Boolean(item.session) ||
+        Boolean(prev.secure) !== Boolean(item.secure) ||
+        Boolean(prev.http_only) !== Boolean(item.httpOnly) ||
+        (prev.same_site ?? null) !== (norm(item.sameSite) ?? null) ||
+        (prev.host ?? '') !== host
+      if (valueMoved || metaMoved) {
+        S.updateCookie.run(
+          stored, rawValue.length, truncated ? 1 : 0, norm(item.expires), item.session ? 1 : 0,
+          item.secure ? 1 : 0, item.httpOnly ? 1 : 0, norm(item.sameSite), norm(item.priority),
+          norm(item.sourceScheme), norm(item.sourcePort), norm(item.partitionKey),
+          norm(item.size) ?? stored.length, now, inst, host, key
+        )
+        changed += 1
+        const from = sourceFor(String(item.name ?? ''))
+        changes.push({
+          action: 'changed', name: String(item.name ?? ''), domain, path,
+          value: stored, valueLen: rawValue.length, ...from
+        })
+        continue
+      }
+      S.touchCookie.run(now, inst, key)
+      touched += 1
+    }
+
+    for (const [key, prev] of existing) {
+      S.deleteCookie.run(key)
+      removed += 1
+      changes.push({
+        action: 'removed', name: prev.name, domain: prev.domain, path: prev.path ?? '/',
+        valueLen: prev.value_len ?? 0, reason: 'gone', source: 'scan'
+      })
+    }
+    db.exec('COMMIT')
+  } catch (err) {
+    db.exec('ROLLBACK')
+    throw err
+  }
+
+  return { total: incoming.size, added, changed, removed, touched, changes }
+}
+
+function cookieFilterOf(args) {
+  const q = args.query || {}
+  const clauses = []
+  const params = []
+  if (q.search) {
+    const like = '%' + q.search + '%'
+    clauses.push('(name LIKE ? OR domain LIKE ? OR value LIKE ?)')
+    params.push(like, like, like)
+  }
+  if (q.domain) {
+    const domain = stripLeadingDots(String(q.domain)).toLowerCase()
+    clauses.push('(host = ? OR host LIKE ?)')
+    params.push(domain, '%.' + domain)
+  }
+  if (q.name) {
+    clauses.push('name = ?')
+    params.push(String(q.name))
+  }
+  if (q.path) {
+    clauses.push('path = ?')
+    params.push(String(q.path))
+  }
+  if (q.session !== undefined) {
+    clauses.push('session = ?')
+    params.push(q.session ? 1 : 0)
+  }
+  if (q.crossSite !== undefined) {
+    clauses.push('cross_site = ?')
+    params.push(q.crossSite ? 1 : 0)
+  }
+  if (q.sameSite) {
+    clauses.push('same_site = ?')
+    params.push(String(q.sameSite))
+  }
+  if (q.secure !== undefined) {
+    clauses.push('secure = ?')
+    params.push(q.secure ? 1 : 0)
+  }
+  if (q.httpOnly !== undefined) {
+    clauses.push('http_only = ?')
+    params.push(q.httpOnly ? 1 : 0)
+  }
+  if (q.partitioned !== undefined) {
+    clauses.push(q.partitioned ? "COALESCE(partition_key, '') <> ''" : "COALESCE(partition_key, '') = ''")
+  }
+  return { sql: clauses.length ? 'WHERE ' + clauses.join(' AND ') : '', params }
+}
+
+const COOKIE_SORTS = { size: 'size', lastSeen: 'last_seen', sentCount: 'sent_count', domain: 'domain', name: 'name' }
+
+function cookieList(args) {
+  const where = cookieFilterOf(args)
+  const sort = COOKIE_SORTS[args.query?.sort] ?? 'size'
+  const desc = args.query?.order !== 'asc'
+  const limit = clampInt(args.query?.limit ?? args.limit, 200, 1, 2000)
+  const offset = clampInt(args.query?.offset ?? args.offset, 0, 0, 1e9)
+  const rows = db
+    .prepare('SELECT * FROM cookies ' + where.sql + ' ORDER BY ' + sort + (desc ? ' DESC' : ' ASC') + ' LIMIT ? OFFSET ?')
+    .all(...where.params, limit, offset)
+  const total = db.prepare('SELECT COUNT(*) AS c FROM cookies ' + where.sql).get(...where.params).c
+  return { rows: rows.map(cookieJson), total, limit, offset }
+}
+
+/**
+ * cookie 画像：研究要看的不是「有多少条」，而是「谁在用、跨了几站、活了多久」。
+ */
+function cookieStats(args) {
+  const now = Number(args.now) || Date.now()
+  const one = (sql, ...params) => db.prepare(sql).get(...params).c
+  const total = one('SELECT COUNT(*) AS c FROM cookies')
+  return {
+    total,
+    hosts: one('SELECT COUNT(DISTINCT host) AS c FROM cookies'),
+    session: one('SELECT COUNT(*) AS c FROM cookies WHERE session = 1'),
+    persistent: one('SELECT COUNT(*) AS c FROM cookies WHERE session = 0'),
+    secure: one('SELECT COUNT(*) AS c FROM cookies WHERE secure = 1'),
+    httpOnly: one('SELECT COUNT(*) AS c FROM cookies WHERE http_only = 1'),
+    sameSiteNone: one("SELECT COUNT(*) AS c FROM cookies WHERE same_site = 'None'"),
+    crossSite: one('SELECT COUNT(*) AS c FROM cookies WHERE cross_site = 1'),
+    partitioned: one("SELECT COUNT(*) AS c FROM cookies WHERE COALESCE(partition_key, '') <> ''"),
+    totalBytes: db.prepare('SELECT COALESCE(SUM(size), 0) AS c FROM cookies').get().c,
+    biggest: db
+      .prepare('SELECT name, domain, size FROM cookies ORDER BY size DESC LIMIT 10')
+      .all(),
+    bySameSite: db
+      .prepare(
+        // GROUP BY key 会撞上 cookies 自己的 key 列（主键），于是每条 cookie 一组 ——
+        // 必须按整段表达式分组
+        "SELECT COALESCE(same_site, '(未声明)') AS key, COUNT(*) AS count FROM cookies " +
+          "GROUP BY COALESCE(same_site, '(未声明)') ORDER BY count DESC"
+      )
+      .all(),
+    sharedNames: db
+      .prepare(
+        'SELECT name, COUNT(DISTINCT host) AS hosts, COUNT(*) AS count FROM cookies ' +
+          'GROUP BY name HAVING hosts > 1 ORDER BY hosts DESC, count DESC LIMIT 20'
+      )
+      .all(),
+    longLived: db
+      .prepare('SELECT name, domain, expires FROM cookies WHERE session = 0 AND expires IS NOT NULL ORDER BY expires DESC LIMIT 10')
+      .all()
+      .map((row) => ({ ...row, days: Math.round(((row.expires * 1000 - now) / 86400000) * 10) / 10 })),
+    mostSent: db
+      .prepare('SELECT name, domain, sent_count AS sentCount, sent_hosts AS sentHosts FROM cookies WHERE sent_count > 0 ORDER BY sent_count DESC LIMIT 15')
+      .all()
+      .map((row) => ({ name: row.name, domain: row.domain, sentCount: row.sentCount, hosts: parseJsonArray(row.sentHosts).length }))
+  }
+}
+
+/**
+ * cookie 被带出去过（requestWillBeSentExtraInfo.associatedCookies）。
+ * 累计「发往过哪些站点」—— 一条 cookie 出现在多个站点上，就是它在跟着你走。
+ * sent_hosts 封顶 32 个站点，再多也只是数字膨胀。
+ */
+function cookieRememberSent(args) {
+  const items = args.items || []
+  if (items.length === 0) return { updated: 0 }
+  const hostsByKey = new Map()
+  for (const item of items) {
+    if (!item || !item.key || !item.host) continue
+    const set = hostsByKey.get(item.key) ?? new Set()
+    set.add(String(item.host))
+    hostsByKey.set(item.key, set)
+  }
+  if (hostsByKey.size === 0) return { updated: 0 }
+  const rows = new Map()
+  const placeholders = [...hostsByKey.keys()].map(() => '?').join(',')
+  for (const row of db.prepare('SELECT key, domain, sent_count, sent_hosts, cross_site FROM cookies WHERE key IN (' + placeholders + ')').all(...hostsByKey.keys())) {
+    rows.set(row.key, row)
+  }
+  let updated = 0
+  db.exec('BEGIN')
+  try {
+    for (const [key, hostSet] of hostsByKey) {
+      const row = rows.get(key)
+      if (!row) continue
+      const merged = new Set(parseJsonArray(row.sent_hosts))
+      for (const host of hostSet) merged.add(host)
+      const hosts = [...merged].slice(0, 32)
+      const domain = stripLeadingDots(String(row.domain ?? '')).toLowerCase()
+      // 「跨站」= 用到它的站点不是它自己（也不是它的子域）。这是最保守的定义
+      const cross = hosts.some((host) => host !== domain && !host.endsWith('.' + domain))
+      S.cookieSent.run((row.sent_count ?? 0) + 1, JSON.stringify(hosts), cross ? 1 : 0, key)
+      updated += 1
+    }
+    db.exec('COMMIT')
+  } catch (err) {
+    db.exec('ROLLBACK')
+    throw err
+  }
+  return { updated }
+}
+
+/* ------------------------------------------------- 站点资源：清单与快照 */
+
+function parseJsonObject(text) {
+  if (!text) return null
+  try {
+    const parsed = JSON.parse(text)
+    return parsed && typeof parsed === 'object' ? parsed : null
+  } catch {
+    return null
+  }
+}
+
+/** 从 requests 里认出来的 origin。端口要带上，http 和 https 也不能混成一个站点 */
+function siteOriginsSeen(args) {
+  const inst = norm(args.inst)
+  const limit = clampInt(args.limit, 200, 1, 2000)
+  const rows = db
+    .prepare(
+      'SELECT host, COUNT(*) AS calls, MAX(start_ts) AS lastAt, MAX(url) AS sampleUrl FROM requests ' +
+        "WHERE inst = ? AND host IS NOT NULL AND host <> '' GROUP BY host ORDER BY lastAt DESC LIMIT ?"
+    )
+    .all(inst, limit)
+  const out = []
+  for (const row of rows) {
+    let origin = null
+    try {
+      origin = new URL(row.sampleUrl).origin
+    } catch {
+      origin = null
+    }
+    if (!origin || origin === 'null') continue
+    out.push({ origin, calls: row.calls, lastAt: row.lastAt })
+  }
+  return { rows: out }
+}
+
+/** host → cookie 条数。按父域累加：example.com 的 cookie 对 www.example.com 也算数 */
+function cookieCountsByHost() {
+  const map = new Map()
+  for (const row of db.prepare('SELECT host, COUNT(*) AS c FROM cookies GROUP BY host').all()) {
+    map.set(row.host, row.c)
+  }
+  return map
+}
+
+function cookieCountFor(host, map) {
+  if (!host) return 0
+  const parts = String(host).split('.')
+  let total = 0
+  for (let i = 0; i < parts.length; i += 1) {
+    total += map.get(parts.slice(i).join('.')) ?? 0
+  }
+  return total
+}
+
+function originHost(origin) {
+  try {
+    return new URL(origin).hostname
+  } catch {
+    return ''
+  }
+}
+
+function siteRowJson(row, counts) {
+  return {
+    origin: row.origin,
+    updatedAt: row.updated_at ?? 0,
+    scanned: true,
+    cookieCount: cookieCountFor(originHost(row.origin), counts),
+    localStorageCount: row.local_count ?? 0,
+    localStorageBytes: row.local_bytes ?? 0,
+    sessionStorageCount: row.session_count ?? 0,
+    sessionStorageBytes: row.session_bytes ?? 0,
+    idbNames: parseJsonArray(row.idb_names),
+    idbStores: row.idb_stores ?? 0,
+    cacheNames: parseJsonArray(row.cache_names),
+    cacheEntries: row.cache_entries ?? 0,
+    swCount: row.sw_count ?? 0,
+    usageBytes: row.usage_bytes ?? null,
+    quotaBytes: row.quota_bytes ?? null,
+    usageBreakdown: parseJsonArray(row.usage_breakdown)
+  }
+}
+
+function emptySiteJson(origin, counts) {
+  return {
+    origin,
+    updatedAt: 0,
+    scanned: false,
+    cookieCount: cookieCountFor(originHost(origin), counts),
+    localStorageCount: 0,
+    localStorageBytes: 0,
+    sessionStorageCount: 0,
+    sessionStorageBytes: 0,
+    idbNames: [],
+    idbStores: 0,
+    cacheNames: [],
+    cacheEntries: 0,
+    swCount: 0,
+    usageBytes: null,
+    quotaBytes: null,
+    usageBreakdown: []
+  }
+}
+
+/**
+ * 站点资源总览 = 「见过的域」∪「扫过的域」。
+ * 见过的排前面（按最近活动），扫过但这次没流量的补在后面 —— 扫过却没扫到不该从列表里消失。
+ */
+function siteOverview(args) {
+  const inst = norm(args.inst)
+  const limit = clampInt(args.limit, 300, 1, 5000)
+  const counts = cookieCountsByHost()
+  const stored = new Map()
+  for (const row of db.prepare('SELECT * FROM site_origins').all()) stored.set(row.origin, row)
+  const seen = siteOriginsSeen({ inst, limit: limit * 2 }).rows
+  const out = []
+  const taken = new Set()
+  for (const item of seen) {
+    if (taken.has(item.origin)) continue
+    taken.add(item.origin)
+    const row = stored.get(item.origin)
+    if (row && args.onlyScanned !== true) out.push(siteRowJson(row, counts))
+    else if (row) continue
+    else out.push(emptySiteJson(item.origin, counts))
+    stored.delete(item.origin)
+  }
+  if (args.onlyScanned !== true) {
+    for (const row of stored.values()) out.push(siteRowJson(row, counts))
+  } else {
+    for (const row of stored.values()) out.push(siteRowJson(row, counts))
+  }
+  return { rows: out.slice(0, limit), total: out.length }
+}
+
+function siteDetail(args) {
+  const origin = String(args.origin ?? '')
+  if (!origin) return { error: '要给 origin' }
+  const counts = cookieCountsByHost()
+  const row = db.prepare('SELECT * FROM site_origins WHERE origin = ?').get(origin)
+  const base = row ? siteRowJson(row, counts) : emptySiteJson(origin, counts)
+  const detail = row ? parseJsonObject(row.detail) : null
+  const host = originHost(origin)
+  const cookies = db
+    .prepare('SELECT * FROM cookies WHERE host = ? OR host LIKE ? ORDER BY size DESC')
+    .all(host, '%.' + host)
+    .map(cookieJson)
+  return {
+    ...base,
+    cookies,
+    localStorage: Array.isArray(detail?.localStorage) ? detail.localStorage : [],
+    sessionStorage: Array.isArray(detail?.sessionStorage) ? detail.sessionStorage : [],
+    idb: Array.isArray(detail?.idb) ? detail.idb : [],
+    caches: Array.isArray(detail?.caches) ? detail.caches : [],
+    serviceWorkers: Array.isArray(detail?.serviceWorkers) ? detail.serviceWorkers : []
+  }
+}
+
+/** 当前站点清单（不落库的那份），快照与 diff 共用 */
+function currentSiteDoc() {
+  const cookies = db.prepare('SELECT * FROM cookies').all().map(cookieJson)
+  const origins = db
+    .prepare('SELECT * FROM site_origins ORDER BY origin')
+    .all()
+    .map((row) => {
+      const detail = parseJsonObject(row.detail)
+      const entries = Array.isArray(detail?.localStorage) ? detail.localStorage : []
+      const keys = entries.map((item) => item.key)
+      const keyBytes = {}
+      for (const item of entries) keyBytes[item.key] = item.bytes ?? 0
+      return {
+        origin: row.origin,
+        cookieCount: row.cookie_count ?? 0,
+        localCount: row.local_count ?? 0,
+        localBytes: row.local_bytes ?? 0,
+        sessionCount: row.session_count ?? 0,
+        idbNames: parseJsonArray(row.idb_names),
+        cacheNames: parseJsonArray(row.cache_names),
+        swCount: row.sw_count ?? 0,
+        usageBytes: row.usage_bytes ?? null,
+        keys,
+        keyBytes
+      }
+    })
+  return { cookies, origins }
+}
+
+function siteSnapshot(args) {
+  const doc = currentSiteDoc()
+  const json = JSON.stringify(doc)
+  const createdAt = Date.now()
+  const info = S.insertSiteSnapshot.run(norm(args.label), norm(args.inst), createdAt, json)
+  return {
+    id: Number(info.lastInsertRowid),
+    label: args.label === undefined || args.label === null ? null : String(args.label),
+    createdAt,
+    origins: doc.origins.length,
+    cookies: doc.cookies.length,
+    bytes: json.length
+  }
+}
+
+function siteSnapshotList(args) {
+  return {
+    rows: db
+      .prepare('SELECT id, label, created_at AS createdAt, LENGTH(json) AS bytes FROM site_snapshots ORDER BY id DESC LIMIT ?')
+      .all(clampInt(args.limit, 50, 1, 500))
+      .map((row) => {
+        const doc = parseJsonObject(db.prepare('SELECT json FROM site_snapshots WHERE id = ?').get(row.id).json)
+        return { ...row, origins: doc?.origins?.length ?? 0, cookies: doc?.cookies?.length ?? 0 }
+      })
+  }
+}
+
+function loadSiteSnapshot(id) {
+  const row = db.prepare('SELECT id, label, created_at AS createdAt, json FROM site_snapshots WHERE id = ?').get(norm(id))
+  if (!row) return null
+  const doc = parseJsonObject(row.json)
+  if (!doc) return null
+  return { id: row.id, label: row.label ?? null, createdAt: row.createdAt, doc }
+}
+
+/** 一条 cookie 的身份。比对时用它，别拿整个对象比对（lastSeen 每次都变） */
+function cookieIdent(cookie) {
+  return String(cookie.domain).toLowerCase() + '|' + (cookie.path || '/') + '|' + cookie.name
+}
+
+function cookieShape(cookie) {
+  return [cookie.valueLen, cookie.session, cookie.secure, cookie.httpOnly, cookie.sameSite ?? '', cookie.expires ?? '', cookie.partitionKey ?? ''].join('|')
+}
+
+function siteSnapshotDiff(args) {
+  const base = loadSiteSnapshot(args.baseId)
+  if (!base) return { error: '没有这个站点快照：' + String(args.baseId) }
+  const current = currentSiteDoc()
+
+  const baseOrigins = new Map(base.doc.origins.map((item) => [item.origin, item]))
+  const currOrigins = new Map(current.origins.map((item) => [item.origin, item]))
+  const addedOrigins = []
+  const removedOrigins = []
+  const changedOrigins = []
+  for (const [origin, item] of currOrigins) {
+    const prev = baseOrigins.get(origin)
+    if (!prev) {
+      addedOrigins.push(origin)
+      continue
+    }
+    const notes = []
+    if ((prev.localCount ?? 0) !== (item.localCount ?? 0)) notes.push('localStorage ' + (prev.localCount ?? 0) + ' → ' + (item.localCount ?? 0))
+    if ((prev.sessionCount ?? 0) !== (item.sessionCount ?? 0)) notes.push('sessionStorage ' + (prev.sessionCount ?? 0) + ' → ' + (item.sessionCount ?? 0))
+    if ((prev.cookieCount ?? 0) !== (item.cookieCount ?? 0)) notes.push('cookie ' + (prev.cookieCount ?? 0) + ' → ' + (item.cookieCount ?? 0))
+    if ((prev.swCount ?? 0) !== (item.swCount ?? 0)) notes.push('Service Worker ' + (prev.swCount ?? 0) + ' → ' + (item.swCount ?? 0))
+    if ((prev.cacheNames ?? []).join(',') !== (item.cacheNames ?? []).join(',')) notes.push('缓存清单变了')
+    if ((prev.idbNames ?? []).join(',') !== (item.idbNames ?? []).join(',')) notes.push('IndexedDB 清单变了')
+    if (notes.length > 0) changedOrigins.push({ origin, summary: notes })
+  }
+  for (const origin of baseOrigins.keys()) {
+    if (!currOrigins.has(origin)) removedOrigins.push(origin)
+  }
+
+  const baseCookies = new Map(base.doc.cookies.map((item) => [cookieIdent(item), item]))
+  const currCookies = new Map(current.cookies.map((item) => [cookieIdent(item), item]))
+  const brief = (item) => ({ name: item.name, domain: item.domain, path: item.path })
+  const addedCookies = []
+  const removedCookies = []
+  const changedCookies = []
+  for (const [id, item] of currCookies) {
+    const prev = baseCookies.get(id)
+    if (!prev) {
+      addedCookies.push(brief(item))
+      continue
+    }
+    const fields = []
+    if ((prev.value ?? '') !== (item.value ?? '')) fields.push('value')
+    if (Boolean(prev.session) !== Boolean(item.session)) fields.push('session')
+    if (Boolean(prev.secure) !== Boolean(item.secure)) fields.push('secure')
+    if (Boolean(prev.httpOnly) !== Boolean(item.httpOnly)) fields.push('httpOnly')
+    if ((prev.sameSite ?? '') !== (item.sameSite ?? '')) fields.push('sameSite')
+    if ((prev.expires ?? 0) !== (item.expires ?? 0)) fields.push('expires')
+    if (fields.length > 0) changedCookies.push({ ...brief(item), fields })
+  }
+  for (const [id, item] of baseCookies) {
+    if (!currCookies.has(id)) removedCookies.push(brief(item))
+  }
+
+  const baseKeys = new Set()
+  for (const item of base.doc.origins) for (const key of item.keys ?? []) baseKeys.add(item.origin + '::' + key)
+  const currKeys = new Set()
+  for (const item of current.origins) for (const key of item.keys ?? []) currKeys.add(item.origin + '::' + key)
+  const keysAdded = [...currKeys].filter((key) => !baseKeys.has(key))
+  const keysRemoved = [...baseKeys].filter((key) => !currKeys.has(key))
+  /* 键还在但内容变了也要算出来 —— 只看「有没有这个键」会漏掉一半的真相 */
+  const baseSizes = new Map()
+  for (const item of base.doc.origins) for (const [key, bytes] of Object.entries(item.keyBytes ?? {})) baseSizes.set(item.origin + '::' + key, bytes)
+  const currSizes = new Map()
+  for (const item of current.origins) for (const [key, bytes] of Object.entries(item.keyBytes ?? {})) currSizes.set(item.origin + '::' + key, bytes)
+  const keysChanged = []
+  for (const [key, bytes] of currSizes) {
+    if (!baseSizes.has(key)) continue
+    if (baseSizes.get(key) !== bytes) keysChanged.push(key)
+  }
+
+  return {
+    baseId: base.id,
+    baseLabel: base.label,
+    createdAt: base.createdAt,
+    origins: { added: addedOrigins, removed: removedOrigins, changed: changedOrigins },
+    cookies: { added: addedCookies, removed: removedCookies, changed: changedCookies },
+    localStorage: { added: keysAdded, removed: keysRemoved, changed: keysChanged },
+    summary: {
+      originsAdded: addedOrigins.length,
+      originsRemoved: removedOrigins.length,
+      cookiesAdded: addedCookies.length,
+      cookiesRemoved: removedCookies.length,
+      cookiesChanged: changedCookies.length,
+      keysAdded: keysAdded.length,
+      keysRemoved: keysRemoved.length,
+      keysChanged: keysChanged.length
+    }
+  }
+}
+
+function siteSnapshotDelete(args) {
+  const info = db.prepare('DELETE FROM site_snapshots WHERE id = ?').run(norm(args.id))
+  return { deleted: Number(info.changes) || 0 }
+}
+
 const OPS = {
   open(args) {
     if (db) db.close()
@@ -841,8 +3319,9 @@ const OPS = {
       for (const item of items) {
         S.insertEvent.run(
           args.inst,
-          item.ts ?? Date.now(),
+          norm(item.ts) ?? Date.now(),
           norm(item.kind),
+          norm(item.level) ?? 'info',
           norm(item.targetType),
           norm(item.url),
           norm(item.detail)
@@ -881,7 +3360,11 @@ const OPS = {
 
   /** §7.1 #9 存储分区：库文件大小、各表行数、body 去重后的总字节 */
   storageSummary() {
-    const names = ['instances', 'requests', 'bodies', 'scripts', 'script_refs', 'events']
+    const names = [
+      'instances', 'requests', 'bodies', 'scripts', 'script_refs', 'events', 'ws_frames', 'contracts',
+      // 站点资源那三张也跟着报：不然面板上「用了多少」是漏的
+      'cookies', 'site_origins', 'site_snapshots'
+    ]
     const tables = names.map((name) => ({
       name,
       rows: db.prepare('SELECT COUNT(*) AS n FROM ' + name).get().n
@@ -908,6 +3391,101 @@ const OPS = {
     return { evicted: enforceBodyBudget() }
   },
 
+  /* ---- 本轮新增：事件流 / WebSocket / 接口画像 / 调用图 / 关联 / 导出 / 契约 ---- */
+
+  queryEvents,
+  eventStats,
+
+  /**
+   * WS 帧入库。分帧方向是「相对浏览器」的：sent = 页面发出去。
+   * payload 在采集侧已经按上限截断过，这里只负责落库，不再做二次裁剪。
+   */
+  appendWsFrames(args) {
+    const items = args.items || []
+    if (items.length === 0) return { inserted: 0 }
+    const inst = args.inst
+    db.exec('BEGIN')
+    try {
+      for (const item of items) {
+        S.insertWsFrame.run(
+          inst,
+          norm(item.seq),
+          norm(item.ts) ?? Date.now(),
+          norm(item.requestId),
+          norm(item.url),
+          item.direction === 'sent' ? 'sent' : 'received',
+          norm(item.opcode),
+          norm(item.payload),
+          norm(item.size),
+          item.truncated ? 1 : 0,
+          item.binary ? 1 : 0
+        )
+      }
+      db.exec('COMMIT')
+    } catch (err) {
+      db.exec('ROLLBACK')
+      throw err
+    }
+    return { inserted: items.length }
+  },
+
+  queryWsFrames,
+  wsConnections,
+
+  endpointProfiles,
+  endpointDetail,
+  requestGraph,
+  relations,
+
+  exportHar,
+  exportJsonl,
+  exportBodies,
+
+  cookieSync,
+  cookieList,
+  cookieStats,
+  cookieRememberSent,
+  siteOriginsSeen,
+  siteUpsert(args) {
+    const inst = norm(args.inst)
+    const now = Number(args.now) || Date.now()
+    const rows = args.rows || []
+    db.exec('BEGIN')
+    try {
+      for (const row of rows) {
+        S.upsertSiteOrigin.run(
+          String(row.origin), now, now, inst,
+          row.cookieCount ?? 0, row.localStorageCount ?? 0, row.localStorageBytes ?? 0,
+          row.sessionStorageCount ?? 0, row.sessionStorageBytes ?? 0,
+          JSON.stringify(row.idbNames ?? []), row.idbStores ?? 0,
+          JSON.stringify(row.cacheNames ?? []), row.cacheEntries ?? 0, row.swCount ?? 0,
+          norm(row.usageBytes), norm(row.quotaBytes), JSON.stringify(row.usageBreakdown ?? []),
+          JSON.stringify(row.detail ?? null)
+        )
+      }
+      db.exec('COMMIT')
+    } catch (err) {
+      db.exec('ROLLBACK')
+      throw err
+    }
+    return { saved: rows.length }
+  },
+  siteOverview,
+  siteDetail,
+  siteSnapshot,
+  siteSnapshotList,
+  siteSnapshotGet(args) {
+    const found = loadSiteSnapshot(args.id)
+    return found ? { found: true, id: found.id, label: found.label, createdAt: found.createdAt, doc: found.doc } : { found: false, id: norm(args.id) }
+  },
+  siteSnapshotDiff,
+  siteSnapshotDelete,
+
+  contractSnapshot,
+  contractList,
+  contractGet,
+  contractDelete,
+  contractDiff,
   flush() {
     S.flush.run()
     return { ok: true }

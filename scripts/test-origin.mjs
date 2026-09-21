@@ -9,6 +9,7 @@
  *   node scripts/test-origin.mjs 8777        # 单独起，手工点
  */
 
+import { createHash } from 'node:crypto'
 import { createServer } from 'node:http'
 
 /** 1x1 透明 PNG，图像接口都用它，靠 padding 造不同大小 */
@@ -18,6 +19,9 @@ const PNG_1X1 = Buffer.from(
 )
 
 const DUP_JS = 'window.__dup = (window.__dup || 0) + 1\n'
+
+/** 固定正文：不管谁来取、取几次，字节完全一致 —— 用来验「共享响应体」 */
+const DUP_BODY = JSON.stringify({ kind: 'dup-body', note: 'same bytes every time', pad: 'z'.repeat(120) })
 
 /**
  * P3 干预验收用的探针页：把「页面实际看到的」回报给服务端。
@@ -278,6 +282,129 @@ const PERF_PAGE = `<!doctype html>
 </script>
 </body></html>`
 
+const RT_PAGE = `<!doctype html>
+<html lang="zh">
+<head><meta charset="utf-8"><title>实时分析验收页</title></head>
+<body>
+<h1>realtime probe</h1>
+<script>
+(async () => {
+  const params = new URLSearchParams(location.search)
+  const phase = params.get('phase') || '1'
+  const peer = params.get('peer') || ''
+  const out = { phase, ws: '', wsrecv: '', wsmsg: '', api: '', apiStatus: '', echoB: '', dup: '', peer: '', dl: 'no' }
+
+  // 1) WebSocket：只在 phase1 跑 —— 真值日志里就一次握手，判据才是确定的
+  if (phase === '1') {
+    try {
+      const ws = new WebSocket('ws://' + location.host + '/ws-probe')
+      await new Promise((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error('ws timeout')), 8000)
+        ws.onopen = () => { clearTimeout(timer); resolve() }
+        ws.onerror = () => { clearTimeout(timer); reject(new Error('ws error')) }
+      })
+      out.ws = 'open'
+      const got = (predicate) => new Promise((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error('frame timeout')), 8000)
+        ws.addEventListener('message', (event) => {
+          const text = typeof event.data === 'string' ? event.data : '(binary)'
+          if (!predicate(text)) return
+          clearTimeout(timer)
+          resolve(text)
+        })
+      })
+      // 先把两个监听挂上再发，免得回声比监听先到
+      const pushed = got((text) => text.indexOf('server-push') === 0)
+      const echoed = got((text) => text.indexOf('echo:') === 0)
+      ws.send('hello-from-page')
+      out.wsrecv = await pushed
+      out.wsmsg = await echoed
+      ws.close()
+    } catch (error) { out.ws = 'err:' + error.message }
+  }
+
+  // 2) 带 JSON body 的接口：每轮 3 次（「调用节奏」要 >= 3 个样本才算得出来）。
+  //    phase2 的响应多一个字段，契约回归就靠它证明看得见变化
+  try {
+    let last = null
+    for (let i = 0; i < 3; i += 1) {
+      const body = { user: phase === '2' ? 'bob' : 'amy', n: i + 1 }
+      if (phase === '2') body.extra = true
+      const res = await fetch('/api/json-echo?token=tk-1&page=' + phase + '-' + i, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body)
+      })
+      out.apiStatus = String(res.status)
+      last = await res.json()
+      await new Promise((resolve) => setTimeout(resolve, 150))
+    }
+    out.api = JSON.stringify(last)
+  } catch (error) { out.api = 'err:' + error.message }
+
+  // 3) 第二个接口，共用同一个 token —— 关联分析要看得见「同值参数跨端点」
+  try {
+    const res = await fetch('/api/json-echo-b?token=tk-1&phase=' + phase)
+    out.echoB = String((await res.json()).name)
+  } catch (error) { out.echoB = 'err:' + error.message }
+
+  // 4) 同一份响应体被两个不同地址取到 —— 「共享响应体（重复资源）」的靶子
+  try {
+    const a = await fetch('/api/dup-body.json?v=' + phase)
+    const b = await fetch('/api/dup-body.json?v=' + phase + 'b')
+    out.dup = String((await a.text()).length + '+' + (await b.text()).length)
+  } catch (error) { out.dup = 'err:' + error.message }
+
+  // 5) 跨域资源：换一个端口就是另一个 origin，页面 → 域的关联要看得见它。
+  //    用 onload/onerror 都放行的写法：验的是「请求发生了」，不是「图片能解码」
+  if (peer) {
+    try {
+      await new Promise((resolve) => {
+        const img = new Image()
+        const done = () => resolve()
+        img.onload = done
+        img.onerror = done
+        img.src = 'http://127.0.0.1:' + peer + '/img1.png?from=realtime'
+        setTimeout(done, 3000)
+      })
+      out.peer = 'requested'
+    } catch (error) { out.peer = 'err:' + error.message }
+  }
+
+  // 6) 下载：只在 phase2 触发一次（同一个页面里第二次下载会被浏览器拦下来问）
+  if (phase === '2') {
+    try {
+      const link = document.createElement('a')
+      link.href = '/download.txt'
+      link.download = 'monitor-rt-download.txt'
+      document.body.appendChild(link)
+      link.click()
+      out.dl = 'clicked'
+    } catch (error) { out.dl = 'err:' + error.message }
+  }
+
+  await fetch('/api/rt-report?' + new URLSearchParams(out).toString())
+})().catch((error) => {
+  fetch('/api/rt-report?err=' + encodeURIComponent(String(error && error.message)))
+})
+</script>
+</body>
+</html>`
+
+const DIALOG_PAGE = `<!doctype html>
+<html lang="zh">
+<head><meta charset="utf-8"><title>对话框验收页</title></head>
+<body>
+<h1>dialog probe</h1>
+<script>
+// alert 会挂住渲染进程（采集也跟着停）—— 正是要验的那件事：
+// 只有真的应答了，下面这行才跑得到，服务端才会收到回报
+alert('monitor-dialog-probe')
+fetch('/api/rt-report?dialog=dismissed').catch(() => {})
+</script>
+</body>
+</html>`
+
 const PAGE = `<!doctype html>
 <html lang="zh">
 <head>
@@ -393,6 +520,69 @@ self.addEventListener('fetch', (event) => {
 })
 `
 
+/** 服务端 → 客户端不加掩码（RFC6455 对方向的规定）。长度按 7 / 16 / 64 位分档 */
+function encodeTextFrame(text) {
+  const payload = Buffer.from(text, 'utf8')
+  const length = payload.length
+  let head
+  if (length < 126) {
+    head = Buffer.from([0x81, length])
+  } else if (length < 65536) {
+    head = Buffer.alloc(4)
+    head[0] = 0x81
+    head[1] = 126
+    head.writeUInt16BE(length, 2)
+  } else {
+    head = Buffer.alloc(10)
+    head[0] = 0x81
+    head[1] = 127
+    head.writeBigUInt64BE(BigInt(length), 2)
+  }
+  return Buffer.concat([head, payload])
+}
+
+function encodeCloseFrame() {
+  return Buffer.from([0x88, 0x00])
+}
+
+/**
+ * 解析客户端帧（浏览器发的帧一定带掩码）。半包留着下次接着解 —— 真实现的骨架。
+ * 自己实现而不是引 ws：这里要的就是「服务端侧看到了什么」，多一层库反而看不清。
+ */
+function decodeFrames(buffer) {
+  const frames = []
+  let offset = 0
+  for (;;) {
+    if (buffer.length - offset < 2) break
+    const opcode = buffer[offset] & 0x0f
+    const second = buffer[offset + 1]
+    const masked = (second & 0x80) !== 0
+    let length = second & 0x7f
+    let p = offset + 2
+    if (length === 126) {
+      if (buffer.length - p < 2) break
+      length = buffer.readUInt16BE(p)
+      p += 2
+    } else if (length === 127) {
+      if (buffer.length - p < 8) break
+      length = Number(buffer.readBigUInt64BE(p))
+      p += 8
+    }
+    const maskLength = masked ? 4 : 0
+    if (buffer.length - p < maskLength + length) break
+    const mask = masked ? buffer.subarray(p, p + 4) : null
+    p += maskLength
+    const payload = Buffer.from(buffer.subarray(p, p + length))
+    if (mask) {
+      for (let i = 0; i < payload.length; i += 1) payload[i] ^= mask[i % 4]
+    }
+    p += length
+    offset = p
+    frames.push({ opcode, payload: opcode === 0x1 ? payload.toString('utf8') : '' })
+  }
+  return { frames, rest: buffer.subarray(offset) }
+}
+
 function chunk(buffer, size) {
   const parts = []
   for (let offset = 0; offset < buffer.length; offset += size) {
@@ -405,11 +595,93 @@ function chunk(buffer, size) {
  * 起一个受控 origin。返回 { port, requests, close }。
  * requests 就是「真值日志」，每条 { method, path, status, bytes, at }。
  */
+/**
+ * 站点资源探针页：把「浏览器里能存东西的地方」全都真写一遍 —— localStorage /
+ * sessionStorage / cookie / IndexedDB / CacheStorage / Service Worker。
+ *
+ * 写完不是自己宣布成功，而是把每块的结果原样回报给 origin
+ * （/api/sitedata-report?phase=1&info=...）。这样验收的火药味就在外部：
+ * 服务端记下的这份回报 vs 我们从 CDP 扫回来的那份，必须对得上。
+ */
+const SITEDATA_PAGE = `
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>sitedata-probe</title></head>
+<body>
+<div id="out">running</div>
+<script>
+async function report(info) {
+  try {
+    await fetch('/api/sitedata-report?phase=1&info=' + encodeURIComponent(JSON.stringify(info)))
+  } catch (err) {}
+}
+async function openIdb() {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open('sd_db', 1)
+    request.onupgradeneeded = () => {
+      const db = request.result
+      if (!db.objectStoreNames.contains('items')) db.createObjectStore('items', { keyPath: 'id' })
+    }
+    request.onsuccess = () => resolve(request.result)
+    request.onerror = () => reject(request.error)
+  })
+}
+async function main() {
+  const out = {}
+  try {
+    localStorage.setItem('sd_alpha', 'A1')
+    localStorage.setItem('sd_beta', 'B1')
+    sessionStorage.setItem('sd_sess', 'S1')
+    document.cookie = 'sd_js=C1; path=/'
+    out.storage = 'ok'
+  } catch (err) { out.storage = String(err) }
+
+  try {
+    const db = await openIdb()
+    await new Promise((resolve, reject) => {
+      const tx = db.transaction('items', 'readwrite')
+      tx.objectStore('items').put({ id: 1, v: 'idb1' })
+      tx.oncomplete = () => resolve()
+      tx.onerror = () => reject(tx.error)
+    })
+    db.close()
+    out.idb = 'ok'
+  } catch (err) { out.idb = String(err) }
+
+  try {
+    const cache = await caches.open('sd_cache')
+    await cache.add(new Request('/api/sd-asset', { cache: 'no-cache' }))
+    out.cache = 'ok'
+  } catch (err) { out.cache = String(err) }
+
+  try {
+    await navigator.serviceWorker.register('/sw.js', { scope: '/' })
+    await navigator.serviceWorker.ready
+    out.sw = 'ok'
+  } catch (err) { out.sw = String(err) }
+
+  // 带 Set-Cookie 的响应：这条专门用来验「cookie 变了，是谁改的」
+  try {
+    await fetch('/api/sd-set-cookie', { cache: 'no-store' })
+    out.setCookie = 'ok'
+  } catch (err) { out.setCookie = String(err) }
+
+  document.getElementById('out').textContent = 'done'
+  await report(out)
+}
+main()
+</script>
+</body>
+</html>
+`
 export function startOrigin(port = 0) {
   const requests = []
   const openStreams = new Set()
+  /** WS 双向真值日志：handshake / in（页面发出）/ out（服务端发出）/ close */
+  const wsLog = []
+  const wsSockets = new Set()
 
-  const server = createServer((req, res) => {
+  const server = createServer(async (req, res) => {
     const url = new URL(req.url, 'http://127.0.0.1')
     const path = url.pathname
     const entry = {
@@ -420,12 +692,19 @@ export function startOrigin(port = 0) {
       at: Date.now(),
       query: url.search,
       // 规则改写请求头的证据：改动后的头会带在真值日志里
-      probe: req.headers['x-monitor-rule'] ?? null
+      probe: req.headers['x-monitor-rule'] ?? null,
+      // 站点资源验收要看「这条请求带出去了哪些 cookie」—— 只有服务端侧才算数
+      cookie: req.headers.cookie ?? null
     }
     requests.push(entry)
 
     let bodyBytes = 0
-    req.on('data', (c) => { bodyBytes += c.length })
+    // 顺手留一份请求体文本（只给 /api/json-echo 用）—— 契约回归要看得见「请求体多了个字段」
+    let bodyText = ''
+    req.on('data', (c) => {
+      bodyBytes += c.length
+      if (bodyText.length < 65536) bodyText += c.toString('utf8')
+    })
     res.on('finish', () => {
       entry.status = res.statusCode
       entry.bytes = bodyBytes
@@ -536,7 +815,122 @@ export function startOrigin(port = 0) {
     if (path === '/api/rules-report') return send(200, 'application/json', '{"ok":true}')
     if (path === '/api/perf-report') return send(200, 'application/json', '{"ok":true}')
 
+    /* ---- 实时分析验收用的路由（老页面不引用它们，老验收的请求集合不受影响） ---- */
+
+    if (path === '/realtime.html') return send(200, 'text/html; charset=utf-8', RT_PAGE)
+    if (path === '/dialog.html') return send(200, 'text/html; charset=utf-8', DIALOG_PAGE)
+    if (path === '/download.txt') {
+      return send(200, 'text/plain; charset=utf-8', 'monitor-download-payload\n', {
+        'content-disposition': 'attachment; filename="monitor-rt-download.txt"'
+      })
+    }
+    if (path === '/api/rt-report') return send(200, 'application/json', '{"ok":true}')
+    /* ---- 站点资源验收用的路由（同样只给新页面用） ---- */
+
+    if (path === '/sitedata.html') return send(200, 'text/html; charset=utf-8', SITEDATA_PAGE)
+    // 要进 CacheStorage 的东西：必须自己带上可缓存的头，否则 Cache.add 会拒收
+    if (path === '/api/sd-asset') {
+      return send(200, 'application/json', JSON.stringify({ asset: 1 }), { 'cache-control': 'max-age=300' })
+    }
+    // 归因用：这条响应带 Set-Cookie，验收里要能看到事件指向它
+    if (path === '/api/sd-set-cookie') {
+      return send(200, 'application/json', JSON.stringify({ set: 1 }), {
+        'set-cookie': 'sd_http=H1; Path=/; Max-Age=3600'
+      })
+    }
+    if (path === '/api/sitedata-report') return send(200, 'application/json', '{"ok":true}')
+    if (path === '/api/json-echo') {
+      // body 是异步到的：不等它收完，读到的就是空对象
+      await new Promise((resolve) => {
+        if (req.readableEnded) return resolve()
+        req.on('end', resolve)
+        req.on('error', resolve)
+      })
+      // 请求体带 extra 才多给一个字段 —— 契约回归就靠这个「多出来的字段」证明它看得见变化
+      let parsed = null
+      try {
+        parsed = JSON.parse(bodyText || '{}')
+      } catch {
+        parsed = null
+      }
+      const payload = {
+        ok: true,
+        name: 'json-echo',
+        echo: { user: (parsed && parsed.user) ?? null, n: (parsed && parsed.n) ?? null },
+        items: [1, 2, 3],
+        meta: { source: 'probe' }
+      }
+      if (parsed && parsed.extra) payload.bonus = { deep: true }
+      return send(200, 'application/json', JSON.stringify(payload))
+    }
+
+    // 与 json-echo 共用同一个 token：关联分析要看得见「同值参数跨端点」
+    if (path === '/api/json-echo-b') {
+      return send(200, 'application/json', JSON.stringify({ ok: true, name: 'json-echo-b' }))
+    }
+
+    // 固定正文：两个不同 URL 拿到同一份字节 —— 共享响应体（重复资源）的靶子
+    if (path === '/api/dup-body.json') {
+      return send(200, 'application/json', DUP_BODY)
+    }
+
     return send(404, 'text/plain', 'unknown: ' + path)
+  })
+
+  /*
+   * 真 WebSocket 握手 + 双向帧。
+   *
+   * Node 的 http server 对 Upgrade 请求不走 request 监听器，所以这里单独接管；
+   * wsLog 就是「服务端侧的真值」：收到了什么、发出了什么，一条不落。
+   */
+  server.on('upgrade', (req, socket) => {
+    const url = new URL(req.url, 'http://127.0.0.1')
+    if (url.pathname !== '/ws-probe') {
+      socket.destroy()
+      return
+    }
+    const key = req.headers['sec-websocket-key']
+    if (!key) {
+      socket.destroy()
+      return
+    }
+    const accept = createHash('sha1')
+      .update(key + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11')
+      .digest('base64')
+    socket.write(
+      'HTTP/1.1 101 Switching Protocols\r\n' +
+        'Upgrade: websocket\r\n' +
+        'Connection: Upgrade\r\n' +
+        'Sec-WebSocket-Accept: ' + accept + '\r\n\r\n'
+    )
+    wsSockets.add(socket)
+    wsLog.push({ dir: 'handshake', data: url.search, at: Date.now() })
+    // 握手后服务端主动推一条：这条要与库里「收到的帧」逐字对上
+    const push = 'server-push-1'
+    socket.write(encodeTextFrame(push))
+    wsLog.push({ dir: 'out', data: push, at: Date.now() })
+
+    let buffer = Buffer.alloc(0)
+    socket.on('data', (data) => {
+      buffer = Buffer.concat([buffer, data])
+      const parsed = decodeFrames(buffer)
+      buffer = parsed.rest
+      for (const frame of parsed.frames) {
+        if (frame.opcode === 0x8) {
+          wsLog.push({ dir: 'close', data: '', at: Date.now() })
+          socket.end(encodeCloseFrame())
+          return
+        }
+        if (frame.opcode !== 0x1) continue
+        wsLog.push({ dir: 'in', data: frame.payload, at: Date.now() })
+        // 回声加前缀：好和「服务端主动推的」那条区分开
+        const echo = 'echo:' + frame.payload
+        socket.write(encodeTextFrame(echo))
+        wsLog.push({ dir: 'out', data: echo, at: Date.now() })
+      }
+    })
+    socket.on('close', () => wsSockets.delete(socket))
+    socket.on('error', () => wsSockets.delete(socket))
   })
 
   return new Promise((resolve) => {
@@ -544,11 +938,19 @@ export function startOrigin(port = 0) {
       resolve({
         port: server.address().port,
         requests,
+        wsLog,
         close: () =>
           new Promise((done) => {
             for (const stream of openStreams) {
               try {
                 stream.destroy()
+              } catch {
+                /* 已经断了 */
+              }
+            }
+            for (const socket of wsSockets) {
+              try {
+                socket.destroy()
               } catch {
                 /* 已经断了 */
               }

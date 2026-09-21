@@ -1721,3 +1721,932 @@ table.group-table td {
   gap: 6px;
   margin-top: 4px;
 }
+/* ---------- 自由工作区：窗格 + 可拖分隔条 ---------- */
+
+.panes {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+  min-width: 0;
+}
+
+.panes-row {
+  flex-direction: row;
+}
+
+.panes-column {
+  flex-direction: column;
+}
+
+.pane {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--bg);
+}
+
+.pane-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 6px 3px 8px;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel-2);
+  flex: none;
+}
+
+/* 栏头这个下拉框是「瀑布图 / 统计 那些面板都去哪了」的唯一入口 ——
+   以前它是无边框的、看着像一段标题文字，用户根本认不出能点。做成明显的胶囊 + 自绘箭头 */
+.pane-pick-wrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+}
+
+.pane-pick-wrap::after {
+  content: '▾';
+  position: absolute;
+  right: 7px;
+  font-size: 9px;
+  color: var(--muted);
+  pointer-events: none;
+}
+
+.pane-pick {
+  appearance: none;
+  -webkit-appearance: none;
+  max-width: 100%;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  padding: 3px 20px 3px 8px;
+  border-radius: 999px;
+  cursor: pointer;
+}
+
+.pane-pick:hover,
+.pane-pick:focus-visible {
+  border-color: var(--accent);
+  background: var(--panel-2);
+  outline: none;
+}
+
+.pane-pick option {
+  background: var(--panel-2);
+  color: var(--text);
+}
+
+.pane-act {
+  background: transparent;
+  border: 0;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1;
+  padding: 3px 6px;
+  border-radius: 4px;
+}
+
+.pane-act:hover {
+  background: #2a3140;
+  color: var(--text);
+}
+
+.pane-body {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+}
+
+/* 面板原先都是「整屏」尺寸写的，进了窗格就铺满这一栏。
+   用 > 是有意的：面板内部自己还有 .detail / .split（比如脚本面板），那些不能被改 */
+.pane-body > * {
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  overflow: auto;
+}
+
+.pane-body > .detail {
+  width: auto;
+  flex: 1;
+  border-left: 0;
+}
+
+.pane-split {
+  flex: none;
+  background: var(--line);
+  position: relative;
+}
+
+/* 分隔条做细一点但热区留够：本体 4px，伪元素往外各扩 3px */
+.pane-split::after {
+  content: '';
+  position: absolute;
+  inset: -3px;
+}
+
+.panes-row > .pane-split {
+  width: 4px;
+  cursor: col-resize;
+}
+
+.panes-column > .pane-split {
+  height: 4px;
+  cursor: row-resize;
+}
+
+.pane-split:hover,
+.pane-split:active {
+  background: var(--accent);
+}
+
+/* 拖动分隔条时，整个窗口都别去抢鼠标指针，也别选中文字 */
+body.is-col-resize,
+body.is-col-resize * {
+  cursor: col-resize !important;
+  user-select: none !important;
+}
+
+body.is-row-resize,
+body.is-row-resize * {
+  cursor: row-resize !important;
+  user-select: none !important;
+}
+/* ================= 事件流 / WebSocket / 接口画像 / 调用图 =================
+   这四个面板共用一套骨架：顶栏（筛选 + 计数）+ 中间滚动区。
+   滚动条交给内层列表，面板本身 overflow:hidden —— 否则整块面板会跟着滚，
+   顶栏被推走。 */
+
+.banner-warn {
+  background: #2a2317;
+  color: #ffd9a0;
+  border-bottom-color: #4a3c24;
+}
+
+.pane-body > .ev-panel,
+.pane-body > .ws-panel,
+.pane-body > .ep-panel,
+.pane-body > .gph-panel,
+.pane-body > .sp-panel {
+  overflow: hidden;
+}
+
+.ev-panel,
+.ws-panel,
+.ep-panel,
+.gph-panel,
+.sp-panel {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+}
+
+.ev-bar,
+.ws-bar,
+.ep-bar,
+.gph-tabs,
+.ep-tabs,
+.ws-frames-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel);
+  flex: none;
+  flex-wrap: wrap;
+}
+
+.ev-bar .search,
+.ws-frames-bar .search,
+.ep-bar .search {
+  width: 200px;
+}
+
+.ev-chips {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--line);
+  flex: none;
+}
+
+.ev-list {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+
+.ev-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 3px 10px;
+  border-bottom: 1px solid #1a1f27;
+  cursor: pointer;
+  flex-wrap: wrap;
+}
+
+.ev-row:hover {
+  background: var(--panel-2);
+}
+
+.ev-row.ev-warn {
+  border-left: 2px solid var(--warn);
+}
+
+.ev-row.ev-error {
+  border-left: 2px solid var(--err);
+}
+
+.ev-time {
+  flex: none;
+  width: 92px;
+}
+
+.ev-kind {
+  flex: none;
+  width: 72px;
+}
+
+.ev-text {
+  flex: 1 1 320px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ev-url {
+  flex: 0 1 240px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: right;
+}
+
+.ev-detail {
+  flex: 1 0 100%;
+  margin: 4px 0 6px;
+  padding: 8px 10px;
+  background: #0f1318;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 260px;
+  overflow: auto;
+}
+
+/* ---------- WebSocket ---------- */
+
+.ws-split {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+
+.ws-conns {
+  flex: 0 0 34%;
+  min-width: 220px;
+  overflow: auto;
+  border-right: 1px solid var(--line);
+}
+
+.ws-conn {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 6px 10px;
+  border: 0;
+  border-bottom: 1px solid #1a1f27;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.ws-conn:hover {
+  background: var(--panel-2);
+}
+
+.ws-conn-active {
+  background: #1d2634;
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.ws-conn-url {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ws-conn-meta {
+  display: block;
+  margin-top: 2px;
+}
+
+.ws-frames {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.ws-frame-list {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+
+.ws-frame {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 2px 10px;
+  border-bottom: 1px solid #1a1f27;
+  cursor: pointer;
+}
+
+.ws-frame:hover {
+  background: var(--panel-2);
+}
+
+.ws-frame.ws-sent {
+  border-left: 2px solid var(--info);
+}
+
+.ws-frame.ws-recv {
+  border-left: 2px solid var(--ok);
+}
+
+.ws-dir {
+  flex: none;
+  width: 56px;
+}
+
+.ws-op {
+  flex: none;
+  width: 74px;
+}
+
+.ws-payload {
+  flex: 1;
+  min-width: 0;
+  word-break: break-all;
+  white-space: pre-wrap;
+}
+
+.ws-size {
+  flex: none;
+  text-align: right;
+  width: 150px;
+}
+
+/* ---------- 接口画像 / 契约 / 导出 ---------- */
+
+.ep-tabs,
+.gph-tabs {
+  justify-content: flex-start;
+}
+
+.ep-min {
+  width: 56px;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  color: var(--text);
+  border-radius: 4px;
+  padding: 2px 6px;
+  font: inherit;
+  margin: 0 4px;
+}
+
+.ep-profiles,
+.ep-contract,
+.ep-export,
+.gph-graph,
+.gph-rel {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.ep-split {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+
+.ep-list {
+  flex: 0 0 46%;
+  min-width: 260px;
+  overflow: auto;
+  border-right: 1px solid var(--line);
+}
+
+.ep-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  width: 100%;
+  text-align: left;
+  padding: 5px 10px;
+  border: 0;
+  border-bottom: 1px solid #1a1f27;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  flex-wrap: wrap;
+}
+
+.ep-row:hover {
+  background: var(--panel-2);
+}
+
+.ep-row-active {
+  background: #1d2634;
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.ep-key {
+  flex: 1 1 100%;
+}
+
+.ep-meta {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.ep-statuses {
+  flex: none;
+  display: flex;
+  gap: 4px;
+}
+
+.ep-detail {
+  flex: 1;
+  min-width: 0;
+  overflow: auto;
+}
+
+.ep-profile {
+  padding: 10px 12px;
+}
+
+.ep-profile-key {
+  margin: 0 0 8px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.ep-cols {
+  display: flex;
+  gap: 18px;
+  flex-wrap: wrap;
+}
+
+.ep-section {
+  margin: 10px 0;
+}
+
+.ep-section h4 {
+  margin: 0 0 6px;
+  font-size: 12px;
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.ep-table td {
+  padding: 2px 8px 2px 0;
+  max-width: 380px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ep-dist {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.ep-contract-list,
+.ep-reports {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 8px 10px;
+}
+
+.ep-contract-row,
+.ep-report {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 4px 0;
+  border-bottom: 1px solid #1a1f27;
+}
+
+.ep-report {
+  display: block;
+  margin-bottom: 12px;
+}
+
+.ep-report h4 {
+  margin: 0 0 4px;
+}
+
+.ep-report-meta {
+  margin: 2px 0 4px;
+}
+
+.ep-diff {
+  padding: 8px 10px;
+  overflow: auto;
+}
+
+.ep-diff-line {
+  margin: 6px 0;
+  color: var(--muted);
+}
+
+.ep-diff-changed {
+  padding: 3px 0;
+  border-bottom: 1px solid #1a1f27;
+}
+
+.ep-diff-changed .warn,
+.ep-diff .warn {
+  color: var(--warn);
+}
+
+.ep-diff .ok {
+  color: var(--ok);
+}
+
+/* ---------- 调用图 / 关联 ---------- */
+
+.gph-split {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+
+.gph-edges {
+  flex: 0 0 58%;
+  min-width: 300px;
+  overflow: auto;
+  border-right: 1px solid var(--line);
+}
+
+.gph-edge {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  width: 100%;
+  text-align: left;
+  padding: 4px 10px;
+  border: 0;
+  border-bottom: 1px solid #1a1f27;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  flex-wrap: wrap;
+  position: relative;
+}
+
+.gph-edge:hover {
+  background: var(--panel-2);
+}
+
+.gph-edge-active {
+  background: #1d2634;
+}
+
+/* 权重条：贴在行底部，一眼看出哪条边是主要通路 */
+.gph-bar {
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  height: 2px;
+  background: var(--accent);
+  opacity: 0.55;
+}
+
+.gph-from {
+  flex: 0 1 auto;
+  max-width: 34%;
+}
+
+.gph-to {
+  flex: 0 1 auto;
+  max-width: 34%;
+}
+
+.gph-num {
+  flex: none;
+}
+
+.gph-initiators {
+  display: flex;
+  gap: 4px;
+}
+
+.gph-samples {
+  flex: 1 0 100%;
+  word-break: break-all;
+}
+
+.gph-side {
+  flex: 1;
+  min-width: 0;
+  overflow: auto;
+  padding: 8px 10px;
+}
+
+.gph-side h4 {
+  margin: 10px 0 4px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.gph-cluster {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 2px 0;
+}
+
+.gph-rel-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 3px 0;
+  border-bottom: 1px solid #1a1f27;
+}
+
+/* ================= 站点资源（cookie / 存储 / 缓存 / SW / 快照） =================
+   和「事件流」那几个面板同一套骨架：顶栏 + 左右分栏 + 内层滚动。
+   左边挑域，右边看这个域到底存了什么。 */
+
+.pane-body > .sp-panel {
+  overflow: hidden;
+}
+
+.sp-panel {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+}
+
+.sp-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel);
+  flex: none;
+  flex-wrap: wrap;
+}
+
+.sp-bar .search {
+  width: 180px;
+}
+
+.sp-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.sp-stat {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.sp-note {
+  flex: none;
+  padding: 4px 10px;
+  font-size: 12px;
+  color: var(--muted);
+  border-bottom: 1px solid var(--line);
+}
+
+.sp-note-err {
+  color: var(--err);
+}
+
+.sp-split {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+
+.sp-list {
+  flex: 0 0 32%;
+  min-width: 220px;
+  overflow: auto;
+  border-right: 1px solid var(--line);
+}
+
+.sp-empty {
+  padding: 10px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.sp-origin {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 6px 10px;
+  border-bottom: 1px solid #1a1f27;
+  cursor: pointer;
+}
+
+.sp-origin:hover {
+  background: var(--panel-2);
+}
+
+.sp-origin-active {
+  background: #1d2634;
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.sp-origin-host {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sp-origin-meta {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-top: 2px;
+  font-size: 11px;
+  flex-wrap: wrap;
+}
+
+.sp-detail {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.sp-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--line);
+  flex: none;
+}
+
+.sp-head-origin {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sp-spacer {
+  flex: 1;
+}
+
+.sp-tabs {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--line);
+  flex: none;
+  flex-wrap: wrap;
+}
+
+.sp-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 8px 10px;
+}
+
+.sp-row-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 8px;
+  flex-wrap: wrap;
+}
+
+.sp-cols {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.sp-card {
+  flex: 1 1 300px;
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.sp-card-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  background: var(--panel-2);
+  border-bottom: 1px solid var(--line);
+  font-size: 12px;
+}
+
+.sp-card-body {
+  padding: 6px 8px;
+}
+
+.sp-storage {
+  margin-bottom: 12px;
+}
+
+.sp-line {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 2px 0;
+  border-bottom: 1px solid #1a1f27;
+}
+
+.sp-mono {
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 12px;
+}
+
+.sp-key {
+  flex: 0 1 28%;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sp-value {
+  flex: 1;
+  min-width: 0;
+  word-break: break-all;
+}
+
+.sp-flags {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.sp-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.sp-table th,
+.sp-table td {
+  text-align: left;
+  padding: 4px 8px;
+  border-bottom: 1px solid #1a1f27;
+  vertical-align: top;
+}
+
+.sp-table th {
+  color: var(--muted);
+  font-weight: 500;
+}

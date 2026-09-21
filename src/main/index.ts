@@ -1,8 +1,10 @@
 import { app, BrowserWindow, ipcMain, shell, type IpcMainInvokeEvent } from 'electron'
-import { existsSync } from 'node:fs'
+import { existsSync, mkdirSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { Controller } from './controller'
 import { ControlBridge } from './control/bridge'
+import { WindowDock } from './window/dock'
+import { asLayout, asSide, readUiSettings, writeUiSettings } from './window/settings'
 import { resolveRuntimeFile, resolveRuntimeRoot } from './paths'
 import { locateNode } from './storage/locate-node'
 import { DEFAULT_WINDOW_MS } from '../../proxy/correlate.mjs'
@@ -10,6 +12,12 @@ import { emptyRuleSet, readRuleSet, writeRuleSet } from './rules/store'
 import type {
   ConsoleEntry,
   ControllerStatus,
+  CookieDeleteFilter as SiteCookieFilter,
+  CookieInput as SiteCookieInput,
+  EventQuery,
+  ExportQuery,
+  DockSide,
+  DockState,
   InputAction,
   Profile,
   RequestOrder,
@@ -17,8 +25,14 @@ import type {
   RequestRecord,
   RuleSet,
   ScriptOrder,
-  ScriptQuery
+  ScriptQuery,
+  SiteDataType,
+  UiSettings,
+  WsFrameQuery
 } from '../shared/types'
+
+/** 存储编辑的入参（就是 Controller.editStorage 那一个） */
+type SiteStorageEdit = Parameters<Controller['editStorage']>[0]
 
 function envInt(name: string, fallback: number): number {
   const raw = process.env[name]
@@ -38,15 +52,18 @@ const HEADLESS = process.env['MONITOR_HEADLESS'] === '1'
 const DATA_DIR = process.env['MONITOR_DATA_DIR'] ?? app.getPath('userData')
 const DB_PATH = process.env['MONITOR_DB'] ?? join(DATA_DIR, 'monitor.db')
 const PROFILE_DIR = process.env['MONITOR_PROFILE_DIR'] ?? join(DATA_DIR, 'browser-profile')
+/** 下载目录。空串 = 用浏览器默认的下载夹（老行为） */
+const DOWNLOAD_DIR = process.env['MONITOR_DOWNLOAD_DIR'] ?? join(DATA_DIR, 'downloads')
 const CAPTURE_BODIES = process.env['MONITOR_CAPTURE_BODIES'] !== '0'
 const BODY_MAX_BYTES = envInt('MONITOR_BODY_MAX_KB', 256) * 1024
 const BODY_STORE_BYTES = envInt('MONITOR_BODY_STORE_MB', 512) * 1024 * 1024
 const BODY_STORE_COUNT = envInt('MONITOR_BODY_STORE_COUNT', 50_000)
 const BODY_TIMEOUT_MS = envInt('MONITOR_BODY_TIMEOUT_MS', 2000)
+/** 空 = 全部 resourceType（默认）。`*` / `all` 也认，写法更直白。 */
 const BODY_TYPES = (process.env['MONITOR_BODY_TYPES'] ?? '')
   .split(',')
   .map((value) => value.trim())
-  .filter(Boolean)
+  .filter((value) => Boolean(value) && value !== '*' && value.toLowerCase() !== 'all')
 
 /** 脚本采集。Debugger 域只在 Profile L 开，所以 H 下这里自动失效。 */
 const CAPTURE_SCRIPTS = process.env['MONITOR_CAPTURE_SCRIPTS'] !== '0'
@@ -77,6 +94,15 @@ const CONTROL_API = process.env['MONITOR_API'] !== '0'
 const CONTROL_PORT = envInt('MONITOR_API_PORT', 0)
 
 /** 开局停在哪个面板。截图/演示用，也方便直接从瀑布图开始看 */
+// Chrome 不会替我们建这个目录（setDownloadBehavior 指过去但目录不存在时下载会失败）
+if (DOWNLOAD_DIR) {
+  try {
+    mkdirSync(DOWNLOAD_DIR, { recursive: true })
+  } catch {
+    /* 建不出来就交给浏览器默认行为，不因为它起不来 */
+  }
+}
+
 const UI_TAB = process.env['MONITOR_UI_TAB'] ?? ''
 
 /** 开局自动选中哪条请求（按 URL 子串匹配）。截图详情面板用 */
@@ -87,6 +113,16 @@ const UI_DTAB = process.env['MONITOR_UI_DTAB'] ?? ''
 
 /** 规则文件。面板里改的规则落在这里，下次启动自动加载 */
 const RULES_PATH = process.env['MONITOR_RULES'] ?? join(DATA_DIR, 'rules.json')
+
+/**
+ * 窗口吸附的 Win32 助手（`win/dock-helper.ps1`）。
+ * 和 control / mcp / proxy 一个套路：打包后走 extraResources 落在 resources/win 下，
+ * 必须**在 asar 之外** —— 它是要被 spawn 起来的子进程。
+ */
+const DOCK_SCRIPT = resolveRuntimeFile('win', 'dock-helper.ps1')
+
+/** 界面偏好（目前只有窗口吸附）。单独一个文件，不和 rules.json 搅在一起 */
+const SETTINGS_PATH = join(DATA_DIR, 'ui-settings.json')
 
 /**
  * 本地代理（P5）。开了才有 DNS/TLS 时序，也才有「大 body 改写下沉到代理层」。
@@ -104,6 +140,21 @@ let controller: Controller | null = null
 let controlBridge: ControlBridge | null = null
 let controlPort: number | null = null
 let controlWindow: BrowserWindow | null = null
+let dock: WindowDock | null = null
+
+/**
+ * 把吸附状态合进控制器状态。
+ *
+ * 控制器自己不管窗口吸附（那是主进程这边的事），但面板 / HTTP API / MCP 都只读
+ * `getStatus()` —— 在这里补一次，三个面同时就有了，不用各自去问 WindowDock。
+ * 和 `publishControl` 往 status 上挂 `control` 是一个套路。
+ */
+function withDock(status: ControllerStatus | null): ControllerStatus | null {
+  if (!status) return status
+  const state = dock?.state()
+  if (state) status.dock = state
+  return status
+}
 
 function createControlWindow(): BrowserWindow {
   const win = new BrowserWindow({
@@ -157,7 +208,10 @@ function createControlWindow(): BrowserWindow {
 }
 
 function wireIpc(): void {
-  ipcMain.handle('monitor:status', (): ControllerStatus | null => controller?.getStatus() ?? null)
+  ipcMain.handle(
+    'monitor:status',
+    (): ControllerStatus | null => withDock(controller?.getStatus() ?? null)
+  )
 
   ipcMain.handle('monitor:clear', (): void => {
     controller?.clear()
@@ -183,6 +237,160 @@ function wireIpc(): void {
 
   ipcMain.handle('monitor:stats', async () => (await controller?.getStats()) ?? null)
 
+  /* ------------------------------------- 分析层：事件流 / WS / 画像 / 导出 */
+
+  ipcMain.handle('monitor:events', async (_event, query: EventQuery) =>
+    (await controller?.queryEvents(query)) ?? null
+  )
+
+  ipcMain.handle('monitor:event-stats', async () => (await controller?.getEventStats()) ?? null)
+
+  ipcMain.handle('monitor:ws-frames', async (_event, query: WsFrameQuery) =>
+    (await controller?.queryWsFrames(query)) ?? null
+  )
+
+  ipcMain.handle('monitor:ws-connections', async (_event, limit?: number) =>
+    (await controller?.getWsConnections(limit)) ?? null
+  )
+
+  ipcMain.handle(
+    'monitor:endpoints',
+    async (_event, options: Parameters<Controller['getEndpointProfiles']>[0]) =>
+      (await controller?.getEndpointProfiles(options)) ?? null
+  )
+
+  ipcMain.handle(
+    'monitor:endpoint-detail',
+    async (_event, key: string, options: Parameters<Controller['getEndpointDetail']>[1]) =>
+      (await controller?.getEndpointDetail(key, options)) ?? null
+  )
+
+  ipcMain.handle(
+    'monitor:graph',
+    async (_event, options: Parameters<Controller['getRequestGraph']>[0]) =>
+      (await controller?.getRequestGraph(options)) ?? null
+  )
+
+  ipcMain.handle(
+    'monitor:relations',
+    async (_event, options: Parameters<Controller['getRelations']>[0]) =>
+      (await controller?.getRelations(options)) ?? null
+  )
+
+  // 导出/契约/对话框这几条不吞异常：它们是「点下去要结果」的动作，
+  // 失败必须把原因原样带回渲染进程，返回 null 只会让人以为「没数据」
+  ipcMain.handle('monitor:export-har', async (_event, options: ExportQuery) => {
+    if (!controller) throw new Error('控制器还没起来')
+    return controller.exportHar(options)
+  })
+
+  ipcMain.handle('monitor:export-jsonl', async (_event, options: ExportQuery) => {
+    if (!controller) throw new Error('控制器还没起来')
+    return controller.exportJsonl(options)
+  })
+
+  ipcMain.handle('monitor:export-bodies', async (_event, options: ExportQuery & { dir?: string }) => {
+    if (!controller) throw new Error('控制器还没起来')
+    return controller.exportBodies(options)
+  })
+
+  ipcMain.handle(
+    'monitor:contract-snapshot',
+    async (_event, options: Parameters<Controller['contractSnapshot']>[0]) => {
+      if (!controller) throw new Error('控制器还没起来')
+      return controller.contractSnapshot(options)
+    }
+  )
+
+  ipcMain.handle('monitor:contract-list', async (_event, limit?: number) =>
+    (await controller?.listContracts(limit)) ?? null
+  )
+
+  ipcMain.handle('monitor:contract-get', async (_event, id: number, withSchema?: boolean) =>
+    (await controller?.getContract(id, withSchema)) ?? null
+  )
+
+  ipcMain.handle('monitor:contract-delete', async (_event, id: number) =>
+    (await controller?.deleteContract(id)) ?? { deleted: 0 }
+  )
+
+  ipcMain.handle(
+    'monitor:contract-diff',
+    async (_event, options: Parameters<Controller['contractDiff']>[0]) => {
+      if (!controller) throw new Error('控制器还没起来')
+      return controller.contractDiff(options)
+    }
+  )
+
+  /* ---- 站点资源：cookie 与站点存储 ---- */
+
+  ipcMain.handle('monitor:cookies', async (_event, options?: Parameters<Controller['listCookies']>[0]) =>
+    (await controller?.listCookies(options ?? {})) ?? null
+  )
+
+  ipcMain.handle('monitor:cookie-stats', async () => (await controller?.getCookieStats()) ?? null)
+
+  ipcMain.handle('monitor:site-origins', async (_event, options?: Parameters<Controller['getSiteOrigins']>[0]) =>
+    (await controller?.getSiteOrigins(options ?? {})) ?? null
+  )
+
+  ipcMain.handle('monitor:site-detail', async (_event, origin: string) =>
+    (await controller?.getSiteDetail(origin)) ?? null
+  )
+
+  ipcMain.handle('monitor:site-scan', async (_event, options?: Parameters<Controller['scanSiteData']>[0]) => {
+    if (!controller) throw new Error('控制器还没起来')
+    return controller.scanSiteData(options ?? {})
+  })
+
+  ipcMain.handle('monitor:site-cookie-set', async (_event, input: SiteCookieInput) =>
+    (await controller?.setCookie(input)) ?? { ok: false, error: '控制器还没起来' }
+  )
+
+  ipcMain.handle('monitor:site-cookie-delete', async (_event, filter: SiteCookieFilter) =>
+    (await controller?.deleteCookies(filter)) ?? { ok: false, error: '控制器还没起来', deleted: 0 }
+  )
+
+  ipcMain.handle('monitor:site-clear', async (_event, origin: string, types: SiteDataType[]) =>
+    (await controller?.clearSiteData(origin, types)) ?? { ok: false, error: '控制器还没起来', origin, types: [] }
+  )
+
+  ipcMain.handle('monitor:site-storage', async (_event, input: SiteStorageEdit) =>
+    (await controller?.editStorage(input)) ?? { ok: false, error: '控制器还没起来' }
+  )
+
+  ipcMain.handle('monitor:site-idb-delete', async (_event, origin: string, name: string) =>
+    (await controller?.deleteIdbDatabase(origin, name)) ?? { ok: false, error: '控制器还没起来' }
+  )
+
+  ipcMain.handle('monitor:site-cache-delete', async (_event, origin: string, name: string, url?: string) =>
+    (await controller?.deleteCache(origin, name, url)) ?? { ok: false, error: '控制器还没起来' }
+  )
+
+  ipcMain.handle('monitor:site-sw-unregister', async (_event, scopeURL: string) =>
+    (await controller?.unregisterServiceWorker(scopeURL)) ?? { ok: false, error: '控制器还没起来' }
+  )
+
+  ipcMain.handle('monitor:site-snapshot', async (_event, options?: { label?: string }) => {
+    if (!controller) throw new Error('控制器还没起来')
+    return controller.siteSnapshot(options ?? {})
+  })
+
+  ipcMain.handle('monitor:site-snapshots', async (_event, limit?: number) =>
+    (await controller?.listSiteSnapshots(limit)) ?? null
+  )
+
+  ipcMain.handle('monitor:site-snapshot-diff', async (_event, baseId: number) =>
+    (await controller?.siteSnapshotDiff(baseId)) ?? null
+  )
+
+  ipcMain.handle('monitor:site-snapshot-delete', async (_event, id: number) =>
+    (await controller?.deleteSiteSnapshot(id)) ?? { deleted: 0 }
+  )
+
+  ipcMain.handle('monitor:dialog', async (_event, accept: boolean, promptText?: string) =>
+    (await controller?.handleDialog(accept, promptText)) ?? { ok: false, error: '控制器还没起来' }
+  )
   ipcMain.handle('monitor:timeline', async (_event, query: RequestQuery, limit: number) =>
     (await controller?.getTimeline(query, limit)) ?? []
   )
@@ -282,13 +490,16 @@ function wireIpc(): void {
 
   ipcMain.handle('monitor:sessions', async () => (await controller?.getSessions()) ?? null)
 
-  ipcMain.handle('monitor:switch-profile', async (_event, profile: Profile) =>
-    (await controller?.switchProfile(profile === 'H' ? 'H' : 'L')) ?? {
+  ipcMain.handle('monitor:switch-profile', async (_event, profile: Profile) => {
+    const result = (await controller?.switchProfile(profile === 'H' ? 'H' : 'L')) ?? {
       ok: false,
       error: '控制器还没起来',
       profile: 'L' as Profile
     }
-  )
+    // 换 Profile = 换了一个浏览器进程/窗口，旧句柄必然失效 —— 重新抓一次贴上去
+    if (result.ok) void dock?.resnap()
+    return result
+  })
 
   ipcMain.handle('monitor:save-rules', (_event, set: RuleSet) => {
     if (!set || typeof set !== 'object' || !Array.isArray(set.rules)) {
@@ -344,11 +555,44 @@ function wireIpc(): void {
     // window-all-closed 里会停掉控制服务、排空采集队列，不会丢没落盘的数据。
     senderWindow(event)?.close()
   })
+
+  /* ---- 窗口吸附 ---- */
+
+  ipcMain.handle(
+    'monitor:set-dock',
+    async (_event, enabled: boolean, side?: DockSide): Promise<DockState> =>
+      (await dock?.setEnabled(Boolean(enabled), side)) ?? {
+        enabled: false,
+        available: false,
+        attached: false,
+        side: 'right',
+        reason: 'not-ready'
+      }
+  )
+
+  /* ---- 界面偏好（吸附 + 工作区布局）。和吸附共用一个文件，读改写都走 settings.ts ---- */
+
+  ipcMain.handle('monitor:ui-settings', (): UiSettings => readUiSettings(SETTINGS_PATH))
+
+  ipcMain.handle(
+    'monitor:set-ui-settings',
+    (_event, patch: Partial<UiSettings>): UiSettings => {
+      const current = readUiSettings(SETTINGS_PATH)
+      const next: UiSettings = {
+        // 逐字段修：布局是渲染层摆出来的，坏值不能落盘把下次启动也带坏
+        dock: patch?.dock ? { enabled: patch.dock.enabled === true, side: asSide(patch.dock.side) } : current.dock,
+        layout: patch?.layout ? asLayout(patch.layout) : current.layout
+      }
+      writeUiSettings(SETTINGS_PATH, next)
+      return next
+    }
+  )
 }
 
 app.whenReady().then(async () => {
   wireIpc()
-  controlWindow = createControlWindow()
+  const controlWin = createControlWindow()
+  controlWindow = controlWin
 
   controller = new Controller({
     // 独立 profile，绝不碰用户真实的浏览器数据
@@ -357,6 +601,7 @@ app.whenReady().then(async () => {
     profile: PROFILE,
     headless: HEADLESS,
     dbPath: DB_PATH,
+    downloadDir: DOWNLOAD_DIR,
     captureBodies: CAPTURE_BODIES,
     bodyMaxBytes: BODY_MAX_BYTES,
     bodyStoreMaxBytes: BODY_STORE_BYTES,
@@ -384,7 +629,7 @@ app.whenReady().then(async () => {
 
   controller.on('status', (status: ControllerStatus) => {
     if (controlWindow && !controlWindow.isDestroyed()) {
-      controlWindow.webContents.send('monitor:status', status)
+      controlWindow.webContents.send('monitor:status', withDock(status))
     }
   })
 
@@ -399,8 +644,29 @@ app.whenReady().then(async () => {
     }
   })
 
+  // 窗口吸附：控制窗口一动，浏览器就跟着动（不是嵌入，只改位置尺寸 —— 见 window/dock.ts）
+  dock = new WindowDock({
+    win: controlWin,
+    scriptPath: DOCK_SCRIPT,
+    profileDir: PROFILE_DIR,
+    settingsPath: SETTINGS_PATH,
+    log: (line: string) => console.log(line)
+  })
+  dock.onState((state: DockState) => {
+    // 先更新 status 上的那份（HTTP API / MCP 读的就是它），再推给面板
+    const status = controller?.getStatus()
+    if (status) status.dock = state
+    if (controlWindow && !controlWindow.isDestroyed()) {
+      controlWindow.webContents.send('monitor:dock', state)
+    }
+  })
+
   controller.setRuleSet(readRuleSet(RULES_PATH))
   await controller.start()
+
+  // 浏览器起来了才谈得上吸附。放在 start 之后、异步跑：冷启动的 find 要几秒（要编译助手），
+  // 不该把它挂在启动路径上。
+  void dock.restore()
 
   // AI 友好面：把控制服务拉起来，并把它的地址写进状态（面板与 agent 都读得到）
   if (CONTROL_API) {
@@ -415,6 +681,9 @@ app.whenReady().then(async () => {
         nodePath
       })
       controlBridge.onLog = (line: string) => console.log(line)
+      // agent 读的 /status 也要能看到吸附状态（和面板走同一份 withDock）
+      controlBridge.decorateStatus = (status: ControllerStatus): ControllerStatus =>
+        withDock(status) ?? status
       controlBridge.attach(controller)
       controlBridge.start()
     } catch (error) {
@@ -469,10 +738,14 @@ app.whenReady().then(async () => {
 app.on('window-all-closed', () => {
   void controlBridge?.stop()
   controller?.stop()
+  dock?.dispose()
+  dock = null
   app.quit()
 })
 
 app.on('before-quit', () => {
   void controlBridge?.stop()
   controller?.stop()
+  dock?.dispose()
+  dock = null
 })

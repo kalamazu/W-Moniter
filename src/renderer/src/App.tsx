@@ -1,16 +1,22 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { ControllerStatus } from '../../shared/types'
+import type { ControllerStatus, DockState, PanelId, PanelLayout } from '../../shared/types'
 import { DetailPanel } from './components/DetailPanel'
 import { DomPanel } from './components/DomPanel'
 import { ConsolePanel } from './components/ConsolePanel'
+import { EndpointsPanel } from './components/EndpointsPanel'
 import { EnvPanel } from './components/EnvPanel'
+import { EventsPanel } from './components/EventsPanel'
+import { GraphPanel } from './components/GraphPanel'
 import { RequestTable } from './components/RequestTable'
 import { RulePanel } from './components/RulePanel'
 import { ScriptPanel } from './components/ScriptPanel'
 import { SessionsPanel } from './components/SessionsPanel'
+import { SitePanel } from './components/SitePanel'
 import { StatsPanel } from './components/StatsPanel'
+import { PANELS, PaneGrid } from './components/PaneGrid'
 import { TitleBar } from './components/TitleBar'
 import { Waterfall } from './components/Waterfall'
+import { WsPanel } from './components/WsPanel'
 import { buildQuery, formatSize, type UiFilters } from './format'
 import { useRequests } from './hooks/useRequests'
 
@@ -38,24 +44,25 @@ const RESOURCE_TYPES = [
   'Other'
 ]
 
-type Tab = 'list' | 'waterfall' | 'scripts' | 'stats' | 'rules' | 'console' | 'env' | 'dom' | 'sessions'
+/** 窗格上限，和主进程 window/settings.ts 里的 MAX_PANES 对齐 */
+const MAX_PANES = 4
 
-const TABS: ReadonlyArray<readonly [Tab, string]> = [
-  ['list', '请求列表'],
-  ['waterfall', '瀑布图'],
-  ['scripts', '脚本'],
-  ['stats', '统计'],
-  ['rules', '规则'],
-  ['console', '控制台'],
-  ['env', '环境'],
-  ['dom', 'DOM'],
-  ['sessions', '会话']
-]
+/** 默认布局 = 以前那个固定分栏的样子：左边请求列表，右边详情 */
+const DEFAULT_LAYOUT: PanelLayout = { panes: ['list', 'detail'], sizes: [0.62, 0.38], dir: 'row' }
 
-/** 允许从 URL 指定开局面板（MONITOR_UI_TAB），截图和演示时省得手点 */
-function initialTab(): Tab {
+/** URL 里指定的开局面板（MONITOR_UI_TAB）。截图与演示脚本靠它，优先级高于落盘的布局 */
+function urlPanel(): PanelId | null {
   const value = new URLSearchParams(window.location.search).get('tab')
-  return TABS.some(([key]) => key === value) ? (value as Tab) : 'list'
+  return PANELS.some((panel) => panel.id === value) ? (value as PanelId) : null
+}
+
+function initialLayout(): PanelLayout {
+  const panel = urlPanel()
+  if (!panel) return DEFAULT_LAYOUT
+  // 列表 / 瀑布图历史上就是「主区 + 详情」两栏，其它面板是单栏铺满
+  return panel === 'list' || panel === 'waterfall'
+    ? { panes: [panel, 'detail'], sizes: [0.62, 0.38], dir: 'row' }
+    : { panes: [panel], sizes: [1], dir: 'row' }
 }
 
 /** 允许从 URL 指定开局选中哪条请求（MONITOR_UI_SELECT），按 URL 子串匹配 */
@@ -69,15 +76,23 @@ export default function App(): React.JSX.Element {
   const [selectedSeq, setSelectedSeq] = useState<number | null>(null)
   // 开局要自动选中的那条请求；选中一次就把针清掉，之后不再干扰用户
   const selectNeedle = useRef(initialSelectNeedle())
-  const [tab, setTab] = useState<Tab>(() => initialTab())
+  const [layout, setLayout] = useState<PanelLayout>(() => initialLayout())
+  /** 落盘的布局恢复完了没有 —— 没恢复完别把默认值写回去，否则「上次摆的」会被默认盖掉 */
+  const [layoutReady, setLayoutReady] = useState(false)
   const [waterfallLimit, setWaterfallLimit] = useState(2000)
 
   // 实时流量只用来「敲一下」：真正取数是去库里查，避免维护两份数据源
   const [liveTick, setLiveTick] = useState(0)
   const tickTimer = useRef<number | null>(null)
 
+  // 吸附状态并进 status —— 面板只认 status 这一个数据源，不在别处再存一份
+  const applyDock = useCallback((next: DockState): void => {
+    setStatus((prev) => (prev ? { ...prev, dock: next } : prev))
+  }, [])
+
   useEffect(() => {
     const offStatus = window.monitor.onStatus(setStatus)
+    const offDock = window.monitor.onDock(applyDock)
     const offRecords = window.monitor.onRequests((batch) => {
       if (batch.length === 0) return
       // 高频流量下别把渲染进程淹了，节流到 400ms 敲一次
@@ -90,10 +105,42 @@ export default function App(): React.JSX.Element {
     void window.monitor.getStatus().then(setStatus)
     return () => {
       offStatus()
+      offDock()
       offRecords()
       if (tickTimer.current !== null) window.clearTimeout(tickTimer.current)
     }
+  }, [applyDock])
+
+  // 恢复上次摆好的布局。URL 显式指定面板时以 URL 为准（验收脚本按 ?tab= 截图）
+  useEffect(() => {
+    if (urlPanel()) {
+      setLayoutReady(true)
+      return
+    }
+    let alive = true
+    void window.monitor
+      .uiSettings()
+      .then((settings) => {
+        if (alive && settings?.layout) setLayout(settings.layout)
+      })
+      .catch((error: unknown) => console.error('读取界面偏好失败', error))
+      .finally(() => {
+        if (alive) setLayoutReady(true)
+      })
+    return () => {
+      alive = false
+    }
   }, [])
+
+  // 布局一变就落盘。原来是 400ms 防抖 + 「关窗口补一次」，实测补不上：关窗口是
+  // 直接拆渲染进程，React 的卸载清理根本不跑，防抖窗口里退出就真把那一下丢了。
+  // 而拖动只在松手时提交一次 state，本来也没有写盘风暴要压 —— 那就直接写。
+  useEffect(() => {
+    if (!layoutReady) return
+    void window.monitor
+      .setUiSettings({ layout })
+      .catch((error: unknown) => console.error('保存界面偏好失败', error))
+  }, [layout, layoutReady])
 
   const query = useMemo(() => buildQuery(filters), [filters])
   const storageReady = status?.storage.enabled ?? false
@@ -115,6 +162,113 @@ export default function App(): React.JSX.Element {
   const storage = status?.storage
   const body = status?.body
 
+  const toggleDock = (): void => {
+    void window.monitor
+      .setDock(!(status?.dock?.enabled ?? false))
+      .then(applyDock)
+      .catch((error: unknown) => console.error('切换窗口吸附失败', error))
+  }
+
+  const flipDock = (): void => {
+    void window.monitor
+      .setDock(true, status?.dock?.side === 'right' ? 'left' : 'right')
+      .then(applyDock)
+      .catch((error: unknown) => console.error('切换吸附侧失败', error))
+  }
+
+  /* ---- 工作区布局：加栏 / 换面板 / 关栏 / 换方向 / 复位 ---- */
+
+  const pickPanel = useCallback((index: number, id: PanelId): void => {
+    setLayout((prev) => ({
+      ...prev,
+      panes: prev.panes.map((current, i) => (i === index ? id : current))
+    }))
+  }, [])
+
+  const closePane = useCallback((index: number): void => {
+    setLayout((prev) => {
+      if (prev.panes.length <= 1) return prev
+      const panes = prev.panes.filter((_, i) => i !== index)
+      return { ...prev, panes, sizes: panes.map(() => Number((1 / panes.length).toFixed(4))) }
+    })
+  }, [])
+
+  /** 新栏放一个还没露面的面板；都露过面就放统计（纯只读，塞哪儿都不打扰） */
+  const addPane = useCallback((): void => {
+    setLayout((prev) => {
+      if (prev.panes.length >= MAX_PANES) return prev
+      const spare = PANELS.find((panel) => !prev.panes.includes(panel.id))?.id ?? 'stats'
+      const panes = [...prev.panes, spare]
+      return { ...prev, panes, sizes: panes.map(() => Number((1 / panes.length).toFixed(4))) }
+    })
+  }, [])
+
+  const flipDir = useCallback((): void => {
+    setLayout((prev) => ({ ...prev, dir: prev.dir === 'row' ? 'column' : 'row' }))
+  }, [])
+
+  const resetLayout = useCallback((): void => setLayout(DEFAULT_LAYOUT), [])
+
+  /** 面板渲染表。详情是独立面板：想「列表 + 详情」就摆两栏，只想看列表就摆一栏 */
+  const renderPanel = useCallback(
+    (id: PanelId): React.ReactNode => {
+      switch (id) {
+        case 'list':
+          return (
+            <RequestTable
+              rows={requests.rows}
+              total={requests.total}
+              hasMore={requests.hasMore}
+              loading={requests.loading}
+              pendingNew={requests.pendingNew}
+              selectedSeq={selectedSeq}
+              onSelect={onSelect}
+              onLoadMore={requests.loadMore}
+              onRefresh={requests.refresh}
+              onScrollTop={requests.notifyScrollTop}
+            />
+          )
+        case 'waterfall':
+          return (
+            <Waterfall
+              query={query}
+              liveTick={liveTick}
+              selectedSeq={selectedSeq}
+              onSelect={onSelect}
+              limit={waterfallLimit}
+            />
+          )
+        case 'detail':
+          return <DetailPanel seq={selectedSeq} onClose={onClose} />
+        case 'stats':
+          return <StatsPanel liveTick={liveTick} />
+        case 'scripts':
+          return <ScriptPanel liveTick={liveTick} />
+        case 'rules':
+          return <RulePanel liveTick={liveTick} />
+        case 'console':
+          return <ConsolePanel liveTick={liveTick} />
+        case 'env':
+          return <EnvPanel liveTick={liveTick} />
+        case 'dom':
+          return <DomPanel liveTick={liveTick} />
+        case 'sessions':
+          return <SessionsPanel liveTick={liveTick} />
+        case 'events':
+          return <EventsPanel liveTick={liveTick} />
+        case 'ws':
+          return <WsPanel />
+        case 'endpoints':
+          return <EndpointsPanel liveTick={liveTick} />
+        case 'graph':
+          return <GraphPanel liveTick={liveTick} />
+        case 'sites':
+          return <SitePanel liveTick={liveTick} />
+      }
+    },
+    [requests, query, liveTick, selectedSeq, onSelect, onClose, waterfallLimit]
+  )
+
   return (
     <div className="app">
       <TitleBar
@@ -123,6 +277,8 @@ export default function App(): React.JSX.Element {
         matched={requests.total}
         targets={status?.targets ?? []}
         onRefresh={requests.refresh}
+        onToggleDock={toggleDock}
+        onFlipDock={flipDock}
       />
 
       {status?.error && <div className="banner banner-err">{status.error}</div>}
@@ -156,19 +312,19 @@ export default function App(): React.JSX.Element {
         <span className="spacer" />
 
         <div className="tabs">
-          {TABS.map(([key, label]) => (
-            <button
-              key={key}
-              type="button"
-              className={`tab${tab === key ? ' tab-active' : ''}`}
-              onClick={() => setTab(key)}
-            >
-              {label}
-            </button>
-          ))}
+          <button type="button" className="tab" onClick={addPane} disabled={layout.panes.length >= MAX_PANES} title={`再加一栏（最多 ${MAX_PANES} 栏）`}>
+            ＋ 分栏
+          </button>
+          <button type="button" className="tab" onClick={flipDir} title="各栏左右排 / 上下排">
+            {layout.dir === 'row' ? '⇔ 左右' : '⇕ 上下'}
+          </button>
+          <button type="button" className="tab" onClick={resetLayout} title="回到默认布局（列表 + 详情）">
+            ⟲ 复位
+          </button>
         </div>
       </div>
 
+      {(layout.panes.includes('list') || layout.panes.includes('waterfall')) && (
       <div className="toolbar">
         <input
           className="search"
@@ -229,51 +385,15 @@ export default function App(): React.JSX.Element {
           重置
         </button>
       </div>
-
-      {tab === 'list' && (
-        <div className="split">
-          <RequestTable
-            rows={requests.rows}
-            total={requests.total}
-            hasMore={requests.hasMore}
-            loading={requests.loading}
-            pendingNew={requests.pendingNew}
-            selectedSeq={selectedSeq}
-            onSelect={onSelect}
-            onLoadMore={requests.loadMore}
-            onRefresh={requests.refresh}
-            onScrollTop={requests.notifyScrollTop}
-          />
-          <DetailPanel seq={selectedSeq} onClose={onClose} />
-        </div>
       )}
 
-      {tab === 'waterfall' && (
-        <div className="split">
-          <Waterfall
-            query={query}
-            liveTick={liveTick}
-            selectedSeq={selectedSeq}
-            onSelect={onSelect}
-            limit={waterfallLimit}
-          />
-          <DetailPanel seq={selectedSeq} onClose={onClose} />
-        </div>
-      )}
-
-      {tab === 'stats' && <StatsPanel liveTick={liveTick} />}
-
-      {tab === 'scripts' && <ScriptPanel liveTick={liveTick} />}
-
-      {tab === 'rules' && <RulePanel liveTick={liveTick} />}
-
-      {tab === 'console' && <ConsolePanel liveTick={liveTick} />}
-
-      {tab === 'env' && <EnvPanel liveTick={liveTick} />}
-
-      {tab === 'dom' && <DomPanel liveTick={liveTick} />}
-
-      {tab === 'sessions' && <SessionsPanel liveTick={liveTick} />}
+      <PaneGrid
+        layout={layout}
+        onLayout={setLayout}
+        onPick={pickPanel}
+        onClose={closePane}
+        renderPanel={renderPanel}
+      />
 
       <footer className="foot">
         <span className="mono dim">{status?.browserPath ?? '未找到内核'}</span>

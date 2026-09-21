@@ -4,10 +4,33 @@ import type {
   CapabilitySet,
   ConsoleEntry,
   ControllerApi,
+  CookieDeleteFilter,
+  CookieInput,
+  CookieQuery,
+  CookieRecord,
+  CookieStats,
+  SiteDataType,
+  SiteDetail,
+  SiteOriginRow,
+  SiteScanReport,
+  SiteSnapshotDiff,
+  SiteSnapshotSummary,
   DomInspectResult,
   DomTreeRow,
   ControllerStatus,
+  ContractDiff,
+  ContractListRow,
+  ContractSummary,
+  DockSide,
+  DockState,
+  EndpointDetail,
+  EndpointPage,
   EvaluateResult,
+  EventPage,
+  EventQuery,
+  EventStats,
+  ExportQuery,
+  HarExportReport,
   InstanceRow,
   InputAction,
   InputReport,
@@ -28,7 +51,15 @@ import type {
   SessionOverview,
   Stats,
   StoredRequest,
-  TimelineRow
+  JsonlExportReport,
+  RelationReport,
+  RequestGraph,
+  ResourceExportReport,
+  TimelineRow,
+  UiSettings,
+  WsConnectionRow,
+  WsFramePage,
+  WsFrameQuery
 } from '../shared/types'
 
 const api: ControllerApi = {
@@ -179,7 +210,146 @@ const api: ControllerApi = {
     return () => {
       ipcRenderer.removeListener('monitor:window-maximized', listener)
     }
-  }
+  },
+
+  /* ---- 窗口吸附 ---- */
+
+  setDock: (enabled: boolean, side?: DockSide) =>
+    ipcRenderer.invoke('monitor:set-dock', enabled, side) as Promise<DockState>,
+
+  onDock: (callback) => {
+    const listener = (_event: IpcRendererEvent, state: DockState): void => callback(state)
+    ipcRenderer.on('monitor:dock', listener)
+    return () => {
+      ipcRenderer.removeListener('monitor:dock', listener)
+    }
+  },
+
+  /* ---- 界面偏好（工作区布局 + 吸附）---- */
+
+  /* ---- 分析层：事件流 / WS / 画像 / 调用图 / 关联 / 导出 / 契约 ---- */
+
+  queryEvents: (query: EventQuery) =>
+    ipcRenderer.invoke('monitor:events', query) as Promise<EventPage | null>,
+
+  getEventStats: () => ipcRenderer.invoke('monitor:event-stats') as Promise<EventStats | null>,
+
+  queryWsFrames: (query: WsFrameQuery) =>
+    ipcRenderer.invoke('monitor:ws-frames', query) as Promise<WsFramePage | null>,
+
+  getWsConnections: (limit?: number) =>
+    ipcRenderer.invoke('monitor:ws-connections', limit) as Promise<{
+      rows: WsConnectionRow[]
+      total: number
+    } | null>,
+
+  getEndpointProfiles: (options) =>
+    ipcRenderer.invoke('monitor:endpoints', options) as Promise<EndpointPage | null>,
+
+  getEndpointDetail: (key: string, options) =>
+    ipcRenderer.invoke('monitor:endpoint-detail', key, options) as Promise<EndpointDetail | null>,
+
+  getRequestGraph: (options) =>
+    ipcRenderer.invoke('monitor:graph', options) as Promise<RequestGraph | null>,
+
+  getRelations: (options) =>
+    ipcRenderer.invoke('monitor:relations', options) as Promise<RelationReport | null>,
+
+  exportHar: (options) =>
+    ipcRenderer.invoke('monitor:export-har', options) as Promise<HarExportReport>,
+
+  exportJsonl: (options) =>
+    ipcRenderer.invoke('monitor:export-jsonl', options) as Promise<JsonlExportReport>,
+
+  exportBodies: (options) =>
+    ipcRenderer.invoke('monitor:export-bodies', options) as Promise<ResourceExportReport>,
+
+  contractSnapshot: (options) =>
+    ipcRenderer.invoke('monitor:contract-snapshot', options) as Promise<ContractSummary>,
+
+  listContracts: (limit?: number) =>
+    ipcRenderer.invoke('monitor:contract-list', limit) as Promise<ContractListRow[] | null>,
+
+  getContract: (id: number, withSchema?: boolean) =>
+    ipcRenderer.invoke('monitor:contract-get', id, withSchema) as Promise<unknown>,
+
+  deleteContract: (id: number) =>
+    ipcRenderer.invoke('monitor:contract-delete', id) as Promise<{ deleted: number }>,
+
+  contractDiff: (options) =>
+    ipcRenderer.invoke('monitor:contract-diff', options) as Promise<ContractDiff>,
+
+  handleDialog: (accept: boolean, promptText?: string) =>
+    ipcRenderer.invoke('monitor:dialog', accept, promptText) as Promise<{
+      ok: boolean
+      error?: string
+    }>,
+  /* ---- 站点资源：cookie 与站点存储 ---- */
+
+  listCookies: (options) =>
+    ipcRenderer.invoke('monitor:cookies', options) as Promise<Page<CookieRecord> | null>,
+
+  getCookieStats: () =>
+    ipcRenderer.invoke('monitor:cookie-stats') as Promise<CookieStats | null>,
+
+  getSiteOrigins: (options) =>
+    ipcRenderer.invoke('monitor:site-origins', options) as Promise<{
+      rows: SiteOriginRow[]
+      total: number
+    } | null>,
+
+  getSiteDetail: (origin: string) =>
+    ipcRenderer.invoke('monitor:site-detail', origin) as Promise<SiteDetail | null>,
+
+  scanSiteData: (options) =>
+    ipcRenderer.invoke('monitor:site-scan', options) as Promise<SiteScanReport>,
+
+  setCookie: (input) =>
+    ipcRenderer.invoke('monitor:site-cookie-set', input) as Promise<{ ok: boolean; error?: string }>,
+
+  deleteCookies: (filter) =>
+    ipcRenderer.invoke('monitor:site-cookie-delete', filter) as Promise<{
+      ok: boolean
+      error?: string
+      deleted: number
+    }>,
+
+  clearSiteData: (origin: string, types) =>
+    ipcRenderer.invoke('monitor:site-clear', origin, types) as Promise<{
+      ok: boolean
+      error?: string
+      origin: string
+      types: string[]
+    }>,
+
+  editStorage: (input) =>
+    ipcRenderer.invoke('monitor:site-storage', input) as Promise<{ ok: boolean; error?: string }>,
+
+  deleteIdbDatabase: (origin: string, name: string) =>
+    ipcRenderer.invoke('monitor:site-idb-delete', origin, name) as Promise<{ ok: boolean; error?: string }>,
+
+  deleteCache: (origin: string, name: string, url?: string) =>
+    ipcRenderer.invoke('monitor:site-cache-delete', origin, name, url) as Promise<{ ok: boolean; error?: string }>,
+
+  unregisterServiceWorker: (scopeURL: string) =>
+    ipcRenderer.invoke('monitor:site-sw-unregister', scopeURL) as Promise<{ ok: boolean; error?: string }>,
+
+  siteSnapshot: (options) =>
+    ipcRenderer.invoke('monitor:site-snapshot', options) as Promise<SiteSnapshotSummary>,
+
+  listSiteSnapshots: (limit?: number) =>
+    ipcRenderer.invoke('monitor:site-snapshots', limit) as Promise<SiteSnapshotSummary[] | null>,
+
+  siteSnapshotDiff: (baseId: number) =>
+    ipcRenderer.invoke('monitor:site-snapshot-diff', baseId) as Promise<SiteSnapshotDiff | null>,
+
+  deleteSiteSnapshot: (id: number) =>
+    ipcRenderer.invoke('monitor:site-snapshot-delete', id) as Promise<{ deleted: number }>,
+
+  uiSettings: () => ipcRenderer.invoke('monitor:ui-settings') as Promise<UiSettings>,
+
+  setUiSettings: (patch) =>
+    ipcRenderer.invoke('monitor:set-ui-settings', patch) as Promise<UiSettings>
 }
 
 contextBridge.exposeInMainWorld('monitor', api)

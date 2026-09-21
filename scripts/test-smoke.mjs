@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * 全量冒烟：控制面 29 条 HTTP 路由 + MCP 25 个工具，一个都不落。
+ * 全量冒烟：控制面 64 条 HTTP 路由 + MCP 58 个工具，一个都不落。
  *
  * 判据不是「HTTP 200 就算过」，而是每条都要给出**它自己的真值证据**
  * （状态里有请求数、DOM 树里有 html、截图落盘字节数与元数据一致、规则写完能读回来…）。
@@ -92,7 +92,12 @@ try {
   const base = `http://127.0.0.1:${info.port}`
   const auth = { authorization: `Bearer ${info.token}` }
 
+  // 走过的路由都记下来：这样「一条都不落」是**算出来的**，不是手写的数字
+  const hitRoutes = new Set()
+  const routeOf = (method, path) => method + ' ' + path.split('?')[0].replace(/\d+/g, '*')
+
   async function api(method, path, body) {
+    hitRoutes.add(routeOf(method, path))
     const res = await fetch(base + path, {
       method,
       headers: body === undefined ? auth : { ...auth, 'content-type': 'application/json' },
@@ -118,9 +123,10 @@ try {
     }
     await sleep(500)
   }
-  console.log('== HTTP：29 条路由逐个真调用 ==\n')
+  console.log('== HTTP：路由逐个真调用（含实时分析面 19 条 + 站点资源面 16 条）==\n')
 
   /* ------------------------------------------------ 读接口 */
+  hitRoutes.add('GET /health')
   const health = await fetch(base + '/health')
   const healthBody = await health.json()
   check('GET /health（免鉴权，且如实带 upstream）', () => {
@@ -345,16 +351,322 @@ try {
     assert(clearedConsole.status === 200, `status=${clearedConsole.status}`)
   })
 
-  /* ------------------------------------------------ MCP：25 个工具逐个真调用 */
-  console.log('\n== MCP：25 个工具逐个真调用 ==\n')
+  /* ------------------------- 实时分析面的路由（HTTP 侧同样要通，不能只有 MCP） ------------------------- */
+
+  const eventsRes = await api('GET', '/events?limit=3&order=asc')
+  check('GET /events：事件流水 + 增量游标', () => {
+    assert(eventsRes.status === 200, `status=${eventsRes.status}`)
+    assert(Array.isArray(eventsRes.body.rows), 'rows 不是数组')
+    assert(typeof eventsRes.body.nextSince === 'number', `nextSince=${eventsRes.body.nextSince}`)
+  })
+
+  const eventsStats = await api('GET', '/events/stats')
+  check('GET /events/stats：按 kind 分组的计数', () => {
+    assert(eventsStats.status === 200 && typeof eventsStats.body.total === 'number', JSON.stringify(eventsStats.body).slice(0, 160))
+  })
+
+  const wsConns = await api('GET', '/ws/connections')
+  check('GET /ws/connections：连接汇总', () => {
+    assert(wsConns.status === 200 && Array.isArray(wsConns.body.rows), JSON.stringify(wsConns.body).slice(0, 160))
+  })
+
+  const wsFrames = await api('GET', '/ws?limit=5')
+  check('GET /ws：帧明细', () => {
+    assert(wsFrames.status === 200 && Array.isArray(wsFrames.body.rows), JSON.stringify(wsFrames.body).slice(0, 160))
+  })
+
+  const epList = await api('GET', '/endpoints?limit=5&sort=calls')
+  check('GET /endpoints：接口画像', () => {
+    assert(epList.status === 200 && Array.isArray(epList.body.endpoints), JSON.stringify(epList.body).slice(0, 160))
+    assert(epList.body.endpoints.length > 0, '一个端点都没有')
+  })
+
+  const epDetail = await api('GET', `/endpoints/detail?key=${encodeURIComponent(epList.body.endpoints[0].key)}&sampleLimit=2`)
+  check('GET /endpoints/detail：端点详情', () => {
+    assert(epDetail.status === 200 && epDetail.body.found === true, JSON.stringify(epDetail.body).slice(0, 160))
+  })
+
+  const graph = await api('GET', '/graph?maxRows=2000')
+  check('GET /graph：调用图（节点 / 边 / 功能簇）', () => {
+    assert(graph.status === 200, `status=${graph.status}`)
+    assert(Array.isArray(graph.body.nodes) && Array.isArray(graph.body.edges), '节点 / 边不是数组')
+    assert(Array.isArray(graph.body.clusters), '没有 clusters')
+  })
+
+  const relations = await api('GET', '/relations?limit=5&maxRows=2000')
+  check('GET /relations：四类关联', () => {
+    assert(relations.status === 200, `status=${relations.status}`)
+    for (const key of ['sharedBodies', 'redirectChains', 'domainLinks', 'sharedParams']) {
+      assert(Array.isArray(relations.body[key]), `${key} 不是数组`)
+    }
+  })
+
+  const snap = await api('POST', '/contracts', { label: 'smoke-http', sampleLimit: 2 })
+  check('POST /contracts：拍契约快照', () => {
+    assert(snap.status === 200 && snap.body.id > 0, JSON.stringify(snap.body).slice(0, 200))
+  })
+
+  const contractList = await api('GET', '/contracts?limit=50')
+  check('GET /contracts：列表是 { rows, total }（与其它列表接口同形）', () => {
+    assert(contractList.status === 200, `status=${contractList.status}`)
+    assert(Array.isArray(contractList.body.rows), `不是 rows：${JSON.stringify(contractList.body).slice(0, 160)}`)
+    assert(contractList.body.total === contractList.body.rows.length, `total=${contractList.body.total} vs ${contractList.body.rows.length}`)
+    assert(contractList.body.rows.some((row) => row.id === snap.body.id), '列表里没有刚存的那份')
+  })
+
+  const contractOne = await api('GET', `/contracts/${snap.body.id}`)
+  check('GET /contracts/:id：取快照内容', () => {
+    assert(contractOne.status === 200 && contractOne.body.found === true, JSON.stringify(contractOne.body).slice(0, 160))
+  })
+
+  const contractDiff = await api('GET', `/contracts/${snap.body.id}/diff?sampleLimit=2`)
+  check('GET /contracts/:id/diff：与当前比对', () => {
+    assert(contractDiff.status === 200 && contractDiff.body.summary, JSON.stringify(contractDiff.body).slice(0, 160))
+    assert(contractDiff.body.summary.removedEndpoints === 0, `报了 ${contractDiff.body.summary.removedEndpoints} 个端点消失`)
+  })
+
+  const harOut = await api('POST', '/export/har', { includeBodies: true, maxRows: 200 })
+  check('POST /export/har：HAR 落盘', () => {
+    assert(harOut.status === 200 && harOut.body.path && existsSync(harOut.body.path), JSON.stringify(harOut.body).slice(0, 200))
+    assert(statSync(harOut.body.path).size === harOut.body.bytes, '报告字节数与文件大小不符')
+  })
+
+  const jsonlOut = await api('POST', '/export/jsonl', { includeBodies: true, maxRows: 200 })
+  check('POST /export/jsonl：JSONL 落盘（行数自洽）', () => {
+    assert(jsonlOut.status === 200 && jsonlOut.body.path && existsSync(jsonlOut.body.path), JSON.stringify(jsonlOut.body).slice(0, 200))
+    const lines = readFileSync(jsonlOut.body.path, 'utf8').split('\n').filter(Boolean)
+    assert(lines.length === jsonlOut.body.lines, `报告 ${jsonlOut.body.lines} 行 vs 实际 ${lines.length} 行`)
+  })
+
+  const mirrorOut = await api('POST', '/export/bodies', { maxRows: 200 })
+  check('POST /export/bodies：资源镜像 + manifest', () => {
+    assert(mirrorOut.status === 200 && mirrorOut.body.manifest && existsSync(mirrorOut.body.manifest), JSON.stringify(mirrorOut.body).slice(0, 200))
+    assert(mirrorOut.body.files > 0, `files=${mirrorOut.body.files}`)
+  })
+
+  // 这个口只收「导出目录下的纯文件名」：带分隔符或 .. 一律 400（不是任意文件读取）
+  const harName = harOut.body.path.split(/[\\/]/).pop()
+  hitRoutes.add('GET /exports/download')
+  const exportDownload = await fetch(base + '/exports/download?name=' + encodeURIComponent(harName), { headers: auth })
+  const exportText = await exportDownload.text()
+  check('GET /exports/download：导出的文件能取回来（字节数与报告一致）', () => {
+    assert(exportDownload.status === 200, `status=${exportDownload.status}`)
+    assert(Buffer.byteLength(exportText, 'utf8') === harOut.body.bytes, `${Buffer.byteLength(exportText, 'utf8')} vs ${harOut.body.bytes}`)
+  })
+
+  const dialogRes = await api('POST', '/dialog', { accept: true })
+  check('POST /dialog：没有对话框时也如实回话', () => {
+    assert(dialogRes.status === 200 && typeof dialogRes.body.ok === 'boolean', JSON.stringify(dialogRes.body).slice(0, 160))
+  })
+
+  const delContract = await api('DELETE', `/contracts/${snap.body.id}`)
+  check('DELETE /contracts/:id：删掉快照', () => {
+    assert(delContract.status === 200 && delContract.body.deleted === 1, JSON.stringify(delContract.body).slice(0, 160))
+  })
+
+  /* SSE 是手写路由（要拿裸 res 才推得动），所以单独测，不走 api() */
+  const sseResult = await (async () => {
+    const ctrl = new AbortController()
+    const timer = setTimeout(() => ctrl.abort(), 8000)
+    try {
+      hitRoutes.add('GET /events/stream')
+      const res = await fetch(base + '/events/stream?interval=300&since=0', { headers: auth, signal: ctrl.signal })
+      if (res.status !== 200) return `status=${res.status}`
+      const reader = res.body.getReader()
+      const decoder = new TextDecoder()
+      let text = ''
+      while (!text.includes('event: events') && text.length < 200000) {
+        const chunk = await reader.read()
+        if (chunk.done) break
+        text += decoder.decode(chunk.value, { stream: true })
+      }
+      await reader.cancel()
+      return text.includes('event: events') ? true : `没收到事件帧：${text.slice(0, 120)}`
+    } finally {
+      clearTimeout(timer)
+    }
+  })()
+  check('GET /events/stream：SSE 真推得动事件', () => {
+    assert(sseResult === true, String(sseResult))
+  })
+
+  /* ------------------------- 站点资源面（cookie 罐 / 站点存储 / 快照） ------------------------- */
+  // 这一面的数据**不是**从流量里抄下来的，是主动去问浏览器要的：
+  // cookie 罐浏览器级、站点存储要按域扫。所以这里的判据一律是「问出来的东西对得上」。
+
+  const scope = `http://127.0.0.1:${origin.port}`
+
+  // 名字先定下来：POST /cookies 只回 { ok }，回头再去响应体里找名字就成了 undefined
+  const smokeCookieName = 'smoke_' + Date.now().toString(36)
+  const cookieSetHttp = await api('POST', '/cookies', {
+    name: smokeCookieName,
+    value: 'v1',
+    url: scope + '/'
+  })
+  check('POST /cookies：写进罐里', () => {
+    assert(cookieSetHttp.status === 200, `status=${cookieSetHttp.status}`)
+    assert(cookieSetHttp.body.ok === true, JSON.stringify(cookieSetHttp.body).slice(0, 200))
+  })
+
+  const cookieListHttp = await api('GET', '/cookies?domain=127.0.0.1&limit=200')
+  check('GET /cookies：刚写的那条读得回来（含值、域、命中次数）', () => {
+    assert(cookieListHttp.status === 200 && Array.isArray(cookieListHttp.body.rows), JSON.stringify(cookieListHttp.body).slice(0, 200))
+    assert(typeof cookieListHttp.body.total === 'number', `total=${cookieListHttp.body?.total}`)
+    const hit = cookieListHttp.body.rows.find((row) => row.name === smokeCookieName)
+    assert(hit, `罐里没找到刚写的那条：${JSON.stringify(cookieListHttp.body.rows.slice(0, 3)).slice(0, 240)}`)
+    assert(hit.value === 'v1', `value=${hit.value}`)
+    assert(typeof hit.key === 'string' && hit.key.includes('|'), `key 口径不对：${hit.key}`)
+  })
+
+  const cookieStatsHttp = await api('GET', '/cookies/stats')
+  check('GET /cookies/stats：画像数字自洽（分类之和 = 总数）', () => {
+    assert(cookieStatsHttp.status === 200, `status=${cookieStatsHttp.status}`)
+    const stats = cookieStatsHttp.body
+    assert(typeof stats.total === 'number' && stats.total > 0, `total=${stats.total}`)
+    assert(stats.session + stats.persistent === stats.total, `会话 ${stats.session} + 持久 ${stats.persistent} ≠ ${stats.total}`)
+    assert(stats.totalBytes > 0, `totalBytes=${stats.totalBytes}`)
+  })
+
+  const scanHttp = await api('POST', '/sites/scan', { origin: scope, limit: 5 })
+  check('POST /sites/scan：去浏览器里真扫一遍并落库', () => {
+    assert(scanHttp.status === 200, `status=${scanHttp.status}`)
+    assert(scanHttp.body.ok === true, JSON.stringify(scanHttp.body).slice(0, 200))
+    assert((scanHttp.body.origins ?? []).includes(scope), `没扫到受控域：${JSON.stringify(scanHttp.body.origins)}`)
+    assert(scanHttp.body.cookies.total > 0, `cookie 罐对账后是空的：${JSON.stringify(scanHttp.body.cookies)}`)
+  })
+
+  const sitesHttp = await api('GET', '/sites?limit=100')
+  check('GET /sites：清单里受控域标着「已扫」', () => {
+    assert(sitesHttp.status === 200 && Array.isArray(sitesHttp.body.rows), JSON.stringify(sitesHttp.body).slice(0, 200))
+    const row = sitesHttp.body.rows.find((item) => item.origin === scope)
+    assert(row, `清单里没有受控域：${JSON.stringify(sitesHttp.body.rows.map((item) => item.origin)).slice(0, 200)}`)
+    assert(row.scanned === true, `扫过了却标着没扫（updatedAt=${row.updatedAt}）`)
+    assert(row.cookieCount > 0, `cookieCount=${row.cookieCount}`)
+  })
+
+  const siteDetailHttp = await api('GET', `/sites/detail?origin=${encodeURIComponent(scope)}`)
+  check('GET /sites/detail：明细里 cookie 与本地存储逐项对得上', () => {
+    assert(siteDetailHttp.status === 200, `status=${siteDetailHttp.status}`)
+    assert(siteDetailHttp.body.origin === scope, JSON.stringify(siteDetailHttp.body).slice(0, 200))
+    const detail = siteDetailHttp.body
+    assert((detail.cookies ?? []).length > 0, '明细里没有 cookie')
+    assert(Array.isArray(detail.localStorage), 'localStorage 不是数组')
+    assert(Array.isArray(detail.caches), 'caches 不是数组')
+  })
+
+  const storageHttp = await api('POST', '/sites/storage', { origin: scope, area: 'local', action: 'set', key: 'smoke_k', value: 'smoke_v' })
+  check('POST /sites/storage：写一条本地存储', () => {
+    assert(storageHttp.status === 200 && storageHttp.body.ok === true, JSON.stringify(storageHttp.body).slice(0, 200))
+  })
+
+  const idbDelHttp = await api('POST', '/sites/idb/delete', { origin: scope, name: '__smoke_absent__' })
+  check('POST /sites/idb/delete：删一个不存在的库也如实回话（不炸）', () => {
+    assert(idbDelHttp.status === 200, `status=${idbDelHttp.status}`)
+  })
+
+  const cacheDelHttp = await api('POST', '/sites/cache/delete', { origin: scope, name: '__smoke_absent__' })
+  check('POST /sites/cache/delete：同上', () => {
+    assert(cacheDelHttp.status === 200, `status=${cacheDelHttp.status}`)
+  })
+
+  const swHttp = await api('POST', '/sites/sw/unregister', { scopeURL: scope + '/' })
+  check('POST /sites/sw/unregister：没有注册时也如实回话', () => {
+    assert(swHttp.status === 200, `status=${swHttp.status}`)
+  })
+
+  const siteSnapHttp = await api('POST', '/sites/snapshots', { label: 'smoke-http' })
+  check('POST /sites/snapshots：拍站点资源快照', () => {
+    assert(siteSnapHttp.status === 200 && siteSnapHttp.body.id > 0, JSON.stringify(siteSnapHttp.body).slice(0, 200))
+    assert(siteSnapHttp.body.cookies > 0, `快照里 cookie=${siteSnapHttp.body.cookies}`)
+  })
+
+  const siteSnapsHttp = await api('GET', '/sites/snapshots')
+  check('GET /sites/snapshots：{ rows, total }，且刚拍的在里面', () => {
+    assert(siteSnapsHttp.status === 200 && Array.isArray(siteSnapsHttp.body.rows), JSON.stringify(siteSnapsHttp.body).slice(0, 200))
+    assert(siteSnapsHttp.body.total === siteSnapsHttp.body.rows.length, `total=${siteSnapsHttp.body.total} vs ${siteSnapsHttp.body.rows.length}`)
+    assert(siteSnapsHttp.body.rows.some((row) => row.id === siteSnapHttp.body.id), '列表里没有刚拍的那份')
+  })
+
+  const siteDiffHttp = await api('GET', `/sites/snapshots/${siteSnapHttp.body.id}/diff`)
+  check('GET /sites/snapshots/:id/diff：拿刚拍的那份当基线比（不该报「全没了」）', () => {
+    assert(siteDiffHttp.status === 200 && siteDiffHttp.body.summary, JSON.stringify(siteDiffHttp.body).slice(0, 240))
+    const summary = siteDiffHttp.body.summary
+    assert(summary.cookiesRemoved === 0, `刚拍完就报了 ${summary.cookiesRemoved} 条 cookie 消失`)
+    for (const key of ['originsAdded', 'originsRemoved', 'cookiesAdded', 'cookiesRemoved', 'cookiesChanged', 'keysAdded', 'keysRemoved', 'keysChanged']) {
+      assert(typeof summary[key] === 'number', `summary.${key} 不是数字：${JSON.stringify(summary).slice(0, 200)}`)
+    }
+  })
+
+  // 先删掉刚才写进去的那条，再试「一个条件都不给」—— 顺序不能反，反了测的就不是同一件事
+  const cookieDelOne = await api('DELETE', '/cookies?name=' + encodeURIComponent(smokeCookieName))
+  check('DELETE /cookies?name=：按名字删掉刚写的那条', () => {
+    assert(cookieDelOne.status === 200, `status=${cookieDelOne.status}`)
+    assert(cookieDelOne.body.deleted === 1, JSON.stringify(cookieDelOne.body).slice(0, 200))
+  })
+
+  const cookieDelEmpty = await api('DELETE', '/cookies')
+  check('DELETE /cookies：一个条件都不给 → 必须被拒（防手滑清空整个罐）', () => {
+    // 约定：应用级拒绝走「200 + ok:false」；关键是**一条都没删**
+    assert(cookieDelEmpty.body?.ok === false, `居然放行了：${JSON.stringify(cookieDelEmpty.body).slice(0, 200)}`)
+    assert(cookieDelEmpty.body?.deleted === 0, `说有拒绝，却删了 ${cookieDelEmpty.body?.deleted} 条`)
+  })
+
+  const siteClearHttp = await api('POST', '/sites/clear', { origin: scope, types: ['cache_storage'] })
+  check('POST /sites/clear：按类型清（清完会重扫，返回的就是清完之后的真相）', () => {
+    assert(siteClearHttp.status === 200, `status=${siteClearHttp.status}`)
+    assert(siteClearHttp.body.ok === true, JSON.stringify(siteClearHttp.body).slice(0, 200))
+  })
+
+  const siteSnapDelHttp = await api('DELETE', `/sites/snapshots/${siteSnapHttp.body.id}`)
+  check('DELETE /sites/snapshots/:id：删掉快照', () => {
+    assert(siteSnapDelHttp.status === 200 && siteSnapDelHttp.body.deleted === 1, JSON.stringify(siteSnapDelHttp.body).slice(0, 200))
+  })
+  check(`HTTP 覆盖：${hitRoutes.size} 条路由真调用过（含实时分析面 19 条 + 站点资源面 16 条）`, () => {
+    const NEEDED = [
+      'GET /events', 'GET /events/stats', 'GET /events/stream',
+      'GET /ws', 'GET /ws/connections',
+      'GET /endpoints', 'GET /endpoints/detail',
+      'GET /graph', 'GET /relations',
+      'POST /contracts', 'GET /contracts', 'GET /contracts/*', 'GET /contracts/*/diff', 'DELETE /contracts/*',
+      'POST /export/har', 'POST /export/jsonl', 'POST /export/bodies', 'GET /exports/download',
+      'POST /dialog',
+      'GET /cookies', 'GET /cookies/stats', 'POST /cookies', 'DELETE /cookies',
+      'GET /sites', 'GET /sites/detail', 'POST /sites/scan', 'POST /sites/clear',
+      'POST /sites/storage', 'POST /sites/idb/delete', 'POST /sites/cache/delete', 'POST /sites/sw/unregister',
+      'POST /sites/snapshots', 'GET /sites/snapshots', 'GET /sites/snapshots/*/diff', 'DELETE /sites/snapshots/*'
+    ]
+    for (const need of NEEDED) assert(hitRoutes.has(need), `没走：${need}`)
+    // 64 条路由里只有 /sessions/profile 没走（它要收工重启，由 MCP 侧的 monitor_switch_profile 覆盖）
+    assert(hitRoutes.size >= 63, `只覆盖了 ${hitRoutes.size} 条`)
+  })
+  /* ------------------------------------------------ MCP：58 个工具逐个真调用 */
+  console.log('\n== MCP：58 个工具逐个真调用 ==\n')
   mcp = McpClient.spawn(process.execPath, [MCP, `--data-dir=${DATA_DIR}`], { cwd: ROOT })
   await mcp.initialize('smoke-all')
 
   const tools = (await mcp.send('tools/list', {})).tools ?? []
-  check(`tools/list：25 个工具且都有 description + inputSchema`, () => {
-    assert(tools.length === 25, `工具数=${tools.length}`)
-    const bare = tools.filter((tool) => !tool.description || !tool.inputSchema)
-    assert(bare.length === 0, `缺 description/inputSchema：${bare.map((t) => t.name).join(',')}`)
+  const REQUIRED_TOOLS = [
+    'monitor_status', 'monitor_capabilities', 'monitor_requests', 'monitor_request', 'monitor_body',
+    'monitor_fetch_body', 'monitor_stats', 'monitor_timeline', 'monitor_scripts', 'monitor_script_source',
+    'monitor_console', 'monitor_evaluate', 'monitor_dom_tree', 'monitor_dom_inspect', 'monitor_dom_highlight',
+    'monitor_input', 'monitor_rules_get', 'monitor_rules_set', 'monitor_rules_stats', 'monitor_probe',
+    'monitor_navigate', 'monitor_screenshot', 'monitor_sessions', 'monitor_switch_profile', 'monitor_clear',
+    'monitor_events', 'monitor_event_stats', 'monitor_ws_frames', 'monitor_ws_connections', 'monitor_endpoints',
+    'monitor_endpoint', 'monitor_graph', 'monitor_relations', 'monitor_export_har', 'monitor_export_jsonl',
+    'monitor_collect_resources', 'monitor_contract_snapshot', 'monitor_contracts', 'monitor_contract',
+    'monitor_contract_diff', 'monitor_contract_delete', 'monitor_dialog',
+    'monitor_cookies', 'monitor_cookie_stats', 'monitor_cookie_set', 'monitor_cookie_delete',
+    'monitor_sites', 'monitor_site_detail', 'monitor_site_scan', 'monitor_site_clear',
+    'monitor_site_storage_edit', 'monitor_site_idb_delete', 'monitor_site_cache_delete',
+    'monitor_site_sw_unregister', 'monitor_site_snapshot', 'monitor_site_snapshots',
+    'monitor_site_snapshot_diff', 'monitor_site_snapshot_delete'
+  ]
+  check(`tools/list：${REQUIRED_TOOLS.length} 个工具一个不少，且都有 description + inputSchema`, () => {
+    const names = tools.map((tool) => tool.name)
+    for (const name of REQUIRED_TOOLS) assert(names.includes(name), `缺工具：${name}`)
+    assert(tools.length === REQUIRED_TOOLS.length, `工具数=${tools.length}，清单里是 ${REQUIRED_TOOLS.length}`)
+    const bare = tools.filter((tool) => !tool.description || tool.description.length <= 10 || !tool.inputSchema)
+    assert(bare.length === 0, `description/inputSchema 不合格：${bare.map((t) => t.name).join(',')}`)
   })
 
   const call = async (name, args) => {
@@ -564,6 +876,244 @@ try {
     assert(lStatus?.profile === 'L', `state=${lStatus?.state} profile=${lStatus?.profile}`)
   })
 
+  /* ------------------------------------------- MCP：实时分析层工具逐个真调用 */
+  console.log('\n== MCP：实时分析层 17 个工具逐个真调用 ==\n')
+
+  const eventsTool = await call('monitor_events', { limit: 3, order: 'asc' })
+  check('monitor_events（含 nextSince 游标）', () => {
+    assert(eventsTool.res.isError !== true, eventsTool.text?.slice(0, 160))
+    assert(Array.isArray(eventsTool.json.rows), 'rows 不是数组')
+    assert(typeof eventsTool.json.nextSince === 'number', `nextSince=${eventsTool.json?.nextSince}`)
+  })
+
+  const eventStatsTool = await call('monitor_event_stats', {})
+  check('monitor_event_stats', () => {
+    assert(eventStatsTool.res.isError !== true, eventStatsTool.text?.slice(0, 160))
+    assert(typeof eventStatsTool.json.total === 'number', `total=${eventStatsTool.json?.total}`)
+    assert(Array.isArray(eventStatsTool.json.rows), 'rows 不是数组')
+  })
+
+  const wsFramesTool = await call('monitor_ws_frames', { limit: 3 })
+  check('monitor_ws_frames', () => {
+    assert(wsFramesTool.res.isError !== true, wsFramesTool.text?.slice(0, 160))
+    assert(Array.isArray(wsFramesTool.json.rows), 'rows 不是数组')
+  })
+
+  const wsConnsTool = await call('monitor_ws_connections', {})
+  check('monitor_ws_connections', () => {
+    assert(wsConnsTool.res.isError !== true, wsConnsTool.text?.slice(0, 160))
+    assert(Array.isArray(wsConnsTool.json.rows), 'rows 不是数组')
+  })
+
+  const endpointsTool = await call('monitor_endpoints', { limit: 5, sort: 'calls' })
+  check('monitor_endpoints（端点画像）', () => {
+    assert(endpointsTool.res.isError !== true, endpointsTool.text?.slice(0, 160))
+    assert(
+      (endpointsTool.json.endpoints ?? []).length > 0,
+      `端点数=${endpointsTool.json?.endpoints?.length}`
+    )
+  })
+
+  const endpointTool = await call('monitor_endpoint', { key: endpointsTool.json.endpoints[0].key, sampleLimit: 2 })
+  check('monitor_endpoint（按 key 取详情）', () => {
+    assert(endpointTool.res.isError !== true, endpointTool.text?.slice(0, 160))
+    assert(endpointTool.json.found === true, `found=${endpointTool.json?.found}`)
+  })
+
+  const graphTool = await call('monitor_graph', { maxNodes: 200, maxRows: 2000 })
+  check('monitor_graph（调用图 + 功能簇）', () => {
+    assert(graphTool.res.isError !== true, graphTool.text?.slice(0, 160))
+    assert(Array.isArray(graphTool.json.nodes) && Array.isArray(graphTool.json.edges), 'nodes/edges 不是数组')
+    assert(Array.isArray(graphTool.json.clusters), '没有 clusters')
+  })
+
+  const relationsTool = await call('monitor_relations', { limit: 5, maxRows: 2000 })
+  check('monitor_relations（四类关联）', () => {
+    assert(relationsTool.res.isError !== true, relationsTool.text?.slice(0, 160))
+    for (const key of ['sharedBodies', 'redirectChains', 'domainLinks', 'sharedParams']) {
+      assert(Array.isArray(relationsTool.json[key]), `${key} 不是数组`)
+    }
+  })
+
+  const harTool = await call('monitor_export_har', { includeBodies: true, maxRows: 200 })
+  check('monitor_export_har（HAR 落盘）', () => {
+    assert(harTool.res.isError !== true, harTool.text?.slice(0, 160))
+    assert(harTool.json.path && existsSync(harTool.json.path), `文件不在：${harTool.json?.path}`)
+    assert(statSync(harTool.json.path).size === harTool.json.bytes, '报告字节数与文件大小不符')
+    assert(harTool.json.entries > 0, `entries=${harTool.json.entries}`)
+  })
+
+  const jsonlTool = await call('monitor_export_jsonl', { includeBodies: true, maxRows: 200 })
+  check('monitor_export_jsonl（JSONL 落盘）', () => {
+    assert(jsonlTool.res.isError !== true, jsonlTool.text?.slice(0, 160))
+    assert(jsonlTool.json.path && existsSync(jsonlTool.json.path), `文件不在：${jsonlTool.json?.path}`)
+    const lines = readFileSync(jsonlTool.json.path, 'utf8').split('\n').filter(Boolean)
+    assert(lines.length === jsonlTool.json.lines, `报告 ${jsonlTool.json.lines} 行 vs 实际 ${lines.length} 行`)
+    assert(lines.every((line) => JSON.parse(line)), '有行不是合法 JSON')
+  })
+
+  const mirrorTool = await call('monitor_collect_resources', { maxRows: 200 })
+  check('monitor_collect_resources（资源镜像 + manifest）', () => {
+    assert(mirrorTool.res.isError !== true, mirrorTool.text?.slice(0, 160))
+    assert(mirrorTool.json.manifest && existsSync(mirrorTool.json.manifest), `manifest 不在：${mirrorTool.json?.manifest}`)
+    assert(mirrorTool.json.files > 0, `一个文件都没落（files=${mirrorTool.json?.files}）`)
+  })
+
+  const snapTool = await call('monitor_contract_snapshot', { label: 'smoke-mcp', sampleLimit: 2 })
+  check('monitor_contract_snapshot（写快照）', () => {
+    assert(snapTool.res.isError !== true, snapTool.text?.slice(0, 160))
+    assert(snapTool.json.id > 0, `id=${snapTool.json?.id}`)
+  })
+
+  const contractsTool = await call('monitor_contracts', {})
+  check('monitor_contracts（列快照）', () => {
+    assert(contractsTool.res.isError !== true, contractsTool.text?.slice(0, 160))
+    assert(
+      (contractsTool.json.rows ?? []).some((row) => row.id === snapTool.json.id),
+      `列表里没有刚存的那份（id=${snapTool.json.id}，列表=${JSON.stringify(contractsTool.json).slice(0, 300)}）`
+    )
+  })
+
+  const contractTool = await call('monitor_contract', { id: snapTool.json.id })
+  check('monitor_contract（读快照内容）', () => {
+    assert(contractTool.res.isError !== true, contractTool.text?.slice(0, 160))
+    assert(contractTool.json.found === true, `found=${contractTool.json?.found}`)
+  })
+
+  const contractDiffTool = await call('monitor_contract_diff', { baseId: snapTool.json.id, sampleLimit: 2 })
+  check('monitor_contract_diff（拿刚拍的那份当基线比）', () => {
+    assert(contractDiffTool.res.isError !== true, contractDiffTool.text?.slice(0, 160))
+    const diff = contractDiffTool.json
+    assert(diff.summary, `没有 summary：${contractDiffTool.text?.slice(0, 160)}`)
+    for (const key of ['added', 'removed', 'changed']) assert(Array.isArray(diff[key]), `${key} 不是数组`)
+    // 基线是刚刚才拍的，中间不可能有接口消失 —— 报了就是回归算法在乱报
+    assert(diff.summary.removedEndpoints === 0, `报了 ${diff.summary.removedEndpoints} 个端点消失`)
+  })
+
+  const contractDeleteTool = await call('monitor_contract_delete', { id: snapTool.json.id })
+  check('monitor_contract_delete', () => {
+    assert(contractDeleteTool.res.isError !== true, contractDeleteTool.text?.slice(0, 160))
+    assert(contractDeleteTool.json.deleted === 1, `deleted=${contractDeleteTool.json?.deleted}`)
+  })
+
+  const dialogTool = await call('monitor_dialog', { accept: true })
+  check('monitor_dialog（没有对话框时也如实回话，不报错）', () => {
+    assert(dialogTool.res.isError !== true, dialogTool.text?.slice(0, 160))
+    assert(typeof dialogTool.json.ok === 'boolean', `ok=${JSON.stringify(dialogTool.json?.ok)}`)
+  })
+  /* ------------------------------------------- MCP：站点资源面 16 个工具逐个真调用 */
+  console.log('\n== MCP：站点资源面 16 个工具逐个真调用 ==\n')
+
+  const siteCookieName = 'smoke_mcp_' + Date.now().toString(36)
+  const cookieSetTool = await call('monitor_cookie_set', { name: siteCookieName, value: 'mcp1', url: scope + '/' })
+  check('monitor_cookie_set（往罐里写）', () => {
+    assert(cookieSetTool.res.isError !== true, cookieSetTool.text?.slice(0, 160))
+    assert(cookieSetTool.json.ok === true, JSON.stringify(cookieSetTool.json).slice(0, 160))
+  })
+
+  const cookiesTool = await call('monitor_cookies', { domain: '127.0.0.1', limit: 200 })
+  check('monitor_cookies（读罐，且行形状与 HTTP 侧一致）', () => {
+    assert(cookiesTool.res.isError !== true, cookiesTool.text?.slice(0, 160))
+    assert(Array.isArray(cookiesTool.json.rows), 'rows 不是数组')
+    assert(typeof cookiesTool.json.total === 'number', `total=${cookiesTool.json?.total}`)
+    assert(cookiesTool.json.rows.some((row) => row.name === siteCookieName), `罐里没有刚写的那条（共 ${cookiesTool.json.rows.length} 行）`)
+    const sample = cookiesTool.json.rows[0]
+    for (const key of ['key', 'name', 'value', 'domain', 'path', 'crossSite', 'sentCount']) {
+      assert(key in sample, `行里没有 ${key}：${JSON.stringify(sample).slice(0, 200)}`)
+    }
+  })
+
+  const cookieStatsTool = await call('monitor_cookie_stats', {})
+  check('monitor_cookie_stats（分类之和 = 总数）', () => {
+    assert(cookieStatsTool.res.isError !== true, cookieStatsTool.text?.slice(0, 160))
+    const stats = cookieStatsTool.json
+    assert(stats.session + stats.persistent === stats.total, `会话 ${stats.session} + 持久 ${stats.persistent} ≠ ${stats.total}`)
+  })
+
+  const siteScanTool = await call('monitor_site_scan', { origin: scope, limit: 5 })
+  check('monitor_site_scan（真去浏览器里扫一遍并落库）', () => {
+    assert(siteScanTool.res.isError !== true, siteScanTool.text?.slice(0, 160))
+    assert(siteScanTool.json.ok === true, JSON.stringify(siteScanTool.json).slice(0, 200))
+    assert((siteScanTool.json.origins ?? []).includes(scope), `没扫到受控域：${JSON.stringify(siteScanTool.json.origins)}`)
+  })
+
+  const sitesTool = await call('monitor_sites', { limit: 100 })
+  check('monitor_sites（清单，且与 HTTP 侧同一份库）', () => {
+    assert(sitesTool.res.isError !== true, sitesTool.text?.slice(0, 160))
+    const row = (sitesTool.json.rows ?? []).find((item) => item.origin === scope)
+    assert(row, `清单里没有受控域：${JSON.stringify((sitesTool.json.rows ?? []).map((item) => item.origin)).slice(0, 200)}`)
+    const httpRow = (sitesHttp.body.rows ?? []).find((item) => item.origin === scope)
+    assert(httpRow, 'HTTP 侧那份不见了 —— 两边读的不是同一个库')
+    assert(row.scanned === true, '扫过了却标着没扫')
+  })
+
+  const siteDetailTool = await call('monitor_site_detail', { origin: scope })
+  check('monitor_site_detail（明细里 cookie 与本地存储都在）', () => {
+    assert(siteDetailTool.res.isError !== true, siteDetailTool.text?.slice(0, 160))
+    // 明细是平铺的（SiteDetail extends SiteOriginRow），没有 { found, detail } 包壳
+    assert(siteDetailTool.json.origin === scope, `origin=${siteDetailTool.json?.origin}`)
+    assert((siteDetailTool.json.cookies ?? []).length > 0, '明细里没有 cookie')
+    assert(Array.isArray(siteDetailTool.json.localStorage), '没有 localStorage 段')
+  })
+
+  const siteStorageTool = await call('monitor_site_storage_edit', { origin: scope, area: 'local', action: 'set', key: 'mcp_k', value: 'mcp_v' })
+  check('monitor_site_storage_edit（写本地存储，写完自动重扫）', () => {
+    assert(siteStorageTool.res.isError !== true, siteStorageTool.text?.slice(0, 160))
+    assert(siteStorageTool.json.ok === true, JSON.stringify(siteStorageTool.json).slice(0, 160))
+  })
+
+  const siteIdbTool = await call('monitor_site_idb_delete', { origin: scope, name: '__smoke_absent__' })
+  check('monitor_site_idb_delete（删不存在的库也如实回话）', () => {
+    assert(siteIdbTool.res.isError !== true, siteIdbTool.text?.slice(0, 160))
+  })
+
+  const siteCacheTool = await call('monitor_site_cache_delete', { origin: scope, name: '__smoke_absent__' })
+  check('monitor_site_cache_delete（同上）', () => {
+    assert(siteCacheTool.res.isError !== true, siteCacheTool.text?.slice(0, 160))
+  })
+
+  const siteSwTool = await call('monitor_site_sw_unregister', { scopeURL: scope + '/' })
+  check('monitor_site_sw_unregister（没有注册也如实回话）', () => {
+    assert(siteSwTool.res.isError !== true, siteSwTool.text?.slice(0, 160))
+  })
+
+  const siteSnapTool = await call('monitor_site_snapshot', { label: 'smoke-mcp' })
+  check('monitor_site_snapshot（拍快照）', () => {
+    assert(siteSnapTool.res.isError !== true, siteSnapTool.text?.slice(0, 160))
+    assert(siteSnapTool.json.id > 0, `id=${siteSnapTool.json?.id}`)
+  })
+
+  const siteSnapsTool = await call('monitor_site_snapshots', { limit: 20 })
+  check('monitor_site_snapshots（列表里有刚拍的那份）', () => {
+    assert(siteSnapsTool.res.isError !== true, siteSnapsTool.text?.slice(0, 160))
+    assert((siteSnapsTool.json.rows ?? []).some((row) => row.id === siteSnapTool.json.id), `列表：${JSON.stringify(siteSnapsTool.json).slice(0, 200)}`)
+  })
+
+  const siteDiffTool = await call('monitor_site_snapshot_diff', { baseId: siteSnapTool.json.id })
+  check('monitor_site_snapshot_diff（基线是刚拍的 → 不该报「全没了」）', () => {
+    assert(siteDiffTool.res.isError !== true, siteDiffTool.text?.slice(0, 160))
+    assert(siteDiffTool.json.summary, JSON.stringify(siteDiffTool.json).slice(0, 200))
+    assert(siteDiffTool.json.summary.cookiesRemoved === 0, `刚拍完就报了 ${siteDiffTool.json.summary.cookiesRemoved} 条 cookie 消失`)
+    assert(siteDiffTool.json.summary.originsRemoved === 0, `报了 ${siteDiffTool.json.summary.originsRemoved} 个域消失`)
+  })
+
+  const cookieDelTool = await call('monitor_cookie_delete', { name: siteCookieName })
+  check('monitor_cookie_delete（按名字删）', () => {
+    assert(cookieDelTool.res.isError !== true, cookieDelTool.text?.slice(0, 160))
+    assert(cookieDelTool.json.deleted >= 1, JSON.stringify(cookieDelTool.json).slice(0, 160))
+  })
+
+  const siteClearTool = await call('monitor_site_clear', { origin: scope, types: ['cache_storage'] })
+  check('monitor_site_clear（按类型清）', () => {
+    assert(siteClearTool.res.isError !== true, siteClearTool.text?.slice(0, 160))
+    assert(siteClearTool.json.ok === true, JSON.stringify(siteClearTool.json).slice(0, 160))
+  })
+
+  const siteSnapDelTool = await call('monitor_site_snapshot_delete', { id: siteSnapTool.json.id })
+  check('monitor_site_snapshot_delete', () => {
+    assert(siteSnapDelTool.res.isError !== true, siteSnapDelTool.text?.slice(0, 160))
+    assert(siteSnapDelTool.json.deleted === 1, `deleted=${siteSnapDelTool.json?.deleted}`)
+  })
   const clearTool = await call('monitor_clear', {})
   check('monitor_clear', () => {
     assert(clearTool.res.isError !== true, clearTool.text?.slice(0, 160))

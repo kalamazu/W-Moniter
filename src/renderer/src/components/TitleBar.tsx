@@ -10,6 +10,18 @@ interface Props {
   /** 附着的 target 数 / 总数，跟状态灯一起说明「内核现在连上了几个页面」 */
   targets: TargetInfo[]
   onRefresh: () => void
+  /** 开关窗口吸附（让浏览器贴到控制窗口旁边） */
+  onToggleDock: () => void
+  /** 换一侧贴。只有吸附着的时候才显示这个按钮 */
+  onFlipDock: () => void
+}
+
+/** reason 是给机器看的，这里翻成人话；没见过的原样显示，别把原因吞掉 */
+const REASON_TEXT: Record<string, string> = {
+  'no-window': '没找到本应用启动的浏览器窗口（可能还没起来，或者已经被关掉）',
+  'no-room': '屏幕工作区不够宽，挤不出浏览器要的位置',
+  'not-windows': '只有 Windows 上可用（靠 win/dock-helper.ps1 调 Win32 接口）',
+  'not-ready': '主进程还没准备好'
 }
 
 const STATE_TEXT: Record<ControllerState, string> = {
@@ -40,7 +52,15 @@ const STATE_TEXT: Record<ControllerState, string> = {
  * 另外把几个**全局**动作收上来（刷新 / 清空 / 数据目录）：它们不属于任何一个面板，
  * 原先散在页脚和工具栏里，现在统一放顶栏右侧。
  */
-export function TitleBar({ status, state, matched, targets, onRefresh }: Props): React.JSX.Element {
+export function TitleBar({
+  status,
+  state,
+  matched,
+  targets,
+  onRefresh,
+  onToggleDock,
+  onFlipDock
+}: Props): React.JSX.Element {
   const [maximized, setMaximized] = useState(false)
 
   useEffect(() => {
@@ -50,6 +70,23 @@ export function TitleBar({ status, state, matched, targets, onRefresh }: Props):
 
   const storage = status?.storage
   const body = status?.body
+
+  // 吸附按钮三态：不可用 / 开着且吸上了（蓝） / 开着但没吸上（黄）。
+  // 「开着但没吸上」必须显形 —— 否则用户以为吸上了，实际浏览器根本没动。
+  const dock = status?.dock
+  const dockAvailable = dock?.available === true
+  const dockOn = dock?.enabled === true && dockAvailable
+  const dockAttached = dock?.attached === true
+  const dockSideText = dock?.side === 'left' ? '左' : '右'
+  const dockClass = dockOn ? (dockAttached ? ' is-on' : ' is-warn') : ''
+  let dockTitle: string
+  if (!dock) dockTitle = '窗口吸附：等主进程就绪'
+  else if (!dock.available) dockTitle = REASON_TEXT['not-windows'] as string
+  else if (dockOn && dockAttached)
+    dockTitle = `浏览器已吸附在${dockSideText}侧。再点一次取消吸附（浏览器停在原地，不会被挪回去）`
+  else if (dockOn)
+    dockTitle = `已开启，但还没吸上：${dock.reason ? (REASON_TEXT[dock.reason] ?? dock.reason) : '未知原因'}`
+  else dockTitle = '把浏览器贴到控制窗口旁边：不改浏览器归属，只同步它的位置尺寸'
 
   return (
     <header className="titlebar">
@@ -82,6 +119,50 @@ export function TitleBar({ status, state, matched, targets, onRefresh }: Props):
       </div>
 
       <div className="tb-actions">
+        <button
+          type="button"
+          className={`tb-btn tb-dock${dockClass}`}
+          disabled={!dockAvailable}
+          title={dockTitle}
+          onClick={onToggleDock}
+        >
+          <svg
+            viewBox="0 0 16 16"
+            width="12"
+            height="12"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.3"
+            aria-hidden="true"
+          >
+            <rect x="1.3" y="2.3" width="13.4" height="11.4" rx="1.7" />
+            <path d="M9.6 2.5v11" />
+          </svg>
+          吸附
+          {dockOn && dockAttached && <span className="tb-dock-side">{dockSideText}</span>}
+        </button>
+        {dockOn && (
+          <button
+            type="button"
+            className="tb-btn tb-dock-flip"
+            title={`换到${dockSideText === '左' ? '右' : '左'}侧`}
+            onClick={onFlipDock}
+          >
+            <svg
+              viewBox="0 0 16 16"
+              width="12"
+              height="12"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.3"
+              strokeLinecap="round"
+              aria-hidden="true"
+            >
+              <path d="M2 5.4h9.6M9.2 3l2.4 2.4-2.4 2.4" />
+              <path d="M14 10.6H4.4M6.8 8.2 4.4 10.6 6.8 13" />
+            </svg>
+          </button>
+        )}
         <button type="button" className="tb-btn" onClick={onRefresh} title="重新拉取当前面板的数据">
           刷新
         </button>

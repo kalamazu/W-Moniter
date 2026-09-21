@@ -147,7 +147,11 @@ export async function launchApp(options) {
     {
       cwd: ROOT,
       stdio: ['ignore', logFd, logFd],
-      windowsHide: true,
+      // **不能给 windowsHide: true**。它会让 Node 在 STARTUPINFO 里塞 SW_HIDE，
+      // 而 Windows 会用这个值去执行进程的**第一次** ShowWindow —— 于是 Electron 的
+      // win.show() 被按成「隐藏」：窗口有真实几何、CDP 截图也正常，但 IsWindowVisible=false，
+      // 最小化/还原/前台这些窗口消息全部对不上（窗口吸附验收栽在这上面）。
+      windowsHide: false,
       env: {
         ...process.env,
         MONITOR_URL: url,

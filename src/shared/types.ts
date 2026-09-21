@@ -39,6 +39,11 @@ export interface RequestRecord {
   reqHeaders?: HeaderMap
   /** 响应头，来自 Network.responseReceivedExtraInfo。缓存/SW 命中时可能没有 */
   respHeaders?: HeaderMap
+  /**
+   * 请求体原文。来自 requestWillBeSent 的 request.postData（CDP 只在这一处给）。
+   * 画像里的「请求体字段分布」与契约回归的「新字段」全靠它。
+   */
+  reqBody?: string
   failed?: string
   /** 会话结束时还没结束的请求，由收尾逻辑补记，避免整条丢失 */
   canceled?: boolean
@@ -192,6 +197,14 @@ export interface StorageHealth {
   scriptsMetaOnly: number
   scriptsDropped: number
   scriptQueueDepth: number
+  /** 事件流入库条数 / 队列满被丢的条数 */
+  eventsStored: number
+  eventsDropped: number
+  eventQueueDepth: number
+  /** WebSocket 帧入库条数 / 被丢的条数 */
+  wsFramesStored: number
+  wsFramesDropped: number
+  wsQueueDepth: number
   lastFlushMs: number
 }
 
@@ -583,6 +596,68 @@ export interface InstanceRow {
 
 /* -------------------------------------------------------------- 状态与 API */
 
+/**
+ * 窗口吸附（实现见 src/main/window/dock.ts）。
+ *
+ * 这不是嵌入 —— 浏览器仍然是独立进程、独立顶层窗口，我们只改它的位置尺寸，
+ * 让它视觉上像控制窗口旁边的一栏。之所以不跨进程 SetParent 嵌进去：那样 Chrome
+ * 的窗口几何会变得不可控，而抗节流方案（设计文档 D3）恰恰依赖几何是对的
+ * （踩过一次 159x27 的坑，不再踩第二次）。
+ */
+export type DockSide = 'left' | 'right'
+
+export interface DockState {
+  /** 用户开着吸附吗（落盘在 <dataDir>/ui-settings.json） */
+  enabled: boolean
+  /** 助手可用吗（Windows + win/dock-helper.ps1 在位）。false 时 UI 要禁用按钮 */
+  available: boolean
+  /** 真的抓到浏览器窗口了吗。enabled 但没 attached 说明还没吸上，看 reason */
+  attached: boolean
+  /** 浏览器贴在哪一侧（= 控制窗口让位让出哪边） */
+  side: DockSide
+  /** 没吸上的原因：no-window / no-room / not-windows / 具体错误消息 */
+  reason?: string
+}
+
+/**
+ * 工作区里能放进窗格的面板。`detail`（请求详情）也是一等公民 —— 可以单独占一栏，
+ * 也可以和请求列表挤在同一栏里并排看。
+ */
+export type PanelId =
+  | 'list'
+  | 'waterfall'
+  | 'detail'
+  | 'scripts'
+  | 'stats'
+  | 'rules'
+  | 'console'
+  | 'env'
+  | 'dom'
+  | 'sessions'
+  | 'events'
+  | 'ws'
+  | 'endpoints'
+  | 'graph'
+  | 'sites'
+
+/**
+ * 工作区布局：几栏 + 每栏占多大。
+ *
+ * `sizes` 与 `panes` 等长、和为 1；`dir` 决定各栏是左右排还是上下排。
+ * 拖分隔条改的就是 `sizes` —— 所以是「用户摆过就记住」，不是每次重开又回到默认。
+ */
+export interface PanelLayout {
+  panes: PanelId[]
+  sizes: number[]
+  dir: 'row' | 'column'
+}
+
+/** 界面偏好。和 rules.json 分开存：规则是面板与验收脚本共用的接口，不该被 UI 偏好的演化节奏绑住 */
+export interface UiSettings {
+  dock: { enabled: boolean; side: DockSide }
+  layout: PanelLayout
+}
+
 export type ControllerState = 'idle' | 'launching' | 'connecting' | 'connected' | 'error'
 
 export interface ControllerStatus {
@@ -601,10 +676,16 @@ export interface ControllerStatus {
   bodyMode: string
   /** 本次会话采集到的脚本条数（去重前） */
   scriptCount: number
+  /** 本次会话写进事件流的条数 */
+  eventCount?: number
+  /** 本次会话采集到的 WebSocket 帧数（含被上限丢掉的） */
+  wsFrameCount?: number
   /** 本地代理（P5）。没开启时 running=false */
   proxy: ProxyStatus
   /** AI 友好面：控制服务（本地 HTTP API / MCP 后端）的地址 */
   control?: ControlEndpoint
+  /** 窗口吸附。非 Windows 时也在（available=false），UI 据此禁用按钮而不是点了才报错 */
+  dock?: DockState
   error?: string
 }
 
@@ -744,6 +825,94 @@ export interface ControllerApi {
   windowClose(): Promise<void>
   /** 最大化状态变化：拖边、双击标题栏、Win+↑ 都会推过来 */
   onWindowMaximized(cb: (maximized: boolean) => void): () => void
+
+  /* ---- 窗口吸附（让浏览器贴在控制窗口旁边） ---- */
+
+  /** 开关吸附，可顺手指定浏览器贴哪一侧；返回落定后的状态 */
+  setDock(enabled: boolean, side?: DockSide): Promise<DockState>
+  /** 吸附状态变化（吸上 / 掉了 / 换边）。拖动窗口时状态没变就不推，不会每帧打过来 */
+  onDock(cb: (state: DockState) => void): () => void
+
+  /* ---- 界面偏好（吸附 + 工作区布局）---- */
+
+  /** 读界面偏好。渲染层启动时读一次，把上次摆好的布局恢复出来 */
+/* ---- 站点资源：Cookie 与站点存储 ---- */
+
+  /** 库里存的 cookie 罐（不含实时扫描，要最新值先 scanSiteData） */
+  listCookies(options?: { query?: CookieQuery }): Promise<Page<CookieRecord> | null>
+  getCookieStats(): Promise<CookieStats | null>
+  /** 站点资源总览：见过的域 + 扫过的域 */
+  getSiteOrigins(options?: { limit?: number; onlyScanned?: boolean }): Promise<{ rows: SiteOriginRow[]; total: number } | null>
+  getSiteDetail(origin: string): Promise<SiteDetail | null>
+  /** 去浏览器里真扫一遍（cookie 罐 + 站点存储），把结果落库 */
+  scanSiteData(options?: { origin?: string; limit?: number; cookies?: boolean }): Promise<SiteScanReport>
+  setCookie(input: CookieInput): Promise<{ ok: boolean; error?: string; scanned?: number }>
+  deleteCookies(filter: CookieDeleteFilter): Promise<{ ok: boolean; error?: string; deleted: number }>
+  clearSiteData(origin: string, types: SiteDataType[]): Promise<{ ok: boolean; error?: string; origin: string; types: string[] }>
+  /** localStorage / sessionStorage 的增删改 */
+  editStorage(input: {
+    origin: string
+    area: 'local' | 'session'
+    action: 'set' | 'remove' | 'clear'
+    key?: string
+    value?: string
+  }): Promise<{ ok: boolean; error?: string }>
+  deleteIdbDatabase(origin: string, name: string): Promise<{ ok: boolean; error?: string }>
+  deleteCache(origin: string, name: string, url?: string): Promise<{ ok: boolean; error?: string }>
+  unregisterServiceWorker(scopeURL: string): Promise<{ ok: boolean; error?: string }>
+  siteSnapshot(options?: { label?: string }): Promise<SiteSnapshotSummary>
+  listSiteSnapshots(limit?: number): Promise<SiteSnapshotSummary[] | null>
+  siteSnapshotDiff(baseId: number): Promise<SiteSnapshotDiff | null>
+  deleteSiteSnapshot(id: number): Promise<{ deleted: number }>
+
+  uiSettings(): Promise<UiSettings>
+  /** 写界面偏好（浅合并），返回落盘后的完整设置 */
+  setUiSettings(patch: Partial<UiSettings>): Promise<UiSettings>
+
+  /* ---- 分析层：事件流 / WebSocket / 画像 / 调用图 / 关联 ---- */
+
+  /** 事件流（导航 / 控制台告警 / 异常 / 下载 / 对话框 / WS 生命周期）。since 给增量 */
+  queryEvents(query: EventQuery): Promise<EventPage | null>
+  getEventStats(): Promise<EventStats | null>
+  queryWsFrames(query: WsFrameQuery): Promise<WsFramePage | null>
+  getWsConnections(limit?: number): Promise<{ rows: WsConnectionRow[]; total: number } | null>
+  getEndpointProfiles(options?: {
+    query?: RequestQuery
+    sort?: string
+    minCalls?: number
+    limit?: number
+    maxRows?: number
+  }): Promise<EndpointPage | null>
+  getEndpointDetail(
+    key: string,
+    options?: { query?: RequestQuery; sampleLimit?: number; callLimit?: number; maxRows?: number }
+  ): Promise<EndpointDetail | null>
+  getRequestGraph(options?: {
+    query?: RequestQuery
+    maxRows?: number
+    maxNodes?: number
+  }): Promise<RequestGraph | null>
+  getRelations(options?: { query?: RequestQuery; maxRows?: number; limit?: number }): Promise<RelationReport | null>
+
+  /* ---- 导出与资源采集 ---- */
+
+  exportHar(options?: ExportQuery): Promise<HarExportReport>
+  exportJsonl(options?: ExportQuery): Promise<JsonlExportReport>
+  /** 把匹配到的响应体落成目录里的真文件 + manifest.json（离线镜像） */
+  exportBodies(options?: ExportQuery & { dir?: string }): Promise<ResourceExportReport>
+
+  /* ---- 接口契约：快照 + 回归 ---- */
+
+  contractSnapshot(options?: { label?: string; query?: RequestQuery; sampleLimit?: number }): Promise<ContractSummary>
+  listContracts(limit?: number): Promise<ContractListRow[] | null>
+  getContract(id: number, withSchema?: boolean): Promise<unknown>
+  deleteContract(id: number): Promise<{ deleted: number }>
+  contractDiff(options: { baseId: number; query?: RequestQuery; sampleLimit?: number }): Promise<ContractDiff>
+
+  /* ---- 对话框 ---- */
+
+  /** 应答（放行/取消）当前打开的 JS 对话框。不响应的话页面会一直卡住 */
+  handleDialog(accept: boolean, promptText?: string): Promise<{ ok: boolean; error?: string }>
 }
 
 /* ------------------------------------------------------------------ 干预规则 */
@@ -936,6 +1105,8 @@ export interface CapabilitySet {
   dom: 'full' | 'ondemand'
   /** 截图通道可用（页面起来了就有） */
   screenshot: boolean
+  /** 站点资源（cookie / 存储）读写可用。Storage 域不在 §3.4 红线里，两个 Profile 都有 */
+  siteData: boolean
 }
 
 export type InputKind = 'move' | 'click' | 'type' | 'scroll'
@@ -959,6 +1130,669 @@ export interface InputAction {
   jitter?: number
   overshoot?: boolean
 }
+
+
+/* ------------------------------------------------- 事件流与 WebSocket */
+
+/** 事件流的 kind。列成联合类型是为了让采集侧和面板别各写一套字符串 */
+export type MonitorEventKind =
+  | 'navigation'
+  | 'console'
+  | 'exception'
+  | 'websocket'
+  | 'download'
+  | 'dialog'
+  | 'target'
+  | 'rule'
+  | 'overflow'
+  /** cookie 罐的变化（种上 / 改写 / 过期 / 被策略拦下） */
+  | 'cookie'
+  /** 站点存储的变化（localStorage 逐键，缓存 / IndexedDB / SW 是域级） */
+  | 'storage'
+
+export interface MonitoredEvent {
+  /** 库里的自增 id（增量拉取的游标）。刚采集还没落库时没有 */
+  id?: number
+  ts: number
+  kind: MonitorEventKind
+  level?: 'info' | 'warn' | 'error'
+  targetType?: string
+  url?: string
+  detail?: unknown
+}
+
+export interface EventQuery {
+  /** 只管要 id 比它大的（增量拉取）。上一次返回里的 nextSince 直接拿来用 */
+  since?: number
+  until?: number
+  kinds?: MonitorEventKind[]
+  kind?: MonitorEventKind
+  level?: string
+  targetType?: string
+  search?: string
+  limit?: number
+  order?: 'asc' | 'desc'
+}
+
+export interface EventPage {
+  rows: MonitoredEvent[]
+  /** 库里当前最大的事件 id */
+  latest: number
+  /** 下一次该带的 since */
+  nextSince: number
+  total: number
+}
+
+export interface EventStats {
+  rows: Array<{
+    kind: string
+    level: string | null
+    count: number
+    firstTs: number | null
+    lastTs: number | null
+    latestId: number
+  }>
+  latest: number
+  total: number
+}
+
+export interface WsFrameRecord {
+  seq?: number
+  ts: number
+  requestId: string
+  url?: string
+  direction: 'sent' | 'received'
+  opcode: number
+  /** 文本帧是原文；二进制帧是 base64（CDP 的约定），用 binary 区分 */
+  payload: string
+  /** 真实载荷字节数（二进制帧已按 base64 换算回解码后的长度） */
+  size: number
+  truncated: boolean
+  binary: boolean
+}
+
+export interface WsFrameRow extends WsFrameRecord {
+  id: number
+  opcodeName: string
+}
+
+export interface WsFrameQuery {
+  since?: number
+  direction?: string
+  requestId?: string
+  opcode?: number
+  search?: string
+  limit?: number
+  order?: 'asc' | 'desc'
+}
+
+export interface WsFramePage {
+  rows: WsFrameRow[]
+  latest: number
+  nextSince: number
+  total: number
+}
+
+/** 一条 WS 连接的汇总。面板先列连接、点开再看帧 */
+export interface WsConnectionRow {
+  requestId: string
+  url: string
+  frames: number
+  sent: number
+  received: number
+  binaryFrames: number
+  truncatedFrames: number
+  bytes: number
+  firstTs: number
+  lastTs: number
+  seq: number | null
+}
+
+/* ------------------------------------------------------------ 接口画像 */
+
+export interface FieldDistribution {
+  name: string
+  count: number
+  /** 每一个「有 body / 有 query」的样本里都出现才算必填 */
+  required: boolean
+  values: string[]
+}
+
+/** JSON 形状。object 带 fields、array 带 items，其余 t 就是叶子类型 */
+export interface JsonSchemaNode {
+  t: string
+  count?: number
+  seen?: number
+  len?: number
+  items?: JsonSchemaNode | null
+  fields?: Record<string, JsonSchemaNode>
+  of?: JsonSchemaNode[]
+}
+
+export interface SchemaPath {
+  path: string
+  type: string
+  /** 样本里不是每次都有 */
+  optional: boolean
+}
+
+export interface EndpointProfile {
+  key: string
+  calls: number
+  distinctUrls: number
+  sampleUrls: string[]
+  samples: number[]
+  statuses: Array<{ key: string; count: number }>
+  mimeTypes: Array<{ key: string; count: number }>
+  resourceTypes: Array<{ key: string; count: number }>
+  targetTypes: Array<{ key: string; count: number }>
+  durationMs: { p50: number | null; p95: number | null; min: number | null; max: number | null }
+  bytes: number
+  decodedBytes: number
+  failed: number
+  cached: number
+  fromSw: number
+  withBody: number
+  query: FieldDistribution[]
+  requestBody: {
+    samples: number
+    kinds: Array<{ key: string; count: number }>
+    fields: FieldDistribution[]
+  }
+  /** 调用节奏（中位间隔）。看的是「这个接口是不是在被轮询」 */
+  rhythm: { medianGapMs: number; spanMs: number } | null
+  firstTs: number | null
+  lastTs: number | null
+}
+
+export interface EndpointPage {
+  endpoints: EndpointProfile[]
+  /** 过滤后剩下的端点数（可能大于返回的条数） */
+  matched: number
+  scanned: number
+  total: number
+  /** 实例里还有行没被扫到（maxRows 之外） */
+  truncated: boolean
+  sort: string
+}
+
+export interface EndpointCallSample {
+  seq: number
+  ts: number
+  url: string
+  status: number | null
+  durationMs: number | null
+  ttfbMs: number | null
+  bytes: number | null
+  fromCache: boolean
+  fromSw: boolean
+  bodyState: string | null
+  targetType: string | null
+  failed: string | null
+}
+
+export interface EndpointDetail {
+  key: string
+  found: boolean
+  error?: string
+  totalCalls?: number
+  profile?: EndpointProfile
+  recent?: EndpointCallSample[]
+  responseSchema?: JsonSchemaNode | null
+  responseFields?: SchemaPath[]
+  responseSamples?: number
+  responseSamplesSkipped?: number
+  requestSchema?: JsonSchemaNode | null
+  requestSamples?: number
+  truncated?: boolean
+}
+
+/* -------------------------------------------------------------- 调用图 */
+
+export interface GraphNode {
+  key: string
+  /** endpoint / script / document / 其它 initiator 类型 */
+  kind: string
+  label: string
+  url: string | null
+  host: string | null
+  method: string | null
+  functionName: string | null
+  outCalls: number
+  inCalls: number
+}
+
+export interface GraphEdge {
+  from: string
+  to: string
+  count: number
+  failures: number
+  avgMs: number | null
+  p95Ms: number | null
+  initiatorTypes: Array<{ key: string; count: number }>
+  samples: number[]
+  firstTs: number | null
+  lastTs: number | null
+}
+
+export interface RequestGraph {
+  nodes: GraphNode[]
+  edges: GraphEdge[]
+  /** 连通分量 = 互相牵动的「功能簇」 */
+  clusters: Array<{ size: number; nodes: string[] }>
+  scanned: number
+  total: number
+  truncated: boolean
+  droppedNodes: number
+}
+
+export interface RelationReport {
+  sharedBodies: Array<{
+    hash: string
+    refs: number
+    size: number | null
+    distinctUrls: number
+    sampleUrls: string[]
+    endpoints: string[]
+    samples: number[]
+  }>
+  redirectChains: Array<{
+    requestId: string
+    hops: number
+    steps: Array<{ seq: number; method: string; url: string; status: number | null }>
+  }>
+  domainLinks: Array<{ frameHost: string; host: string; count: number }>
+  sharedParams: Array<{
+    name: string
+    value: string
+    count: number
+    endpoints: string[]
+    endpointCount: number
+    hosts: string[]
+    crossHost: boolean
+  }>
+  scanned: number
+  total: number
+  truncated: boolean
+}
+
+/* ---------------------------------------------------------------- 导出 */
+
+export interface ExportQuery {
+  /** 只导匹配的请求。不认识的字段会被忽略 */
+  query?: RequestQuery
+  /** 一次最多扫多少行（有上限，超了会报 truncated） */
+  maxRows?: number
+  includeBodies?: boolean
+}
+
+export interface HarExportReport {
+  path: string
+  bytes: number
+  entries: number
+  pages: number
+  /** 有 body_hash 但 blob 已被 LRU 淘汰掉的条数 */
+  bodyMissing: number
+  scanned: number
+  total: number
+  truncated: boolean
+  sample: Array<{ url: string; status: number; resourceType?: string }>
+}
+
+export interface JsonlExportReport {
+  path: string
+  bytes: number
+  lines: number
+  bodyMissing: number
+  scanned: number
+  total: number
+  truncated: boolean
+}
+
+export interface ResourceExportReport {
+  dir: string
+  manifest: string
+  files: number
+  bytes: number
+  skipped: number
+  total: number
+  truncated: boolean
+}
+
+/* ------------------------------------------------------------ 契约回归 */
+
+export interface ContractSummary {
+  id: number
+  label: string
+  inst: number
+  createdAt: number
+  endpoints: number
+  calls: number
+  truncated: boolean
+}
+
+export interface ContractListRow {
+  id: number
+  label: string
+  inst: number
+  createdAt: number
+  bytes: number
+}
+
+export interface ContractDiff {
+  base: { id: number | null; label: string | null; createdAt: number; endpoints: number }
+  current: { createdAt: number; endpoints: number; calls: number }
+  added: Array<{ key: string; calls: number; statuses: string[]; mimeTypes: string[] }>
+  removed: Array<{ key: string; calls: number; statuses: string[]; mimeTypes: string[] }>
+  changed: Array<{
+    key: string
+    statuses: { added: string[]; removed: string[] }
+    mimeTypes: { added: string[]; removed: string[] }
+    query: {
+      added: Array<{ name: string; required: boolean; samples: string[] }>
+      removed: Array<{ name: string }>
+      requiredChanged: Array<{ name: string; from: boolean; to: boolean }>
+    }
+    requestFields: {
+      added: Array<{ name: string; required: boolean; samples: string[] }>
+      removed: Array<{ name: string }>
+      requiredChanged: Array<{ name: string; from: boolean; to: boolean }>
+    }
+    response: {
+      added: SchemaPath[]
+      removed: SchemaPath[]
+      typeChanged: Array<{ path: string; from: string; to: string }>
+    }
+    callsBefore: number
+    callsAfter: number
+  }>
+  summary: {
+    addedEndpoints: number
+    removedEndpoints: number
+    changedEndpoints: number
+    unchangedEndpoints: number
+    addedEndpointKeys: string[]
+    removedEndpointKeys: string[]
+    newStatusCodes: string[]
+    droppedStatusCodes: string[]
+    newResponseFields: string[]
+    droppedResponseFields: string[]
+    newRequestFields: string[]
+    newQueryParams: string[]
+  }
+}
+
+/* ------------------------------------------- 站点资源（Cookie / 站点存储） */
+
+/**
+ * cookie 罐里的一条。字段名刻意对齐 CDP 的 Storage.Cookie —— 我们只是搬运工，
+ * 另造一套命名只会让「界面显示的」和「DevTools 显示的」对不上。
+ */
+export interface CookieRecord {
+  /** 罐内主键：domain|path|name|partition。同一条 cookie 更新时靠它认领 */
+  key: string
+  name: string
+  value: string
+  /** 值被截断过（原值更大）。真长度在 valueLen */
+  truncated?: boolean
+  valueLen: number
+  domain: string
+  path: string
+  /** 秒级时间戳；会话 cookie 没有 */
+  expires?: number
+  session: boolean
+  secure: boolean
+  httpOnly: boolean
+  sameSite?: string
+  priority?: string
+  sourceScheme?: string
+  sourcePort?: number
+  /** 有值 = 分区 cookie（CHIPS），只有它自己的顶级站点能读到 */
+  partitionKey?: string
+  /** CDP 报的字节数（名字 + 值 + 属性） */
+  size: number
+  firstSeen: number
+  lastSeen: number
+  /** 被观察到变过几次。1 = 只见过一面 */
+  changeCount: number
+  /** 被带出去过多少次请求（来自 requestWillBeSentExtraInfo.associatedCookies） */
+  sentCount: number
+  /** 它被发往过哪些站点（请求所在文档的 host） */
+  sentHosts: string[]
+  /** 用到它的站点和它自己的域不是同一个 —— 这才是真的「第三方使用」 */
+  crossSite: boolean
+}
+
+/** cookie 变更事件（事件流里 kind='cookie' 的 detail）。谁把哪条 cookie 改成了什么 */
+export interface CookieQuery {
+  /** 按域 / 名字模糊搜 */
+  search?: string
+  /** 精确匹配的域（含子域） */
+  domain?: string
+  name?: string
+  path?: string
+  /** 只看会话 cookie / 只看持久 cookie */
+  session?: boolean
+  /** 只看第三方（跨站使用过的） */
+  crossSite?: boolean
+  sameSite?: string
+  secure?: boolean
+  httpOnly?: boolean
+  /** 只看分区 cookie */
+  partitioned?: boolean
+  /** 排序：size / lastSeen / sentCount / domain */
+  sort?: string
+  limit?: number
+  offset?: number
+  order?: 'asc' | 'desc'
+}
+
+export interface CookieChangeDetail {
+  action: 'added' | 'changed' | 'removed' | 'blocked'
+  name: string
+  domain: string
+  path: string
+  value?: string
+  valueLen?: number
+  /** 变更来源：set-cookie(响应 URL) / cdp(我们自己改的) / scan(对账发现的) */
+  source: string
+  url?: string
+  /** removed 时解释为什么：expired / cleared / overwritten */
+  reason?: string
+}
+
+/**
+ * 站点存储变更事件（事件流里 kind='storage' 的 detail）。
+ *
+ * 两类来源共用一个形状：DOMStorage 是逐键的（key/value 都有），
+ * 缓存 / IndexedDB / ServiceWorker 的域事件只给名字 —— 浏览器只肯说
+ * 「这个域的某个东西动了」，明细得重新扫。区分靠 action。
+ */
+export interface StorageChangeDetail {
+  area: 'local' | 'session' | 'cache' | 'indexeddb' | 'serviceworker'
+  action: 'set' | 'remove' | 'clear' | 'list' | 'content'
+  origin: string
+  key?: string
+  value?: string
+  oldValue?: string
+  /** 域级事件带的名字：缓存名 / 库名 */
+  name?: string
+  /** IndexedDB 的 object store */
+  objectStore?: string
+}
+
+/** 按 origin 汇总的站点资源。scanned=false 表示只是见过这个域，还没去扫过 */
+export interface SiteOriginRow {
+  origin: string
+  updatedAt: number
+  scanned: boolean
+  cookieCount: number
+  localStorageCount: number
+  localStorageBytes: number
+  sessionStorageCount: number
+  sessionStorageBytes: number
+  idbNames: string[]
+  idbStores: number
+  cacheNames: string[]
+  cacheEntries: number
+  swCount: number
+  usageBytes: number | null
+  quotaBytes: number | null
+  usageBreakdown: Array<{ storageType: string; usage: number }>
+}
+
+export interface SiteStorageEntry {
+  key: string
+  value: string
+  bytes: number
+  truncated?: boolean
+}
+
+export interface SiteIdbStore {
+  name: string
+  keyPath?: string
+  autoIncrement?: boolean
+  indexes: string[]
+}
+
+export interface SiteIdbDatabase {
+  name: string
+  version: number
+  objectStores: SiteIdbStore[]
+}
+
+export interface SiteCache {
+  name: string
+  count: number
+  entries: Array<{ url: string; size: number | null; status?: number }>
+}
+
+export interface SiteServiceWorker {
+  scopeURL: string
+  registrationId?: string
+  isDeleted?: boolean
+  versionId?: string
+  runningStatus?: string
+  scriptURL?: string
+  status?: string
+}
+
+/** 某个 origin 的全量明细（扫描得出来的东西全在这里） */
+export interface SiteDetail extends SiteOriginRow {
+  cookies: CookieRecord[]
+  localStorage: SiteStorageEntry[]
+  sessionStorage: SiteStorageEntry[]
+  idb: SiteIdbDatabase[]
+  caches: SiteCache[]
+  serviceWorkers: SiteServiceWorker[]
+}
+
+/** cookie 画像。研究用：谁在用 cookie、用得多狠、跨了多少站 */
+export interface CookieStats {
+  total: number
+  hosts: number
+  session: number
+  persistent: number
+  secure: number
+  httpOnly: number
+  sameSiteNone: number
+  crossSite: number
+  partitioned: number
+  totalBytes: number
+  biggest: Array<{ name: string; domain: string; size: number }>
+  bySameSite: Array<{ key: string; count: number }>
+  /** 同一个名字出现在多个域上 —— 跟踪器最常见的特征 */
+  sharedNames: Array<{ name: string; hosts: number; count: number }>
+  longLived: Array<{ name: string; domain: string; expires: number; days: number }>
+  /** 被带出去最多的 cookie（真正在「跟踪」的那些） */
+  mostSent: Array<{ name: string; domain: string; sentCount: number; hosts: number }>
+}
+
+export interface SiteSnapshotSummary {
+  id: number
+  label: string | null
+  createdAt: number
+  origins: number
+  cookies: number
+  bytes: number
+}
+
+export interface SiteSnapshotDiff {
+  baseId: number
+  baseLabel: string | null
+  createdAt: number
+  origins: { added: string[]; removed: string[]; changed: Array<{ origin: string; summary: string[] }> }
+  cookies: {
+    added: Array<{ name: string; domain: string; path: string }>
+    removed: Array<{ name: string; domain: string; path: string }>
+    changed: Array<{ name: string; domain: string; path: string; fields: string[] }>
+  }
+  localStorage: { added: string[]; removed: string[]; changed: string[] }
+  summary: {
+    originsAdded: number
+    originsRemoved: number
+    cookiesAdded: number
+    cookiesRemoved: number
+    cookiesChanged: number
+    keysAdded: number
+    keysRemoved: number
+    keysChanged: number
+  }
+}
+
+export interface SiteScanReport {
+  ok: boolean
+  error?: string
+  scannedAt: number
+  durationMs: number
+  origins: string[]
+  cookies: { total: number; added: number; changed: number; removed: number }
+}
+
+/** 写 cookie 的入参（对齐 Network.setCookie） */
+export interface CookieInput {
+  name: string
+  value?: string
+  domain?: string
+  url?: string
+  path?: string
+  secure?: boolean
+  httpOnly?: boolean
+  sameSite?: 'Strict' | 'Lax' | 'None'
+  /** 秒级时间戳 */
+  expires?: number
+  /** 相对现在多少秒后过期；0 或负数 = 立刻删掉；不给 = 会话 cookie */
+  maxAge?: number
+}
+
+/** 删 cookie 的口径。给几个条件就删几条，都不给 = 拒绝（防手滑清空） */
+export interface CookieDeleteFilter {
+  name?: string
+  domain?: string
+  path?: string
+  url?: string
+  /** 整站：这个域及其子域全删 */
+  host?: string
+  /** 只删「跨站使用过」的 */
+  crossSiteOnly?: boolean
+  /**
+   * 罐内主键白名单（domain|path|name|partition）。
+   * 「跨站使用过」这类判断只有库做得出来，主进程查完把清单交下来按主键删 ——
+   * 上层再拼一遍匹配规则只会和库里的口径漂移。
+   */
+  extraKeys?: string[]
+}
+
+/** 清站点数据的类型位。对齐 CDP clearDataForOrigin 的 storageTypes */
+export type SiteDataType =
+  | 'cookies'
+  | 'local_storage'
+  | 'session_storage'
+  | 'indexeddb'
+  | 'cache_storage'
+  | 'service_workers'
+  | 'file_systems'
+  | 'all'
 
 export interface InputReport {
   kind: InputKind

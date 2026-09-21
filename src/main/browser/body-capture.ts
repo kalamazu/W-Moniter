@@ -27,7 +27,7 @@ import type { ProbeChannel } from './probe'
 
 export interface BodyConfig {
   enabled: boolean
-  /** 要拦的 CDP resourceType 集合 */
+  /** 要拦的 CDP resourceType 集合。**空集 = 全部类型**（不带 resourceType 的 Response pattern） */
   resourceTypes: Set<string>
   /** 单条 body 采集上限，超过只记状态 */
   maxBytes: number
@@ -190,7 +190,7 @@ export class BodyCapture {
 
   /** 只采 body（不含规则）时是否要开 Fetch */
   private capturesBodies(): boolean {
-    return this.config.enabled && this.config.resourceTypes.size > 0
+    return this.config.enabled
   }
 
   private rulesWantsBody(): boolean {
@@ -240,8 +240,13 @@ export class BodyCapture {
   private buildPatterns(): FetchPattern[] {
     const patterns: FetchPattern[] = []
     if (this.capturesBodies()) {
-      for (const resourceType of this.config.resourceTypes) {
-        patterns.push({ resourceType, requestStage: 'Response' })
+      if (this.config.resourceTypes.size === 0) {
+        // 不带 resourceType 的 pattern = 全部类型。写死一份类型清单会漏掉内核以后新增的
+        patterns.push({ requestStage: 'Response' })
+      } else {
+        for (const resourceType of this.config.resourceTypes) {
+          patterns.push({ resourceType, requestStage: 'Response' })
+        }
       }
     }
     // 规则的拦截范围由引擎反推：能窄就窄，见 engine.requestPatterns()
@@ -304,6 +309,14 @@ export class BodyCapture {
   ): boolean {
     const url = p.request?.url ?? ''
     if (!this.probe || !this.probe.matches(url)) return false
+    // 采集范围放开到全部类型之后，信标（new Image）也会在 Response 阶段被再暂停一次。
+    // 那一次既不能再 feed（同一条信标计两次），也不能 fulfill —— 请求阶段已经就地了结了。
+    if (p.responseStatusCode !== undefined) {
+      void this.cdp
+        .send('Fetch.continueResponse', { requestId }, sessionId)
+        .catch(() => undefined)
+      return true
+    }
     this.probe.feed(url)
     void this.cdp
       .send(

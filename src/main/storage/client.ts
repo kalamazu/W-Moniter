@@ -5,7 +5,7 @@ import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { locateNode } from './locate-node'
 import { resolveRuntimeFile } from '../paths'
-import type { RequestRecord, ScriptRecord, StorageHealth } from '../../shared/types'
+import type { MonitoredEvent, RequestRecord, ScriptRecord, StorageHealth, WsFrameRecord } from '../../shared/types'
 
 /**
  * 存储进程客户端。
@@ -31,6 +31,15 @@ const MAX_PENDING_UPDATES = 8192
  * 队列必须有界；超了丢最旧的，并计数上报。
  */
 const MAX_PENDING_SCRIPTS = 4096
+/**
+ * 事件流队列容量。事件比脚本轻得多（一条几百字节），但一个报错死循环
+ * 能瞬间造出成百上千条，所以仍然要有界：超了丢最旧的并计数。
+ */
+const MAX_PENDING_EVENTS = 8192
+/** WS 帧队列容量。帧可能很大（单条封 4KB），这里刻意比事件小一个量级 */
+const MAX_PENDING_WS = 2048
+const EVENT_BATCH = 500
+const WS_BATCH = 500
 /** 主进程侧 hash 去重表的容量 */
 const SEEN_HASH_LIMIT = 20_000
 const CALL_TIMEOUT_MS = 20_000
@@ -122,7 +131,7 @@ function toRow(record: RequestRecord): Record<string, unknown> {
     // 头是结构化数据，和 initiator_stack 一样序列化成 JSON 存一列
     req_headers: record.reqHeaders ? JSON.stringify(record.reqHeaders) : null,
     resp_headers: record.respHeaders ? JSON.stringify(record.respHeaders) : null,
-    req_body: null,
+    req_body: record.reqBody ?? null,
     encoded_len: record.encodedDataLength ?? null,
     decoded_len: null,
     from_cache: record.fromCache ? 1 : 0,
@@ -184,6 +193,8 @@ export class StorageClient extends EventEmitter {
   private readonly bodyQueue: PendingBody[] = []
   private readonly updateQueue: PendingUpdate[] = []
   private readonly scriptQueue: ScriptRecord[] = []
+  private readonly eventQueue: MonitoredEvent[] = []
+  private readonly wsQueue: WsFrameRecord[] = []
   /**
    * 重试超限的 body 关联先寄存在这儿，等收尾时再试一次。
    *
@@ -222,6 +233,12 @@ export class StorageClient extends EventEmitter {
       scriptsMetaOnly: 0,
       scriptsDropped: 0,
       scriptQueueDepth: 0,
+      eventsStored: 0,
+      eventsDropped: 0,
+      eventQueueDepth: 0,
+      wsFramesStored: 0,
+      wsFramesDropped: 0,
+      wsQueueDepth: 0,
       lastFlushMs: 0
     }
   }
@@ -385,6 +402,31 @@ export class StorageClient extends EventEmitter {
     this.health.scriptQueueDepth = this.scriptQueue.length
   }
 
+  /**
+   * 事件流入库。和请求一样只入队 —— 采集回调路径上不做任何 IO。
+   * 真正的落盘在 flush() 里，队列满了丢最旧的并计数上报。
+   */
+  appendEvent(item: MonitoredEvent): void {
+    if (!this.health.enabled) return
+    this.eventQueue.push(item)
+    if (this.eventQueue.length > MAX_PENDING_EVENTS) {
+      this.eventQueue.splice(0, this.eventQueue.length - MAX_PENDING_EVENTS)
+      this.health.eventsDropped += 1
+    }
+    this.health.eventQueueDepth = this.eventQueue.length
+  }
+
+  /** WebSocket 帧入库。帧是页面能自己造量的东西，队列与单条大小都有上限 */
+  appendWsFrame(frame: WsFrameRecord): void {
+    if (!this.health.enabled) return
+    this.wsQueue.push(frame)
+    if (this.wsQueue.length > MAX_PENDING_WS) {
+      this.wsQueue.splice(0, this.wsQueue.length - MAX_PENDING_WS)
+      this.health.wsFramesDropped += 1
+    }
+    this.health.wsQueueDepth = this.wsQueue.length
+  }
+
   /** 采集到但拿不到 body 的情况也要留痕，否则「没有 body」和「没采」分不清 */
   markBody(seq: number, state: string, size = 0, hash = '', trunc = false): void {
     if (!this.health.enabled) return
@@ -434,6 +476,8 @@ export class StorageClient extends EventEmitter {
       this.requestQueue.length === 0 &&
       this.bodyQueue.length === 0 &&
       this.scriptQueue.length === 0 &&
+      this.eventQueue.length === 0 &&
+      this.wsQueue.length === 0 &&
       this.updateQueue.length === 0
     ) {
       return
@@ -478,6 +522,30 @@ export class StorageClient extends EventEmitter {
         this.health.scriptsMetaOnly += result.metaOnly
       }
       this.health.scriptQueueDepth = this.scriptQueue.length
+
+      while (this.eventQueue.length > 0) {
+        const batch = this.eventQueue.slice(0, EVENT_BATCH)
+        const result = (await this.call('appendEvents', {
+          inst: this.inst,
+          items: batch
+        })) as { inserted: number }
+
+        this.eventQueue.splice(0, batch.length)
+        this.health.eventsStored += result.inserted
+      }
+      this.health.eventQueueDepth = this.eventQueue.length
+
+      while (this.wsQueue.length > 0) {
+        const batch = this.wsQueue.slice(0, WS_BATCH)
+        const result = (await this.call('appendWsFrames', {
+          inst: this.inst,
+          items: batch
+        })) as { inserted: number }
+
+        this.wsQueue.splice(0, batch.length)
+        this.health.wsFramesStored += result.inserted
+      }
+      this.health.wsQueueDepth = this.wsQueue.length
 
       while (this.bodyQueue.length > 0) {
         const batch = this.bodyQueue.slice(0, BODY_BATCH)

@@ -3,6 +3,7 @@ import type { CdpClient, CdpEvent } from './cdp'
 import { BodyCapture, type BodyConfig, type BodyCaptureStats, type CapturedBody } from './body-capture'
 import { ScriptCapture, type ScriptConfig, type ScriptCaptureStats } from './script-capture'
 import type { RuleEngine } from '../rules/engine'
+import { stripDots } from './site-data'
 import { InjectionRunner } from './injection'
 import type { ProbeChannel } from './probe'
 import type {
@@ -10,9 +11,11 @@ import type {
   HeaderMap,
   InitiatorFrame,
   InitiatorInfo,
+  MonitoredEvent,
   Profile,
   RequestRecord,
-  TargetInfo
+  TargetInfo,
+  WsFrameRecord
 } from '../../shared/types'
 import type { RuleSet } from '../../shared/types'
 
@@ -54,6 +57,79 @@ const FRAME_URL_CACHE = 2000
 
 /** 控制台面板只留最近这么多条：它是给人看的，不是审计日志 */
 const CONSOLE_RING = 500
+
+/**
+ * 事件流里高噪音事件（console / exception）的单实例上限。
+ * 事件流的价值在于「稀疏事件一条不丢」，而不是存下每一次 log —— 那个控制台面板已经做了。
+ */
+const EVENT_NOISY_LIMIT = 20000
+/** 单实例最多记多少帧 WebSocket 数据。帧的数量完全由页面决定，必须封顶 */
+const WS_FRAME_LIMIT = 20000
+/** 单帧 payload 的落库上限。超了截断并标记，别让一条大帧把库撑爆 */
+const WS_PAYLOAD_MAX = 4096
+/** WS 连接 → URL 缓存的容量 */
+const WS_URL_CACHE = 512
+
+
+/**
+ * 站点资源相关的钩子。
+ *
+ * 采集器只管「路过的信号」，罐怎么对账、存储怎么扫是 Controller 那边的事 ——
+ * 这里只把「刚刚有人种 cookie」「这次请求带上了哪些 cookie」递出去。
+ */
+export interface SiteHooks {
+  /** 响应里带了 Set-Cookie：把「哪个 URL 想种哪些名字」递上去 */
+  onSetCookie?: (url: string, names: string[]) => void
+  /** 这次请求带上了这些 cookie 的罐内主键：用来记「它被发到过哪些站点」 */
+  onCookieSent?: (host: string, keys: string[]) => void
+  /** 被第三方 cookie 策略挡下来的那些。研究「谁在被拦」比「谁被种上」更有意思 */
+  onCookieBlocked?: (url: string, names: string[]) => void
+}
+
+/**
+ * 从响应头里挑出 Set-Cookie 的名字。
+ *
+ * 优先用 headersText 原文：headers 对象把多条 Set-Cookie 折成一条，
+ * 而 Expires 里就带逗号，靠逗号拆必然拆错。这里只要名字，所以也不怕
+ * 值里有什么怪字符 —— 用户问的是「谁想种什么」，值以浏览器罐里的为准。
+ */
+function setCookieNames(headersText: string | undefined, headers: Record<string, string> | undefined): string[] {
+  const raw: string[] = []
+  if (headersText) {
+    for (const line of headersText.split(String.fromCharCode(10))) {
+      const trimmed = line.trim()
+      if (trimmed.length > 11 && trimmed.slice(0, 11).toLowerCase() === 'set-cookie:') raw.push(trimmed.slice(11))
+    }
+  }
+  if (raw.length === 0 && headers) {
+    for (const [name, value] of Object.entries(headers)) {
+      if (name.toLowerCase() !== 'set-cookie') continue
+      raw.push(...value.split(String.fromCharCode(10)))
+    }
+  }
+  const out: string[] = []
+  for (const item of raw) {
+    const eq = item.indexOf('=')
+    if (eq <= 0) continue
+    const name = item.slice(0, eq).trim()
+    if (name && !out.includes(name)) out.push(name)
+  }
+  return out
+}
+
+/** cookie 罐里的主键，和 storage 侧 cookieKeyOf 必须完全一致 */
+function cookieKey(name: string, domain: string, path: string, partitionKey?: string): string {
+  return stripDots(String(domain ?? '')).toLowerCase() + '|' + (path || '/') + '|' + name + '|' + String(partitionKey ?? '')
+}
+
+function hostOfUrl(url: string | undefined): string {
+  if (!url) return ''
+  try {
+    return new URL(url).hostname.toLowerCase()
+  } catch {
+    return ''
+  }
+}
 
 interface ConsoleArg {
   type?: string
@@ -135,6 +211,9 @@ function clipInitiatorUrl(url: string): string {
 /** extraInfo 旁路缓冲的上限：它只是「先到先存」，不能涨成内存泄漏 */
 const MAX_EXTRA_INFO = 1024
 
+/** 请求体保留上限。比响应体的 256KB 小：请求体常在内存里跟着 record 走 */
+const REQ_BODY_MAX = 64 * 1024
+
 /**
  * CDP 的头是 `{ name: value }`，重名字段用一个 \n 拼成单个值。
  * 拆成数组交下去，面板按数组渲染；`:method` 这类伪头没有展示价值，丢掉。
@@ -178,6 +257,9 @@ interface NetworkRequestWillBeSent {
   request: {
     url: string
     method: string
+    /** 请求体原文。CDP 只在 requestWillBeSent 这一处给（见 reqBody） */
+    postData?: string
+    hasPostData?: boolean
   }
   redirectResponse?: {
     status: number
@@ -231,16 +313,24 @@ interface NetworkLoadingFailed {
 }
 
 /** Network.requestWillBeSentExtraInfo：请求头只有这条路能拿到 */
+interface AssociatedCookie {
+  cookie?: { name: string; domain: string; path: string; partitionKey?: string }
+  blockedReasons?: string[]
+}
+
 interface NetworkRequestExtraInfo {
   requestId: string
   headers?: Record<string, string>
+  associatedCookies?: AssociatedCookie[]
 }
 
 /** Network.responseReceivedExtraInfo：响应头（含 Set-Cookie 原文）走这条 */
 interface NetworkResponseExtraInfo {
   requestId: string
   headers?: Record<string, string>
+  headersText?: string
   statusCode?: number
+  blockedCookies?: AssociatedCookie[]
 }
 
 interface AttachedToTarget {
@@ -278,6 +368,13 @@ export class Collector extends EventEmitter {
   private nextSeq = 1
   /** `sessionId|requestId` → seq */
   private readonly seqByKey = new Map<string, number>()
+  /**
+   * 站点存储（DOMStorage / IndexedDB / CacheStorage / ServiceWorker）的 session 挂载。
+   * 这几个域的 enable 是按 session 生效、事件也只投给开了的那个 session，
+   * 所以得跟着会话生命周期走。实现由 Controller 注入 —— 采集器不持有 SiteData。
+   */
+  siteAttach: ((sessionId: string, targetType: string) => Promise<void>) | null = null
+
   /** seq → (sessionId, requestId)，供「现捞 body」反查 */
   private readonly refBySeq = new Map<number, RequestRef>()
   private readonly bodyCapture: BodyCapture
@@ -309,7 +406,11 @@ export class Collector extends EventEmitter {
     scriptConfig: ScriptConfig,
     rules: RuleEngine | null = null,
     /** 探针信道：信标请求要在这里被认出来，别当成页面流量 */
-    private readonly probe: ProbeChannel | null = null
+    private readonly probe: ProbeChannel | null = null,
+    /** 下载落盘目录。自动化跑一遍不该往用户的 Downloads 里丢东西 */
+    private readonly downloadDir: string | null = null,
+    /** 站点资源的钩子（Set-Cookie / associatedCookies）。不传就是纯流量采集 */
+    private readonly siteHooks: SiteHooks | null = null
   ) {
     super()
     this.bodyCapture = new BodyCapture(
@@ -332,6 +433,19 @@ export class Collector extends EventEmitter {
 
   async start(): Promise<void> {
     await this.cdp.send('Target.setDiscoverTargets', { discover: true })
+
+    // 下载落到本次会话的数据目录里。两个理由：自动化不该用用户的下载夹；
+    // 「文件真的落了盘」是验收与事后取证都要的外部证据。
+    // eventsEnabled 让 Browser.downloadWillBegin/Progress 也上来（Page 域那份照旧，去重在 claimDownload）
+    if (this.downloadDir) {
+      await this.cdp
+        .send('Browser.setDownloadBehavior', {
+          behavior: 'allow',
+          downloadPath: this.downloadDir,
+          eventsEnabled: true
+        })
+        .catch(() => undefined)
+    }
 
     // flatten 让所有子 target 复用同一条 pipe，不需要额外连接
     await this.cdp.send('Target.setAutoAttach', {
@@ -447,14 +561,32 @@ export class Collector extends EventEmitter {
       stackTrace?: { callFrames?: Array<{ url?: string; lineNumber?: number }> }
     }
     const frame = p.stackTrace?.callFrames?.[0]
+    const level = p.type ?? 'log'
+    const text = (p.args ?? []).map(describeArg).join(' ')
     this.pushConsole({
       ts: toMs(p.timestamp),
-      level: p.type ?? 'log',
-      text: (p.args ?? []).map(describeArg).join(' '),
+      level,
+      text,
       url: frame?.url,
       line: frame?.lineNumber === undefined ? undefined : frame.lineNumber + 1,
       targetType: event.sessionId ? this.sessions.get(event.sessionId)?.targetType : undefined
     })
+    // 只有 error / warning / assert 进事件流：log 类留在控制台环形缓冲里。
+    // 事件流是要「回看」的时间线，不能被页面的 log 冲垮（上限见 emitEvent）
+    if (level === 'error' || level === 'warning' || level === 'assert') {
+      this.emitEvent({
+        ts: toMs(p.timestamp),
+        kind: 'console',
+        level: level === 'warning' ? 'warn' : 'error',
+        url: frame?.url,
+        targetType: this.targetTypeOf(event),
+        detail: {
+          text,
+          consoleType: level,
+          line: frame?.lineNumber === undefined ? undefined : frame.lineNumber + 1
+        }
+      })
+    }
   }
 
   private onException(event: CdpEvent): void {
@@ -468,13 +600,22 @@ export class Collector extends EventEmitter {
       }
     }
     const details = p.exceptionDetails
+    const text = details?.exception?.description ?? details?.text ?? '未知异常'
     this.pushConsole({
       ts: toMs(p.timestamp),
       level: 'error',
-      text: details?.exception?.description ?? details?.text ?? '未知异常',
+      text,
       url: details?.url,
       line: details?.lineNumber === undefined ? undefined : details.lineNumber + 1,
       targetType: event.sessionId ? this.sessions.get(event.sessionId)?.targetType : undefined
+    })
+    this.emitEvent({
+      ts: toMs(p.timestamp),
+      kind: 'exception',
+      level: 'error',
+      url: details?.url,
+      targetType: this.targetTypeOf(event),
+      detail: { text, line: details?.lineNumber === undefined ? undefined : details.lineNumber + 1 }
     })
   }
 
@@ -607,6 +748,10 @@ export class Collector extends EventEmitter {
 
     await Promise.all(tasks).catch(() => undefined)
 
+    // 站点存储域：DOMStorage / IndexedDB / ServiceWorker 的 enable 是按 session 的，
+    // 只在主 frame 上开就会漏掉 OOPIF 里的 localStorage 变化
+    tasks.push(this.attachSiteSession(sessionId, targetType).catch(() => undefined))
+
     // 注入脚本挂在 session 上：挂一次之后该 target 的每个新文档都会执行
     void this.injection.apply(sessionId)
   }
@@ -625,6 +770,131 @@ export class Collector extends EventEmitter {
     }
   }
 
+  /**
+   * WS 连接：`sessionId|requestId` → 握手 URL。
+   * 帧事件本身不带 URL，只有 webSocketCreated 带 —— 不缓存的话每帧都得现猜。
+   */
+  private readonly wsUrls = new Map<string, string>()
+  private wsFrameCount = 0
+  private wsFrameDropped = 0
+  /** 正在等应答的 JS 对话框所在的 session。不记住它，agent 想放行都找不到人 */
+  private dialogSession: string | null = null
+  /** console/exception 这类高噪音事件已经记了多少条 */
+  private noisyEventCount = 0
+  private noisyEventOverflowed = false
+  /** 下载事件的去重键（Browser 与 Page 两个域可能报同一次下载） */
+  private readonly seenDownloadKeys = new Set<string>()
+
+  /**
+   * 事件流入口。
+   *
+   * console / exception 是高噪音事件：一个死循环配上 console.error
+   * 能在一秒里造出几万条。这类事件封顶；导航、下载、对话框、WebSocket
+   * 这些稀疏但重要的照旧全记 —— 丢了它们，事件流就不再是行为时间线了。
+   */
+  private emitEvent(item: MonitoredEvent): void {
+    const noisy = item.kind === 'console' || item.kind === 'exception'
+    if (noisy) {
+      if (this.noisyEventCount >= EVENT_NOISY_LIMIT) {
+        if (!this.noisyEventOverflowed) {
+          this.noisyEventOverflowed = true
+          this.emit('event', {
+            ts: Date.now(),
+            kind: 'overflow',
+            level: 'warn',
+            detail: {
+              limit: EVENT_NOISY_LIMIT,
+              note:
+                'console/exception 事件已达单实例上限，后续同类不再入库（控制台面板仍保留最近 ' +
+                CONSOLE_RING +
+                ' 条）'
+            }
+          } satisfies MonitoredEvent)
+          this.emit('log', `[events] console/exception 超过 ${EVENT_NOISY_LIMIT} 条，之后同类事件不再入库`)
+        }
+        return
+      }
+      this.noisyEventCount += 1
+    }
+    this.emit('event', item)
+  }
+
+  /** 下载事件的去重：同一个 guid 只记一次 */
+  private claimDownload(key: string): boolean {
+    if (this.seenDownloadKeys.has(key)) return false
+    this.seenDownloadKeys.add(key)
+    if (this.seenDownloadKeys.size > 256) {
+      const oldest = this.seenDownloadKeys.values().next().value
+      if (oldest !== undefined) this.seenDownloadKeys.delete(oldest)
+    }
+    return true
+  }
+
+  private wsUrlFor(sessionId: string | undefined, requestId: string): string | undefined {
+    return this.wsUrls.get(`${sessionId ?? 'root'}|${requestId}`)
+  }
+
+  /**
+   * 一帧 WebSocket 数据。
+   *
+   * payloadData 在文本帧里是文本、在二进制帧里是 base64（CDP 的约定），
+   * 所以 size 要按帧类型换算，别把 base64 的长度当成载荷大小报给上层。
+   */
+  private onWsFrame(event: CdpEvent, direction: 'sent' | 'received'): void {
+    const p = params<{
+      requestId: string
+      timestamp?: number
+      response?: { opcode?: number; payloadData?: string }
+    }>(event)
+    if (this.wsFrameCount >= WS_FRAME_LIMIT) {
+      this.wsFrameDropped += 1
+      return
+    }
+    this.wsFrameCount += 1
+    const data = p.response?.payloadData ?? ''
+    const opcode = p.response?.opcode ?? 0
+    const binary = opcode === 2
+    const truncated = data.length > WS_PAYLOAD_MAX
+    const frame: WsFrameRecord = {
+      seq: this.resolveSeq(event.sessionId, p.requestId),
+      ts: toMs(p.timestamp),
+      requestId: p.requestId,
+      url: this.wsUrlFor(event.sessionId, p.requestId),
+      direction,
+      opcode,
+      payload: truncated ? data.slice(0, WS_PAYLOAD_MAX) : data,
+      size: binary ? Math.floor((data.length * 3) / 4) : data.length,
+      truncated,
+      binary
+    }
+    this.emit('wsframe', frame)
+  }
+
+  /**
+   * 应答 JS 对话框。
+   *
+   * 对话框会把渲染进程挂住（页面从此不再前进），所以「记录」之外还得能让
+   * 调用方放行 —— 这是监控之外的控制能力，也是自动化测试会用到的那一半。
+   */
+  async handleDialog(accept: boolean, promptText?: string): Promise<{ ok: boolean; error?: string }> {
+    const sessionId = this.dialogSession ?? this.findSessionByTargetType('page')
+    if (!sessionId) return { ok: false, error: '当前没有打开的对话框' }
+    try {
+      await this.cdp.send(
+        'Page.handleJavaScriptDialog',
+        promptText === undefined ? { accept } : { accept, promptText },
+        sessionId
+      )
+      return { ok: true }
+    } catch (error) {
+      return { ok: false, error: (error as Error).message }
+    }
+  }
+
+  /** WS 采集计数，给状态面板与 /status 用 */
+  getWsStats(): { frames: number; dropped: number; connections: number } {
+    return { frames: this.wsFrameCount, dropped: this.wsFrameDropped, connections: this.wsUrls.size }
+  }
   private async onEvent(event: CdpEvent): Promise<void> {
     // Fetch 域的事件先过一遍，认领了就不再往下走
     if (this.bodyCapture.handleEvent(event)) return
@@ -730,9 +1000,18 @@ export class Collector extends EventEmitter {
       }
 
       case 'Page.frameNavigated': {
+        const p = params<{ frame?: { id?: string; parentId?: string; url?: string } }>(event)
         void this.injection.apply(event.sessionId)
         // 换过文档，之前发出去的 nodeId 全废 —— DOM 面板据此丢掉缓存的根
         this.emit('navigated', event.sessionId)
+        this.rememberFrameUrl(event.sessionId, p.frame?.url ?? '')
+        this.emitEvent({
+          ts: Date.now(),
+          kind: 'navigation',
+          url: p.frame?.url,
+          targetType: this.targetTypeOf(event),
+          detail: { frameId: p.frame?.id, mainFrame: !p.frame?.parentId }
+        })
         return
       }
 
@@ -774,9 +1053,137 @@ export class Collector extends EventEmitter {
         this.onLoadingFailed(event)
         return
 
+      /* ---- 事件流：WebSocket 生命周期 ---- */
+
+      case 'Network.webSocketCreated': {
+        const p = params<{ requestId: string; url: string }>(event)
+        this.wsUrls.set(this.keyOf(event, p.requestId), p.url)
+        if (this.wsUrls.size > WS_URL_CACHE) {
+          const oldest = this.wsUrls.keys().next().value
+          if (oldest !== undefined) this.wsUrls.delete(oldest)
+        }
+        this.emitEvent({
+          ts: Date.now(),
+          kind: 'websocket',
+          url: p.url,
+          targetType: this.targetTypeOf(event),
+          detail: { event: 'created', requestId: p.requestId }
+        })
+        return
+      }
+
+      case 'Network.webSocketHandshakeResponseReceived': {
+        const p = params<{ requestId: string; response?: { status?: number; statusText?: string } }>(event)
+        const status = p.response?.status
+        this.emitEvent({
+          ts: Date.now(),
+          kind: 'websocket',
+          level: status !== undefined && status >= 400 ? 'warn' : 'info',
+          url: this.wsUrlFor(event.sessionId, p.requestId),
+          detail: { event: 'handshake', requestId: p.requestId, status, statusText: p.response?.statusText }
+        })
+        return
+      }
+
+      case 'Network.webSocketFrameSent':
+        this.onWsFrame(event, 'sent')
+        return
+
+      case 'Network.webSocketFrameReceived':
+        this.onWsFrame(event, 'received')
+        return
+
+      case 'Network.webSocketFrameError': {
+        const p = params<{ requestId: string; errorMessage?: string }>(event)
+        this.emitEvent({
+          ts: Date.now(),
+          kind: 'websocket',
+          level: 'error',
+          url: this.wsUrlFor(event.sessionId, p.requestId),
+          detail: { event: 'error', requestId: p.requestId, message: p.errorMessage }
+        })
+        return
+      }
+
+      case 'Network.webSocketClosed': {
+        const p = params<{ requestId: string }>(event)
+        this.emitEvent({
+          ts: Date.now(),
+          kind: 'websocket',
+          url: this.wsUrlFor(event.sessionId, p.requestId),
+          detail: { event: 'closed', requestId: p.requestId }
+        })
+        this.wsUrls.delete(this.keyOf(event, p.requestId))
+        return
+      }
+
+      /* ---- 事件流：下载（Browser 与 Page 两个域都可能报，按 guid 去重）---- */
+
+      case 'Page.downloadWillBegin':
+      case 'Browser.downloadWillBegin': {
+        const p = params<{ guid?: string; url?: string; suggestedFilename?: string }>(event)
+        const guid = p.guid ?? p.url ?? String(Date.now())
+        if (!this.claimDownload('begin|' + guid)) return
+        this.emitEvent({
+          ts: Date.now(),
+          kind: 'download',
+          url: p.url,
+          targetType: this.targetTypeOf(event),
+          detail: { event: 'begin', guid, filename: p.suggestedFilename }
+        })
+        return
+      }
+
+      case 'Page.downloadProgress':
+      case 'Browser.downloadProgress': {
+        const p = params<{ guid?: string; state?: string; receivedBytes?: number; totalBytes?: number }>(event)
+        const guid = p.guid ?? 'unknown'
+        if (!this.claimDownload('progress|' + guid + '|' + String(p.state))) return
+        this.emitEvent({
+          ts: Date.now(),
+          kind: 'download',
+          level: p.state === 'canceled' ? 'warn' : 'info',
+          detail: { event: p.state ?? 'progress', guid, receivedBytes: p.receivedBytes, totalBytes: p.totalBytes }
+        })
+        return
+      }
+
+      /* ---- 事件流：JS 对话框 ---- */
+
+      case 'Page.javascriptDialogOpening': {
+        const p = params<{ url?: string; message?: string; type?: string; defaultPrompt?: string }>(event)
+        // 记下来才能应答：不记 session，handleDialog 就只能猜
+        this.dialogSession = event.sessionId ?? null
+        this.emitEvent({
+          ts: Date.now(),
+          kind: 'dialog',
+          level: 'warn',
+          url: p.url,
+          targetType: this.targetTypeOf(event),
+          detail: { event: 'opened', type: p.type, message: p.message, defaultPrompt: p.defaultPrompt }
+        })
+        return
+      }
+
+      case 'Page.javascriptDialogClosed': {
+        const p = params<{ result?: boolean; userInput?: string }>(event)
+        this.dialogSession = null
+        this.emitEvent({
+          ts: Date.now(),
+          kind: 'dialog',
+          detail: { event: 'closed', result: p.result, userInput: p.userInput }
+        })
+        return
+      }
+
       default:
         return
     }
+  }
+
+  /** 事件里带的 target 类型：事件流面板按它分组看「谁在干什么」 */
+  private targetTypeOf(event: CdpEvent): string | undefined {
+    return event.sessionId ? this.sessions.get(event.sessionId)?.targetType : undefined
   }
 
   private keyOf(event: CdpEvent, requestId: string): string {
@@ -808,6 +1215,7 @@ export class Collector extends EventEmitter {
 
   private onRequestExtraInfo(event: CdpEvent): void {
     const p = params<NetworkRequestExtraInfo>(event)
+    this.trackAssociatedCookies(event, p)
     const headers = toHeaderMap(p.headers)
     if (!headers) return
     const key = this.keyOf(event, p.requestId)
@@ -825,6 +1233,8 @@ export class Collector extends EventEmitter {
 
   private onResponseExtraInfo(event: CdpEvent): void {
     const p = params<NetworkResponseExtraInfo>(event)
+    this.trackSetCookie(event, p)
+    this.trackBlockedCookies(event, p)
     const headers = toHeaderMap(p.headers)
     if (!headers) return
     const key = this.keyOf(event, p.requestId)
@@ -837,6 +1247,66 @@ export class Collector extends EventEmitter {
     }
     this.trace(`requestId=${p.requestId}`, 'responseReceivedExtraInfo/BUFFERED', event.sessionId, '')
     this.extraSlot(key).resp = headers
+  }
+
+
+  /**
+   * Set-Cookie 观测。
+   *
+   * **不解析 cookie 语义** —— domain/path 匹配、Max-Age 换算、SameSite 默认值
+   * 每一条都是坑，自己实现一遍必然和浏览器对不上。这里只记录「哪个 URL 想种哪些名字」，
+   * 让上层在对账之后把变化认领回去：谁改的对上号，改成什么样以浏览器的罐为准。
+   */
+  private trackSetCookie(event: CdpEvent, p: NetworkResponseExtraInfo): void {
+    if (!this.siteHooks?.onSetCookie) return
+    const names = setCookieNames(p.headersText, p.headers)
+    if (names.length === 0) return
+    const entry = this.inflight.get(this.keyOf(event, p.requestId))
+    const url = entry?.record.url || this.frameUrls.get(event.sessionId ?? '') || ''
+    this.siteHooks.onSetCookie(url, names)
+  }
+
+  /** 被第三方 cookie 策略挡下来的那些。研究「谁在被拦」比「谁被种上」更有意思 */
+  private trackBlockedCookies(event: CdpEvent, p: NetworkResponseExtraInfo): void {
+    if (!this.siteHooks?.onCookieBlocked) return
+    const blocked = p.blockedCookies
+    if (!Array.isArray(blocked) || blocked.length === 0) return
+    const names = blocked.map((item) => item.cookie?.name).filter((name): name is string => Boolean(name))
+    if (names.length === 0) return
+    const entry = this.inflight.get(this.keyOf(event, p.requestId))
+    const url = entry?.record.url || this.frameUrls.get(event.sessionId ?? '') || ''
+    this.siteHooks.onCookieBlocked?.(url, names)
+  }
+
+  /**
+   * 这次请求带了哪些 cookie。CDP 在 associatedCookies 里给，别处拿不到。
+   * 用「请求所在文档的 host」当站点 —— 一条 cookie 出现在两个站点上，
+   * 就是它在跟着用户走，这正是 cookie 画像里最该看见的那件事。
+   */
+  private trackAssociatedCookies(event: CdpEvent, p: NetworkRequestExtraInfo): void {
+    if (!this.siteHooks?.onCookieSent) return
+    const list = p.associatedCookies
+    if (!Array.isArray(list) || list.length === 0) return
+    const entry = this.inflight.get(this.keyOf(event, p.requestId))
+    const host = hostOfUrl(entry?.record.frameUrl || entry?.record.url || this.frameUrls.get(event.sessionId ?? ''))
+    if (!host) return
+    const keys: string[] = []
+    for (const item of list) {
+      const cookie = item.cookie
+      if (!cookie?.name) continue
+      // blockedReasons 非空 = 浏览器**本来想带、但拦下了**（SameSite 不匹配是最常见的一种）。
+      // 只认真正进了请求头的那批：把被拦的也算成「发出去过」，跨站标记就会误报
+      // —— 实测里同域的一条 Lax cookie 就这么被标成了跨站。
+      if (Array.isArray(item.blockedReasons) && item.blockedReasons.length > 0) continue
+      keys.push(cookieKey(cookie.name, cookie.domain, cookie.path, cookie.partitionKey))
+    }
+    if (keys.length > 0) this.siteHooks.onCookieSent(host, keys)
+  }
+
+  /** 每个 page/iframe 会话都要把站点存储那几个域开上 */
+  private async attachSiteSession(sessionId: string, targetType: string): Promise<void> {
+    if (!this.siteAttach) return
+    await this.siteAttach(sessionId, targetType)
   }
 
   private onRequestWillBeSent(event: CdpEvent): void {
@@ -878,6 +1348,15 @@ export class Collector extends EventEmitter {
     if (p.initiator) {
       record.initiatorType = p.initiator.type ?? 'other'
       record.initiator = toInitiator(p.initiator)
+    }
+    // 请求体：CDP 只在 requestWillBeSent 里给一次，错过就没了。
+    // 大 body 会被剪（Chrome 自己也会剪），剪了就不保证还能当 JSON 解析 ——
+    // 但「有请求体」和「前 64KB 长什么样」本身就是要留下的信息
+    if (typeof p.request.postData === 'string' && p.request.postData.length > 0) {
+      record.reqBody =
+        p.request.postData.length > REQ_BODY_MAX
+          ? p.request.postData.slice(0, REQ_BODY_MAX)
+          : p.request.postData
     }
 
     // extraInfo 可能比这条 requestWillBeSent 先到，建好记录就认领

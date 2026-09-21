@@ -1,7 +1,23 @@
 import { spawn, type ChildProcess } from 'node:child_process'
 import { createInterface } from 'node:readline'
 import { join } from 'node:path'
-import type { InputAction, Profile, RequestQuery, RequestOrder, RuleSet, ScreenshotOptions, ScriptQuery, ScriptOrder } from '../../shared/types'
+import type {
+  ControllerStatus,
+  CookieDeleteFilter,
+  CookieInput,
+  CookieQuery,
+  EventQuery,
+  InputAction,
+  Profile,
+  RequestQuery,
+  RequestOrder,
+  RuleSet,
+  ScreenshotOptions,
+  ScriptOrder,
+  ScriptQuery,
+  SiteDataType,
+  WsFrameQuery
+} from '../../shared/types'
 import type { Controller } from '../controller'
 
 /**
@@ -13,6 +29,13 @@ import type { Controller } from '../controller'
  *
  * 与存储、代理保持同一个模式：主进程只编排，网络面在子进程里。
  */
+/** 控制面传进来的是字符串/undefined，统一收成可选数字 —— 别把 undefined 变成 NaN */
+function numOrUndefined(value: unknown): number | undefined {
+  if (value === undefined || value === null || value === '') return undefined
+  const n = Number(value)
+  return Number.isFinite(n) ? n : undefined
+}
+
 export class ControlBridge {
   private child: ChildProcess | null = null
   private api: Controller | null = null
@@ -24,6 +47,14 @@ export class ControlBridge {
   /** 控制服务实际监听的端口（端口传 0 时由系统分配，ready 事件里回传） */
   readyPort: number | null = null
   onLog: (line: string) => void = () => {}
+  /**
+   * 主进程补的额外状态（目前是窗口吸附）。
+   *
+   * status 是 agent 的入口（HTTP /status、MCP status 工具都读它），但窗口吸附是主进程
+   * 这边的事、控制器自己不知道 —— 在这儿补一次，agent 读到的就是完整的应用状态，
+   * 不用为「现在吸没吸附」单开一个接口。
+   */
+  decorateStatus: (status: ControllerStatus) => ControllerStatus = (status) => status
 
   constructor(options: { root: string; dataDir: string; port: number; nodePath: string }) {
     this.root = options.root
@@ -107,7 +138,7 @@ export class ControlBridge {
   private async callApi(api: Controller, method: string, p: Record<string, unknown>): Promise<unknown> {
     switch (method) {
       case 'status':
-        return api.getStatus()
+        return this.decorateStatus(api.getStatus())
       case 'capabilities':
         return api.getCapabilities()
       case 'clear':
@@ -175,6 +206,137 @@ export class ControlBridge {
         return api.getSessions()
       case 'sessions.switchProfile':
         return api.switchProfile((p.profile === 'H' ? 'H' : 'L') as Profile)
+
+      /* ---- 事件流 / WebSocket ---- */
+
+      case 'events.query':
+        return api.queryEvents((p.query ?? {}) as EventQuery)
+      case 'eventStats':
+        return api.getEventStats()
+      case 'ws.query':
+        return api.queryWsFrames((p.query ?? {}) as WsFrameQuery)
+      case 'ws.connections':
+        return api.getWsConnections(numOrUndefined(p.limit))
+
+      /* ---- 分析：画像 / 调用图 / 关联 ---- */
+
+      case 'endpoints.profiles':
+        return api.getEndpointProfiles({
+          query: p.query as RequestQuery | undefined,
+          sort: p.sort === undefined ? undefined : String(p.sort),
+          minCalls: numOrUndefined(p.minCalls),
+          limit: numOrUndefined(p.limit),
+          maxRows: numOrUndefined(p.maxRows)
+        })
+      case 'endpoint.detail':
+        return api.getEndpointDetail(String(p.key ?? ''), {
+          query: p.query as RequestQuery | undefined,
+          sampleLimit: numOrUndefined(p.sampleLimit),
+          callLimit: numOrUndefined(p.callLimit),
+          maxRows: numOrUndefined(p.maxRows)
+        })
+      case 'graph':
+        return api.getRequestGraph({
+          query: p.query as RequestQuery | undefined,
+          maxRows: numOrUndefined(p.maxRows),
+          maxNodes: numOrUndefined(p.maxNodes)
+        })
+      case 'relations':
+        return api.getRelations({
+          query: p.query as RequestQuery | undefined,
+          maxRows: numOrUndefined(p.maxRows),
+          limit: numOrUndefined(p.limit)
+        })
+
+      /* ---- 导出 ---- */
+
+      case 'export.har':
+        return api.exportHar({
+          query: p.query as RequestQuery | undefined,
+          maxRows: numOrUndefined(p.maxRows),
+          includeBodies: p.includeBodies !== false
+        })
+      case 'export.jsonl':
+        return api.exportJsonl({
+          query: p.query as RequestQuery | undefined,
+          maxRows: numOrUndefined(p.maxRows),
+          includeBodies: p.includeBodies !== false
+        })
+      case 'export.bodies':
+        return api.exportBodies({
+          query: p.query as RequestQuery | undefined,
+          maxRows: numOrUndefined(p.maxRows),
+          includeBodies: p.includeBodies !== false,
+          dir: p.dir === undefined ? undefined : String(p.dir)
+        })
+
+      /* ---- 契约快照与回归 ---- */
+
+      case 'contract.snapshot':
+        return api.contractSnapshot({
+          label: p.label === undefined ? undefined : String(p.label),
+          query: p.query as RequestQuery | undefined,
+          sampleLimit: numOrUndefined(p.sampleLimit)
+        })
+      case 'contract.list':
+        return api.listContracts(numOrUndefined(p.limit))
+      case 'contract.get':
+        return api.getContract(Number(p.id), p.withSchema !== false)
+      case 'contract.delete':
+        return api.deleteContract(Number(p.id))
+      case 'contract.diff':
+        return api.contractDiff({
+          baseId: Number(p.baseId),
+          query: p.query as RequestQuery | undefined,
+          sampleLimit: numOrUndefined(p.sampleLimit)
+        })
+
+      /* ---- 站点资源：cookie 与站点存储 ---- */
+
+      case 'cookie.list':
+        return api.listCookies({ query: (p.query ?? {}) as CookieQuery })
+      case 'cookie.stats':
+        return api.getCookieStats()
+      case 'cookie.set':
+        return api.setCookie((p.cookie ?? {}) as CookieInput)
+      case 'cookie.delete':
+        return api.deleteCookies((p.filter ?? {}) as CookieDeleteFilter)
+      case 'site.origins':
+        return api.getSiteOrigins({
+          limit: numOrUndefined(p.limit),
+          onlyScanned: p.onlyScanned === true
+        })
+      case 'site.detail':
+        return api.getSiteDetail(String(p.origin ?? ''))
+      case 'site.scan':
+        return api.scanSiteData({
+          origin: p.origin === undefined ? undefined : String(p.origin),
+          limit: numOrUndefined(p.limit),
+          cookies: p.cookies !== false
+        })
+      case 'site.clear':
+        return api.clearSiteData(String(p.origin ?? ''), Array.isArray(p.types) ? (p.types as SiteDataType[]) : [])
+      case 'site.storage':
+        return api.editStorage(p.input as Parameters<Controller['editStorage']>[0])
+      case 'site.idbDelete':
+        return api.deleteIdbDatabase(String(p.origin ?? ''), String(p.name ?? ''))
+      case 'site.cacheDelete':
+        return api.deleteCache(String(p.origin ?? ''), String(p.name ?? ''), p.url === undefined ? undefined : String(p.url))
+      case 'site.swUnregister':
+        return api.unregisterServiceWorker(String(p.scopeURL ?? ''))
+      case 'site.snapshot':
+        return api.siteSnapshot({ label: p.label === undefined ? undefined : String(p.label) })
+      case 'site.snapshots':
+        return api.listSiteSnapshots(numOrUndefined(p.limit))
+      case 'site.snapshotDiff':
+        return api.siteSnapshotDiff(Number(p.baseId))
+      case 'site.snapshotDelete':
+        return api.deleteSiteSnapshot(Number(p.id))
+
+      /* ---- 对话框 ---- */
+
+      case 'dialog.handle':
+        return api.handleDialog(p.accept !== false, p.promptText === undefined ? undefined : String(p.promptText))
       default:
         throw new Error(`未知的控制方法：${method}`)
     }
