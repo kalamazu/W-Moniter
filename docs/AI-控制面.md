@@ -59,7 +59,7 @@ MCP server 的地址发现顺序：
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | GET | `/health` | 探活（不需要 token），带上游是否可用 |
-| GET | `/status` | 会话状态：内核、target、请求数、Profile、`control` 端点 |
+| GET | `/status` | 会话状态：内核、target、请求数、Profile、`control` 端点、`dock`（窗口吸附） |
 | GET | `/capabilities` | 能力矩阵（domain 白名单、探针、输入） |
 | GET | `/requests` | 查请求，分页 `{ total, rows }`；见下面的过滤字段 |
 | GET | `/requests/:seq` | 一条请求的完整详情 `{ request, body, … }`：含 `req_headers` / `resp_headers`（JSON 字符串）与 `initiator_stack`（发起链） |
@@ -74,7 +74,20 @@ MCP server 的地址发现顺序：
 | GET | `/rules` · `/rules/stats` | 规则集 / 命中统计 |
 | GET | `/instances` · `/sessions` | 实例列表 / 会话视图（含存储分区） |
 | GET | `/dom/tree` · `/dom/inspect` | DOM 树（`nodeId`/`depth`）/ 元素检查（`selector` 或 `nodeId`） |
-
+| GET | `/events` · `/events/stats` | 事件流水（导航 / console 告警 / 异常 / 下载 / 对话框 / WS 生命周期）与按 kind·level 的计数；`since` 是**自增 id 游标**，拿返回里的 `nextSince` 反复拉就只拿新增 |
+| GET | `/events/stream` | **SSE**：按 `since` 增量推事件（`interval` 毫秒为周期查库，`event: events` 一帧一批）。断了重连照旧从 `since` 续，不会丢也不会重 |
+| GET | `/ws` · `/ws/connections` | WebSocket / SSE 的帧明细与按连接汇总（`direction` 相对浏览器：`sent` = 页面发出去） |
+| GET | `/endpoints` · `/endpoints/detail` | 接口画像（路径模板聚类 + 状态码 / 耗时 / 参数 / 请求体字段分布 + 调用节奏）与单端点详情（含从**真实响应体**推出来的响应结构） |
+| GET | `/graph` | 请求调用图：节点、边（次数 / 失败数 / 平均耗时）、连通分量（互相牵动的功能簇） |
+| GET | `/relations` | 关联分析：共享响应体 / 重定向链 / 跨域加载关系 / 跨端点复用的 query 取值 |
+| GET | `/contracts` · `/contracts/:id` · `/contracts/:id/diff` | 契约快照列表 / 取一份 / 与「现在」比对（新增或消失的端点、字段、状态码） |
+| GET | `/exports/download?name=` | 取回 `exports/` 下已经导出的文件；只收纯文件名（见 §3.3） |
+| GET | `/cookies` | **库里的 cookie 镜像**（不是浏览器现况），分页 `{ total, rows }`；过滤 `domain`(含子域) / `name` / `path` / `search` / `session` / `crossSite` / `sameSite` / `secure` / `httpOnly` / `partitioned` / `sort` / `limit` / `offset`（见 §3.4） |
+| GET | `/cookies/stats` | cookie 画像：总数 / 域数 / 会话与持久 / Secure·HttpOnly 覆盖 / SameSite=None / 跨站使用 / 分区 / 总体积 + 最大的、出现域最多的、活得最久的、被带出去最多的 |
+| GET | `/sites` | 域清单 `{ rows, total }`（`limit` / `onlyScanned=1`）；每行给出 cookie 数、local/session 键数、IDB 库数、缓存条数、SW 数、配额。`scanned=false` = 见过但还没扫过 |
+| GET | `/sites/detail` | 单域明细（`origin`）：cookie（含值）/ local·session 键值 / IDB 库与对象仓结构 / 缓存 URL 清单 / SW 注册 / 用量配额。**结果是平铺的**，没有 `{ found, detail }` 包壳 |
+| GET | `/sites/snapshots` | 站点快照列表 `{ rows, total }`（`limit`） |
+| GET | `/sites/snapshots/:id/diff` | 快照 vs「现在的实况」：新增/消失的域、增删改的 cookie（含改了哪几个字段）、内容变了的 localStorage 键 |
 **请求过滤字段**（`/requests`，也用于 `/timeline`、`/scripts`）：
 `urlPattern`（别名 → `url`）、`domain`（→ `host`）、`q`（→ `search`）、
 `method`、`type`（→ `resourceType`）、`initiator`（→ `initiatorType`，取值
@@ -86,6 +99,15 @@ MCP server 的地址发现顺序：
 > 映射表在 `control/server.mjs` 的 `QUERY_ALIASES`，只有一处。
 
 注意 `host` 字段**带端口**（`127.0.0.1:8802`），过滤时要拿列表里的真值。
+
+`/status` 里的 `dock`（窗口吸附，见设计文档 D9 / 使用手册 §5.8）是**只读**的，也是 `monitor_status`
+返回的同一个对象：`enabled`（用户开着吗）/ `available`（这台机器支不支持）/ `attached`（真吸上了吗）/
+`side`（`left` / `right`）/ `reason`（没吸上的原因：`no-window` / `no-room` / `not-windows` / 具体错误）。
+控制面里没有对应的写路由 —— 吸附会挪用户桌面上的窗口，只能从控制窗口顶栏开。
+
+工作区布局（`ui-settings.json` 的 `layout`：几栏、每栏哪块面板、占比、横竖）同样是**渲染层私有**的，
+HTTP / MCP 都没有读写路由。它是给坐在屏幕前的人摆的：agent 想「看某一块面板」应该走 `/screenshot`
+或直接读对应的数据接口，而不是替用户重排界面（设计文档 D10）。
 
 ### 写
 
@@ -100,7 +122,20 @@ MCP server 的地址发现顺序：
 | POST | `/rules` | 整体写规则集（覆盖式），坏规则返回 `invalid` |
 | POST | `/sessions/profile` | `{ profile }` 切 Profile（**收工重启**，不是热切） |
 | POST | `/clear` · `/console/clear` | 清采集缓冲（`/status` 的计数同时归零；库里的历史不动）/ 清 console |
-
+| POST | `/contracts` | `{ label?, sampleLimit?, domain? }` 给当前接口契约拍快照，回 `{ id, endpoints, truncated }` |
+| DELETE | `/contracts/:id` | 删掉一份契约快照 |
+| POST | `/export/har` · `/export/jsonl` · `/export/bodies` | 导出 HAR 1.2 / JSONL / 资源镜像，返回落盘的**绝对路径**与计数 |
+| POST | `/sites/scan` | `{ origin?, limit?, cookies? }` **去浏览器真扫一遍并落库**（见 §3.4）：给 `origin` 只扫它，否则扫最近有流量的前 `limit` 个域（默认 20）；`cookies:false` 跳过罐对账 |
+| POST | `/cookies` | `{ name, value, domain? \| url?, path?, secure?, httpOnly?, sameSite?, expires?, maxAge? }` 往浏览器罐里写一条（`Storage.setCookies`）。`maxAge: 0` = 立刻作废；都不给 = 会话 cookie |
+| DELETE | `/cookies` | 条件走 query：`name` / `domain` / `host` / `url` / `path` / `crossSite=1`。**一个都不给会被拒**（`{ ok:false, deleted:0 }`，HTTP 仍是 200） |
+| POST | `/sites/clear` | `{ origin, types? }` 清这一域的站点数据；`types` ∈ `cookies`/`local_storage`/`session_storage`/`indexeddb`/`cache_storage`/`service_workers`/`file_systems`/`all`（不填 = all），清完自动重扫 |
+| POST | `/sites/storage` | `{ origin, area, action, key?, value? }` 改 localStorage / sessionStorage：`action` = `set`/`remove`/`clear`，写完自动重扫 |
+| POST | `/sites/idb/delete` | `{ origin, name }` 删**整个** IndexedDB 库（不是某张表），删完自动重扫 |
+| POST | `/sites/cache/delete` | `{ origin, name, url? }` 删 Cache Storage：给 `url` 就只删那一条，删完自动重扫 |
+| POST | `/sites/sw/unregister` | `{ scopeURL }` 注销一个 Service Worker 注册（如 `https://example.com/`） |
+| POST | `/sites/snapshots` | `{ label? }` 拍一份站点快照（拍之前先扫一遍，免得基线陈旧） |
+| DELETE | `/sites/snapshots/:id` | 删掉一份快照 |
+| POST | `/dialog` | `{ accept, promptText? }` 应答 JS 对话框 —— **不应答页面就一直卡着** |
 ### 3.1 截图
 
 三种取景：默认**当前视口**；`fullPage: true` **整页**（按 `cssContentSize`，超过 16000px 会截断并在结果里标 `clamped`）；
@@ -138,6 +173,84 @@ MCP 侧默认 `inline: true`，并把 base64 单独放成 `image` 内容块（�
 浏览器还要按渲染进程的回执节奏排队投递 —— 实测动作返回后 150ms 内页面还会再收到 30 多个点。
 要「点完立刻读结果」的 agent，读之前留 ~200ms，或者把要读的东西并进同一次 `/evaluate`。
 
+### 3.3 实时分析面（事件流 / WebSocket / 接口画像 / 调用图 / 关联 / 契约 / 导出）
+
+这一层是给「研究 + 自动化测试」用的：把会话里发生的事，算成能**直接下判断**的形状。
+
+**增量游标**：`/events` 与 `/ws` 的 `since` 是**自增 id**，不是时间戳（时钟会回拨，id 不会）。
+把返回里的 `nextSince` 直接拿回来当下一次的 `since`，就只拿新增的，不会重复吐已经消费过的。
+验收里有一条专门盯这个：追平之后再问，必须回空数组且 `nextSince` 不动。
+
+**事件 kind**：`navigation` / `console` / `exception` / `websocket` / `download` / `dialog` /
+`target` / `rule` / `overflow` / `cookie` / `storage`（后两个来自站点资源面，见 §3.4）；`level` 是 `info` / `warn` / `error`。
+`console` 只收 error / warning / assert —— 全量 log 走 `/console`，否则事件流会被日志淹掉。
+
+**WebSocket 帧的方向是相对浏览器说的**：`sent` = 页面发出去，`received` = 服务端推过来。
+二进制帧的 `payload` 是 base64（`binary: true` 标出来），`size` 已按 4/3 换算回**真实字节数**。
+
+**接口画像的路径模板是保守替换**：`/user/42` 与 `/user/43` 并成 `/user/{int}`，
+`{uuid}` / `{hex}` / `{date}` / `{token}` / `.{hash}.` 同理。宁可多出两个模板，
+也不要把 `/users/me` 和 `/users/1` 并成一个 —— 合错了会把两个接口的契约搅在一起。
+
+**`optional` 的语义是「不是每个样本都有」**：字段出现次数 `seen < count` 就标 `optional`，
+而且父层的可选会往子层传（整个 `bonus` 只在一半样本里出现时，`bonus.deep` 也是可选的）。
+契约回归正是靠这个抓「新字段只在部分请求里出现」。
+
+**契约回归的标准动作**：跑一遍 → `POST /contracts` 拍基线 → 改代码 / 改配置 → 再跑一遍 →
+`GET /contracts/:id/diff`。返回 `{ summary, added, removed, changed, base, current }`，
+`added` / `removed` / `changed` 都是**逐端点**的；`changed` 里再分响应字段、请求字段、状态码与调用次数。
+
+**导出落在 `<数据目录>/exports/`**：
+
+- **HAR 1.2**（DevTools 能直接打开）：CDP 伪头（`:method` 这类）会被剔除，否则 DevTools 打开就报错；
+  `connect` 段是 TCP + TLS 之和；每条另带 `_monitor` 段（seq / targetType / 关联状态）。
+- **JSONL**：一行一条，含完整请求 / 响应头与正文（二进制 base64），适合丢给脚本再算。
+- **资源镜像**：按类型（`document` / `script` / `image` / `font` / …）分子目录，
+  文件名 = `正文 hash 前 8 位 + 原文件名`；同一份正文只写一次，另写 `manifest.json` 记
+  「每个文件来自哪些 URL」。**同一份响应体被两个不同地址取到，只会落成一个文件** ——
+  这正是「共享响应体」能被关联分析抓到的那条线索。
+
+导出的文件可以用 `GET /exports/download?name=<文件名>` 取回。**只收导出目录下的纯文件名**：
+带路径分隔符、带 `..` 一律 400 —— 图省事收「路径」的话，这个口就变成任意文件读取了。
+
+**下载落到 `<数据目录>/downloads/`**（`MONITOR_DOWNLOAD_DIR` 可覆盖，设成空串 = 交回浏览器默认）。
+自动化跑一遍不该往用户的下载夹里丢东西；而且「文件真的落了盘」是事后取证要的外部证据。
+下载的 `begin` / `inProgress` / `completed` 都进事件流，`completed` 带 `receivedBytes`。
+
+### 3.4 站点资源（Cookie 与站点存储）
+
+给「研究 + 自动化测试」用的另一只眼睛：**我们拉起的那个浏览器**攒下来的 cookie 与站点存储，
+agent 能读、能写、能删、能拍快照比差异。
+
+**cookie 罐以浏览器为权威，我们只做「对账」。** 控制面不解析 `Set-Cookie` —— domain/path 匹配、
+Max-Age、SameSite 的默认值，每一条自己实现一遍都会和浏览器对不上。做法是每 5s 用
+`Storage.getCookies` 把**全量罐**读回来，与库里的上一轮比出 `added` / `changed` / `removed`，
+增量写进 `cookies` 表；收到 `Set-Cookie` 时再补一次（250ms 防抖）。`Set-Cookie` 只用来回答
+「是谁改的」—— 变化记录里带上 `source: 'set-cookie'` 与那条响应的 URL（cookie 行本身只记事实，
+不记来源）。对账口径两边必须一致：
+`domain|path|name|partition`（域去前导点并小写，path 空按 `/`）。
+
+**`GET /cookies` 读的是库里那份镜像**，`POST /sites/scan` 才是「去浏览器现读一遍」。
+要拿「现在到底有什么」下判断，先扫。
+
+**站点存储是「点了才扫」。** 每个域要连问好几条 CDP（`DOMStorage` / `IndexedDB` / `CacheStorage` /
+`ServiceWorker` / `Storage.getUsageAndQuota`），不像 cookie 罐那样便宜，所以只在
+`POST /sites/scan` 时才去读（不传 `origin` 就扫最近有流量的前 `limit` 个域，默认 20）。
+`/sites` 里 `scanned=false` 的域 = 见过（见过它的请求）但还没扫过。
+
+**写操作返回的是「改完之后重扫的真实结果」**，不是「已提交」的口头保证：`/sites/storage`、
+`/sites/clear`、`/sites/idb/delete`、`/sites/cache/delete`、`/sites/sw/unregister` 干完都会
+自动重扫该域。代价是这些调用比读慢（要等 CDP 回包），换来的是「响应即真值」。
+
+**删 cookie 必须给条件。** `name` / `domain` / `host` / `url` / `path` / `crossSite` 至少一个，
+一个都不给会被**应用层拒绝**：回 `{ ok: false, deleted: 0 }`，HTTP 仍是 200
+（这是「拒绝执行」，不是「请求写错了」）。`crossSite=1` 删的是所有「被发往过非自身站点」的 cookie ——
+清第三方 cookie 用它：库先查出主键清单，再交给 CDP 按 key 精确删。
+
+**快照与 diff**：`POST /sites/snapshots` 拍一份（拍之前先扫一遍，免得基线陈旧），
+`GET /sites/snapshots/:id/diff` 拿它与「现在的实况」比 —— 新增/消失的域、增删改的 cookie
+（含改了哪几个字段）、内容变了的 localStorage 键。`summary` 里是能直接下判断的数字。
+
 ## 4. MCP server
 
 stdio 传输，换行分隔的 JSON-RPC 2.0。
@@ -151,15 +264,30 @@ node mcp/server.mjs --url=http://127.0.0.1:52137?token=…
 `tools/list` / `tools/call`；未知方法回 `-32601`，未知工具回 `isError: true`
 （**不会断连接** —— 出错之后还能继续用，验收里专门测了这一条）。
 
-工具清单（**25 个**，与 HTTP 一一对应）：
+工具清单（**58 个**，与 HTTP 一一对应）。
 
-`monitor_status` · `monitor_capabilities` · `monitor_requests` · `monitor_request` ·
-`monitor_body` · `monitor_fetch_body` · `monitor_stats` · `monitor_timeline` ·
-`monitor_scripts` · `monitor_script_source` · `monitor_console` · `monitor_evaluate` ·
-`monitor_dom_tree` · `monitor_dom_inspect` · `monitor_dom_highlight` · `monitor_input` ·
-`monitor_rules_get` · `monitor_rules_set` · `monitor_rules_stats` · `monitor_probe` ·
-`monitor_navigate` · `monitor_screenshot` · `monitor_sessions` · `monitor_switch_profile` ·
-`monitor_clear`
+采集与观测（25 个）：`monitor_status` · `monitor_capabilities` · `monitor_requests` ·
+`monitor_request` · `monitor_body` · `monitor_fetch_body` · `monitor_stats` ·
+`monitor_timeline` · `monitor_scripts` · `monitor_script_source` · `monitor_console` ·
+`monitor_evaluate` · `monitor_dom_tree` · `monitor_dom_inspect` · `monitor_dom_highlight` ·
+`monitor_input` · `monitor_rules_get` · `monitor_rules_set` · `monitor_rules_stats` ·
+`monitor_probe` · `monitor_navigate` · `monitor_screenshot` · `monitor_sessions` ·
+`monitor_switch_profile` · `monitor_clear`
+
+实时分析面（17 个）：`monitor_events` · `monitor_event_stats` · `monitor_ws_frames` ·
+`monitor_ws_connections` · `monitor_endpoints` · `monitor_endpoint` · `monitor_graph` ·
+`monitor_relations` · `monitor_export_har` · `monitor_export_jsonl` ·
+`monitor_collect_resources` · `monitor_contract_snapshot` · `monitor_contracts` ·
+`monitor_contract` · `monitor_contract_diff` · `monitor_contract_delete` · `monitor_dialog`
+
+站点资源（16 个）：`monitor_cookies` · `monitor_cookie_stats` · `monitor_cookie_set` ·
+`monitor_cookie_delete` · `monitor_sites` · `monitor_site_detail` · `monitor_site_scan` ·
+`monitor_site_clear` · `monitor_site_storage_edit` · `monitor_site_idb_delete` ·
+`monitor_site_cache_delete` · `monitor_site_sw_unregister` · `monitor_site_snapshot` ·
+`monitor_site_snapshots` · `monitor_site_snapshot_diff` · `monitor_site_snapshot_delete`
+
+要「实时」就在 `monitor_events` / `monitor_ws_frames` 上带 `since`（自增 id 游标），
+把返回里的 `nextSince` 拿回来反复调 —— 只拿新增，不重复（见 §3.3）。
 
 工具的 `description` 写的是「什么时候用、参数什么意思、有什么坑」（比如
 `monitor_switch_profile` 明说这是收工重启，`monitor_evaluate` 明说 H 下不可用），
@@ -176,7 +304,7 @@ node mcp/server.mjs --url=http://127.0.0.1:52137?token=…
    （url/seq 逐字比）；`/dom/tree` 里必须真有 `html`/`body`；`/dom/inspect` 必须给出
    盒模型 / 命中样式 / 监听器三块；`/screenshot` 落盘的图片，尺寸要与图片头、
    以及页面自报的文档尺寸都对上（MCP 侧还要带回 `image` 块）；`/probe` 必须真的跑出检测项。
-3. **MCP**：走真正的 stdio JSON-RPC —— `tools/list` 要列全（25 个且关键的都在）、
+3. **MCP**：走真正的 stdio JSON-RPC —— `tools/list` 要列全（58 个且关键的都在）、
    每个工具都要有 description 与 inputSchema；`monitor_status` / `monitor_requests`
    的结果要和**直接 HTTP 调用逐字一致**（同一份数据，不是两条路各说各话）；
    未知工具要回 `isError` 且之后连接还能用。
@@ -186,16 +314,34 @@ node mcp/server.mjs --url=http://127.0.0.1:52137?token=…
 `initiator_stack`；`npm run test:drill`（**39/39**）是**纯 MCP 的端到端演练**（见 §7.4），
 判据落在页面侧与库里的真值上（拦掉的请求必须真的不再 200、截图的字节数必须与落盘一致）。
 
-一条都不落的冒烟在 `npm run test:smoke`（**59/59**）：控制面 29 条路由 + MCP 25 个工具
+一条都不落的冒烟在 `npm run test:smoke`（**129/129**）：控制面 64 条路由 + MCP 58 个工具
 逐个真调用，每条都要给出它自己的真值证据（截图字节数与元数据一致、DOM 树里真有 `html`、
-规则写完能读回来…）。它盯的是「有没有哪条路根本走不通」，深度交给上面那几条。
+规则写完能读回来、导出文件真的在磁盘上…）。它盯的是「有没有哪条路根本走不通」，深度交给上面那几条。
+
+覆盖是**算出来的**，不是手写的数字：`api()` 把每次真实请求的路由记进一个集合，最后断言
+「新增的实时分析面 19 条 + 站点资源面 16 条都在里面、总数 ≥ 63」。控制面一共 64 条路由，唯一没走的是
+`POST /sessions/profile` —— 它要收工重启（几十秒），由 MCP 侧的 `monitor_switch_profile` 覆盖。
+
+实时分析面自己有完整的一条：`npm run test:realtime`（**47/47**）。它用一个受控 origin 当靶子 ——
+origin 自己记 HTTP access log 与 **WS 双向帧日志**当服务端侧真值，页面另把「我看到了什么」回报一份，
+判据全是「库里说的」与「origin 说的」逐字对上：WS 帧条数与方向、事件游标的单调与去重、
+接口画像的调用次数、契约回归能不能看出新字段、导出文件在磁盘上真的多出来、下载文件真的落地。
+同一批数据同时走 HTTP API 与 MCP 两条路，结果要求**逐字一致**（`monitor_events` / `monitor_endpoints` /
+`monitor_ws_frames` / `monitor_contracts`）。
+
+站点资源面自己有一条：`npm run test:sitedata`（**30/30**）。真开浏览器 + 受控 origin，判据逐条对 CDP 真值 ——
+cookie 罐的 added / changed / removed 与「是谁改的」归因、六个存储块逐条对得上、写删双向（含
+「无条件删被拒」）、快照 diff、clear 之后真空、跨站 cookie 的口径，再验 HTTP 与 MCP 两条路逐字一致
+以及面板 DOM 真的渲染出行。纯算的那一层（不起浏览器）在 `npm run test:analytics`（**57/57**）。
 
 ## 6. 已知边界
 
-- **没有事件推送**。MCP 侧没有 resources / SSE，HTTP 侧没有 WebSocket；
-  agent 要「等新请求」是轮询 `GET /requests?since=…`。做推送要先想清楚
-  「谁背压、断了怎么续」，不在第一版里。
-- **`/evaluate` 只在 Profile L 可用**：H 按 §3.4 的设计不开 `Runtime`，这是故意的。
+- **推送只有一条，而且是「查库 + 增量」**：HTTP 侧有 `GET /events/stream`（SSE，按 `interval`
+  查库推新事件），MCP 侧仍然只有拉取 —— 没有 resources、没有订阅。这是有意的：推送要么自己维护
+  一套和库并行的广播（迟早和库里对不上），要么就是现在这样「查库 + id 游标」。
+  agent 要「等新的东西」就带上 `since` 循环调 `monitor_events` / `monitor_ws_frames`，
+  它们和 SSE 读的是同一份数据，不会出现两条路各说各话。
+- **`/evaluate` 只在 Profile L 可用**：H 按 §3.4 的设计不开 `Runtime`，这是故意的（见设计文档 §3.4）。
 - 截图的边界：全页上限 16000px（`clamped`）；`inline` 上限 4MB base64（超出只给路径）；
   元素截图要求节点有布局（`display:none` 不行）。截图**不做像素级比对**，验收比的是「图片头尺寸 = 页面自报尺寸」。
 - 规则写入是覆盖式的（与面板「保存并生效」同一条路径），没有增量 patch 接口。
@@ -207,6 +353,8 @@ node mcp/server.mjs --url=http://127.0.0.1:52137?token=…
 - MCP server 的端点会**自动重新发现**：discovery 拿到的地址失效时（401/403/404 或连接被拒）
   会丢掉缓存再解析一次，所以应用重启换了端口/token，同一个 MCP 连接能自己接回来。
   用 `--url` 钉死地址时不做这件事 —— 那是「我知道它在哪」，重试只会掩盖问题。
+- **界面偏好不进控制面**：工作区布局只存在本机 `ui-settings.json`（渲染层私有，D10），
+  `/status` 里的 `dock` 也仍然只读 —— 能被 agent 改的只有采集、规则、注入与页面侧动作。
 
 ## 7. 把 agent 接上来
 
