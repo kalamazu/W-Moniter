@@ -20,7 +20,7 @@
 | [T-009](T-009-content-observability.md) | 待验收 | 内容存储统计与工作区可视化 | M1 / M2 | Codex | [A-009](../acceptance/A-009-content-observability.md) |
 | [T-010](T-010-capture-coverage-probe.md) | 待验收 | 全量采集路径与缺口真值矩阵 | M1 §4.2 | Codex | [A-010](../acceptance/A-010-capture-coverage-probe.md) |
 | [T-011](T-011-scoped-metadata-migration.md) | 待验收 | 工作区元数据归属与范围校验迁移 | M2 §5 / §10.2 | Codex | [A-011](../acceptance/A-011-scoped-metadata-migration.md) |
-| [T-012](T-012-streaming-content-service.md) | 可认领 | 流式内容服务第一条纵向链路 | M1 §4 / §10.3 | 未认领 | 完成后创建 A-012 |
+| [T-012](T-012-streaming-content-service.md) | 待验收 | 流式内容服务第一条纵向链路 | M1 §4 / §10.3 | Codex | [A-012](../acceptance/A-012-streaming-content-service.md) |
 | [T-013](T-013-workspace-auth-ledger.md) | 可认领 | 工作区登录证据台账 | M2 §5 | 未认领 | 完成后创建 A-013 |
 | [T-014](T-014-extension-observation.md) | 可认领 | 插件能力验证与期望/实际对账 | M2 §5 | 未认领 | 完成后创建 A-014 |
 
