@@ -1,11 +1,11 @@
 # T-014：插件能力验证与工作区期望/实际对账
 
-- 状态：可认领
+- 状态：待验收
 - 蓝图映射：M2 §5.1/§5.2、§13；E04/E12 的插件切片
 - 优先级：P1
-- 认领：未认领
-- 基线 commit：待认领时填写
-- 验收：A-014（实现完成后创建）
+- 认领：Codex · 2026-09-23
+- 基线 commit：`ad590d4`
+- 验收：[A-014](../acceptance/A-014-extension-observation.md)
 
 ## 背景与目标
 
@@ -13,7 +13,7 @@
 
 ## 范围
 
-- 要实现：`fixtures/extensions/state-probe` 和 `scripts/probes/extension-management.mjs` 验证枚举、启停可行性、版本/权限变化与配置跨重启；持久记录 workspace/profile 的期望项和观察项；工作区插件卡片及 HTTP/MCP 查询显示 observed/desired、漂移原因和最后核对时间。
+- 要实现：`fixtures/extensions/state-probe` 和 `scripts/probes/extension-management.mjs` 验证枚举、启停能力边界、版本/权限与配置跨重启；持久记录 workspace/profile 的期望项和观察项；工作区插件卡片及 HTTP/MCP 查询显示 observed/desired、漂移原因和最后核对时间。
 - 要修改的边界：`src/main/extensions/*`、scoped repository、工作区 UI、动作目录；安装/卸载若技术验证不可控，仅报告能力限制，不接危险写动作。
 - 非目标：不静默安装任意商店插件，不绕过 Chrome 权限确认，不把插件文件复制视为已经启用。
 
@@ -31,6 +31,8 @@
 
 ## 完成记录
 
-- 实现 commit：待填写（本任务独立提交）。
-- 修改文件、测试命令与结果、已知限制：待填写。
+- 实现 commit：`5ba1686`（本任务独立提交）。
+- 修改：v11 scoped 扩展迁移、Profile/CDP 部分观察、期望/实际对账、ActionRegistry、UI/HTTP/MCP、受控 MV3 探针与 A/B 集成测试；架构取舍见 [ADR-0007](../adr/0007-extension-observation.md)。
+- 验证：`typecheck`、`build`；Chrome for Testing 154 下 `test:extension-probe` 3/3、`test:extensions` 9/9；`test:scoped-migration` 16/16、`test:auth-ledger` 11/11、`test:storage` 54/54、`test:workspaces` 7/7、`test:actions` 13/13。
+- 已知限制：正式 Chrome 153 不加载测试 fixture 的 `--load-extension`；产品未接入可信 `chrome.management` 桥。Profile/CDP 只能做部分观察，缺席为 unknown；插件启停/安装/卸载未执行也未开放。受控探针验证了 API 枚举与跨重启存储，但未验证 `setEnabled` 写入。生产的跨版本/权限漂移只在能够读到元数据时判断，不能保证任意插件实时完整枚举。休眠工作区暂无离线摘要。
 - 回滚：`git revert <本任务提交>`；观察记录不应影响浏览器现有扩展状态。
