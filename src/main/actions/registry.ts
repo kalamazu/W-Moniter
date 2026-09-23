@@ -1,7 +1,9 @@
 import { ActionError, type ActionCatalog, type ActionDescriptor, type ActionRequest, type ActionResult, type TargetRef } from '../../shared/contracts/action'
 import type { WorkspaceCreateInput, WorkspaceOverview, WorkspaceSummary } from '../../shared/contracts/workspace'
 import type { WorkspaceService } from '../workspace/service'
+import { ActionPolicy } from './policy'
 import { TaskService } from './task-service'
+import { WorkspaceTargetResolver } from './target-resolver'
 
 type WorkspaceAction = 'workspaces.list' | 'workspace.create' | 'workspace.open' | 'workspace.suspend'
 
@@ -21,11 +23,15 @@ const DESCRIPTORS: Record<WorkspaceAction, ActionDescriptor> = {
 /** 统一注册表的第一个垂直切片；其它领域服务以后按同样方式注册。 */
 export class WorkspaceActionRegistry {
   private readonly tasks = new TaskService()
+  private readonly policy = new ActionPolicy()
+  private readonly targets: WorkspaceTargetResolver
 
   constructor(
     private readonly workspaces: WorkspaceService,
     private readonly runtime: WorkspaceActionRuntime
-  ) {}
+  ) {
+    this.targets = new WorkspaceTargetResolver(workspaces)
+  }
 
   catalog(): ActionCatalog {
     return { actions: Object.values(DESCRIPTORS).map((item) => ({ ...item })) }
@@ -38,7 +44,8 @@ export class WorkspaceActionRegistry {
   async execute(request: ActionRequest): Promise<ActionResult> {
     const descriptor = DESCRIPTORS[request.action as WorkspaceAction]
     if (!descriptor) throw new ActionError(`未注册的动作：${request.action}`, 'invalid_action')
-    this.resolveTarget(descriptor, request.target)
+    this.policy.assertAllowed(descriptor, request.target)
+    this.targets.resolve(descriptor, request.target)
     return this.tasks.execute(request, async (input, context) => {
       if (context.signal.aborted) throw new ActionError('任务已取消', 'task_canceled')
       switch (request.action as WorkspaceAction) {
@@ -54,21 +61,4 @@ export class WorkspaceActionRegistry {
     })
   }
 
-  private resolveTarget(descriptor: ActionDescriptor, target: TargetRef | undefined): void {
-    if (descriptor.target === 'required' && !target) throw new ActionError(`动作 ${descriptor.name} 必须提供 TargetRef`, 'target_required')
-    if (!target) return
-    if (descriptor.name === 'workspace.create') {
-      if (target.kind !== 'workspace-collection') throw new ActionError('创建工作区的目标必须是 workspace-collection', 'target_invalid')
-      return
-    }
-    if (descriptor.name === 'workspaces.list') {
-      if (target.kind !== 'workspace-collection' && target.kind !== 'workspace') throw new ActionError('查询工作区只接受工作区范围目标', 'target_invalid')
-      return
-    }
-    if (target.kind !== 'workspace') throw new ActionError(`动作 ${descriptor.name} 必须指定 workspace 目标`, 'target_invalid')
-    const workspace = this.workspaces.get(target.workspaceId)
-    if (target.expectedVersion !== undefined && target.expectedVersion !== workspace.version) {
-      throw new ActionError(`工作区目标已过期：期望版本 ${target.expectedVersion}，当前为 ${workspace.version}`, 'target_stale')
-    }
-  }
 }
