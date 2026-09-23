@@ -562,7 +562,10 @@ export class BodyCapture {
           bytes = EMPTY_BYTES
         } else {
           const outcome = await this.withTimeout(
-            this.getBody(requestId, sessionId),
+            process.env['MONITOR_TEST_BODY_FETCH_TIMEOUT'] === '1'
+              // 仅验收注入：悬挂在与 CDP 取 body 相同的 timeout/accountResponse 管道上。
+              ? new Promise<{ bytes: Uint8Array }>(() => undefined)
+              : this.getBody(requestId, sessionId),
             this.config.timeoutMs
           )
           if (outcome.ok) bytes = outcome.value.bytes

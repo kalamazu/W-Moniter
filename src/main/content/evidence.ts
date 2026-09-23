@@ -26,6 +26,12 @@ export interface CaptureEvidenceSummary {
   chainValid: boolean
 }
 
+export interface PendingRetention {
+  hash: string
+  reason?: string
+  at: number
+}
+
 /** 逐条哈希链：本机文件所有者仍可替换整份账本，但意外损坏和单条篡改可检测。 */
 export class CaptureEvidenceLedger {
   private readonly path: string
@@ -76,7 +82,7 @@ export class CaptureEvidenceLedger {
     for (const item of rows) latest.set(`${item.inst}:${item.seq}`, item)
     const result: CaptureEvidenceSummary = { captured: 0, gaps: 0, deleted: 0, byReason: {}, chainValid: valid }
     for (const item of latest.values()) {
-      if (item.state === 'retention_intent') continue
+      if (item.state === 'retention_intent' || item.state === 'retention_committed' || item.state === 'retention_cancelled') continue
       result.lastCaptureAt = Math.max(result.lastCaptureAt ?? 0, item.at)
       if (item.state === 'stored') result.captured += 1
       else if (item.state === 'empty') continue
@@ -89,6 +95,20 @@ export class CaptureEvidenceLedger {
     }
     if (!valid) result.lastError = 'evidence_chain_invalid'
     return result
+  }
+
+  /** 未落终态的删除意图必须在下一次启动时收敛，不能只靠人工读 JSONL。 */
+  async pendingRetentions(): Promise<PendingRetention[]> {
+    await this.tail
+    const { rows, valid } = await this.readRows()
+    if (!valid) throw new Error('采集证据链校验失败')
+    const pending = new Map<string, PendingRetention>()
+    for (const row of rows) {
+      if (row.phase !== 'retention' || !row.hash) continue
+      if (row.state === 'retention_intent') pending.set(row.hash, { hash: row.hash, reason: row.reason, at: row.at })
+      if (row.state === 'retention_committed' || row.state === 'retention_cancelled' || row.state === 'retention_recovery_failed') pending.delete(row.hash)
+    }
+    return [...pending.values()]
   }
 
   private async readRows(): Promise<{ rows: CaptureEvidence[]; valid: boolean }> {

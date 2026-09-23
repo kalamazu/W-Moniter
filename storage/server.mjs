@@ -3479,10 +3479,10 @@ const OPS = {
     return result
   },
   contentRefs(args) {
-    return db.prepare('SELECT inst, seq, COALESCE(body_size, 0) AS size FROM requests WHERE body_hash = ?').all(norm(args.hash))
+    return db.prepare('SELECT inst, seq, COALESCE(body_size, 0) AS size, body_state FROM requests WHERE body_hash = ?').all(norm(args.hash))
   },
   markRetainedDeleted(args) {
-    const info = db.prepare("UPDATE requests SET body_state = 'retained_deleted' WHERE body_hash = ?").run(norm(args.hash))
+    const info = db.prepare("UPDATE requests SET body_state = 'retained_deleted' WHERE body_hash = ? AND body_state != 'retained_deleted'").run(norm(args.hash))
     db.prepare('UPDATE bodies SET stored = 0, blob = NULL WHERE hash = ?').run(norm(args.hash))
     return { affected: Number(info.changes) }
   },

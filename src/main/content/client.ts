@@ -51,6 +51,7 @@ export class ContentClient {
   }
 
   async put(bytes: Uint8Array): Promise<ContentRef> {
+    if (process.env['MONITOR_TEST_CONTENT_PUT_FAIL'] === '1') throw new Error('受控内容落盘失败')
     const endpoint = this.endpoint
     if (!endpoint) throw new Error('内容服务未启动')
     return new Promise((resolve, reject) => {

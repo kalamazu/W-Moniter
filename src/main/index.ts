@@ -68,6 +68,9 @@ const BODY_MAX_BYTES = envInt('MONITOR_BODY_MAX_KB', 256) * 1024
 const BODY_STORE_BYTES = envInt('MONITOR_BODY_STORE_MB', 512) * 1024 * 1024
 const BODY_STORE_COUNT = envInt('MONITOR_BODY_STORE_COUNT', 50_000)
 const BODY_TIMEOUT_MS = envInt('MONITOR_BODY_TIMEOUT_MS', 2000)
+const RETENTION_FAULT_AT = !app.isPackaged && (process.env['MONITOR_TEST_RETENTION_FAULT_AT'] === 'after_intent' || process.env['MONITOR_TEST_RETENTION_FAULT_AT'] === 'after_content_revoke')
+  ? process.env['MONITOR_TEST_RETENTION_FAULT_AT']
+  : undefined
 /** 空 = 全部 resourceType（默认）。`*` / `all` 也认，写法更直白。 */
 const BODY_TYPES = (process.env['MONITOR_BODY_TYPES'] ?? '')
   .split(',')
@@ -198,6 +201,7 @@ function createControllerForWorkspace(workspace: WorkspaceSummary): Controller {
     bodyStoreMaxCount: BODY_STORE_COUNT,
     bodyTypes: BODY_TYPES,
     bodyTimeoutMs: BODY_TIMEOUT_MS,
+    ...(RETENTION_FAULT_AT ? { retentionFaultAt: RETENTION_FAULT_AT } : {}),
     captureScripts: CAPTURE_SCRIPTS,
     scriptMaxBytes: SCRIPT_MAX_KB * 1024,
     scriptMaxCount: SCRIPT_MAX_COUNT,

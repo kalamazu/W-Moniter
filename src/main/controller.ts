@@ -186,6 +186,8 @@ export interface ControllerOptions {
   scriptMaxCount: number
   scriptTimeoutMs: number
   scriptConcurrency: number
+  /** 仅开发验收：在清理流程指定步骤抛出，验证下次启动恢复。 */
+  retentionFaultAt?: 'after_intent' | 'after_content_revoke'
 }
 
 /**
@@ -233,6 +235,7 @@ export class Controller extends EventEmitter {
   private readonly content: ContentStore
   private contentClient: ContentClient | null = null
   private readonly evidence: CaptureEvidenceLedger
+  private retentionFaultTriggered = false
   /** P5：本地代理 + 三源关联。代理没开时两者都是空的 */
   private proxy: ProxyClient | null = null
   /**
@@ -569,7 +572,10 @@ export class Controller extends EventEmitter {
         args: launched.args
       })
       this.emit('log', `存储: ${health.enabled ? `已启用 (node ${health.nodeVersion})` : `未启用 - ${health.error}`}`)
-      if (health.enabled) await this.storage.call('authMarkStale', {}).catch(error => this.emit('log', `[auth] 恢复降级失败：${String(error)}`))
+      if (health.enabled) {
+        await this.storage.call('authMarkStale', {}).catch(error => this.emit('log', `[auth] 恢复降级失败：${String(error)}`))
+        await this.reconcileRetentions().catch(error => this.emit('log', `[retention] 恢复对账失败：${String(error)}`))
+      }
 
       const bodyConfig: BodyConfig = {
         enabled: this.options.captureBodies,
@@ -1304,14 +1310,54 @@ export class Controller extends EventEmitter {
     const integrity = await this.content.verify(hash)
     if (!integrity.exists) throw new Error(`正文不存在：${hash}`)
     if (!integrity.valid) throw new Error(`正文损坏，拒绝清理：${integrity.error}`)
-    const refs = (await this.storage.call('contentRefs', { hash })) as Array<{ inst: number; seq: number; size: number }>
+    const refs = (await this.storage.call('contentRefs', { hash })) as Array<{ inst: number; seq: number; size: number; body_state: string }>
     await this.evidence.record({ inst: 0, seq: 0, phase: 'retention', state: 'retention_intent', size: 0, hash, reason })
+    this.throwRetentionFault('after_intent')
     const deleted = await this.content.revoke(hash)
+    this.throwRetentionFault('after_content_revoke')
     const result = (await this.storage.call('markRetainedDeleted', { hash })) as { affected: number }
-    for (const ref of refs) {
+    for (const ref of refs.filter(ref => ref.body_state !== 'retained_deleted')) {
       await this.evidence.record({ inst: ref.inst, seq: ref.seq, phase: 'retention', state: 'retained_deleted', size: ref.size, hash, reason })
     }
+    await this.evidence.record({ inst: 0, seq: 0, phase: 'retention', state: 'retention_committed', size: 0, hash, reason })
     return { deleted, affected: result.affected }
+  }
+
+  private throwRetentionFault(at: 'after_intent' | 'after_content_revoke'): void {
+    if (!this.retentionFaultTriggered && this.options.retentionFaultAt === at) {
+      this.retentionFaultTriggered = true
+      throw new Error(`受控 retention 中断：${at}`)
+    }
+  }
+
+  /** 对账未完成删除：对象还在则取消意图；对象已消失则幂等补齐数据库和每条引用证据。 */
+  private async reconcileRetentions(): Promise<void> {
+    const pending = await this.evidence.pendingRetentions()
+    for (const intent of pending) {
+      const integrity = await this.content.verify(intent.hash)
+      if (integrity.exists && integrity.valid) {
+        await this.evidence.record({ inst: 0, seq: 0, phase: 'retention', state: 'retention_cancelled', size: 0,
+          hash: intent.hash, reason: `${intent.reason ?? '未说明'}；恢复时对象仍在` })
+        this.emit('log', `[retention] 已取消未执行的清理意图 ${intent.hash.slice(0, 12)}`)
+        continue
+      }
+      if (!integrity.exists) {
+        const refs = (await this.storage.call('contentRefs', { hash: intent.hash })) as Array<{ inst: number; seq: number; size: number; body_state: string }>
+        const unfinished = refs.filter(ref => ref.body_state !== 'retained_deleted')
+        await this.storage.call('markRetainedDeleted', { hash: intent.hash })
+        for (const ref of unfinished) {
+          await this.evidence.record({ inst: ref.inst, seq: ref.seq, phase: 'retention', state: 'retained_deleted', size: ref.size,
+            hash: intent.hash, reason: `${intent.reason ?? '未说明'}；启动恢复` })
+        }
+        await this.evidence.record({ inst: 0, seq: 0, phase: 'retention', state: 'retention_committed', size: 0,
+          hash: intent.hash, reason: `${intent.reason ?? '未说明'}；启动恢复` })
+        this.emit('log', `[retention] 已恢复已删除对象 ${intent.hash.slice(0, 12)}，${unfinished.length} 条引用`)
+        continue
+      }
+      await this.evidence.record({ inst: 0, seq: 0, phase: 'retention', state: 'retention_recovery_failed', size: integrity.size ?? 0,
+        hash: intent.hash, reason: `${intent.reason ?? '未说明'}；对象损坏：${integrity.error ?? 'unknown'}` })
+      this.emit('log', `[retention] 无法自动恢复损坏对象 ${intent.hash.slice(0, 12)}`)
+    }
   }
 
   async getStats(): Promise<Stats | null> {
