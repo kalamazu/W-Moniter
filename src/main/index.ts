@@ -176,6 +176,8 @@ function createControllerForWorkspace(workspace: WorkspaceSummary): Controller {
   const paths = workspaceService.pathsFor(workspace.id)
   mkdirSync(paths.downloadDir, { recursive: true })
   return new Controller({
+    workspaceId: workspace.id,
+    profileId: 'primary',
     userDataDir: paths.profileDir,
     startUrl: START_URL,
     profile: workspace.profile,

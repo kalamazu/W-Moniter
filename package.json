@@ -9,6 +9,7 @@
     "build": "electron-vite build",
     "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
     "test:storage": "node scripts/test-storage.mjs",
+    "test:scoped-migration": "node scripts/test-scoped-migration.mjs",
     "test:scripts": "node scripts/test-scripts.mjs",
     "test:rules": "node scripts/test-rules.mjs",
     "test:rules:e2e": "node scripts/test-rules-e2e.mjs",

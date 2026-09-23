@@ -18,15 +18,16 @@
 
 import { DatabaseSync } from 'node:sqlite'
 import { createHash } from 'node:crypto'
-import { mkdirSync, statSync, writeFileSync, readFileSync } from 'node:fs'
+import { mkdirSync, statSync, writeFileSync, readFileSync, existsSync } from 'node:fs'
 import { dirname, join } from 'node:path'
+import { migrateScope, SCOPE_VERSION } from './migrations/009-scope.mjs'
 
 // node:sqlite 在 22.x 仍标记 experimental，会往 stderr 吐警告。
 // stderr 是日志通道，别让它被警告淹没。
 process.removeAllListeners('warning')
 process.on('warning', () => {})
 
-const SCHEMA_VERSION = 8
+const SCHEMA_VERSION = 9
 
 const config = {
   /** 单条 body 落盘上限，超过只留 hash + size */
@@ -45,6 +46,7 @@ let db = null
 /** 库文件路径。storageSummary 要报磁盘占用，得留着它 */
 let dbFilePath = null
 let S = null
+let dbScope = { workspaceId: 'default', profileId: 'primary' }
 
 /**
  * P5 代理侧列（列名 → 声明）。建表和迁移共用一份，免得漏了某一列 ——
@@ -319,7 +321,7 @@ CREATE TABLE IF NOT EXISTS site_snapshots (
 `
 
 const REQUEST_COLUMNS = [
-  'inst', 'seq', 'key', 'request_id', 'session_id', 'target_id', 'target_type',
+  'workspace_id', 'profile_id', 'legacy_origin', 'inst', 'seq', 'key', 'request_id', 'session_id', 'target_id', 'target_type',
   'frame_url', 'url', 'host', 'scheme', 'path', 'query', 'method', 'resource_type',
   'initiator_type', 'initiator_stack', 'priority', 'status', 'status_text', 'mime_type', 'protocol',
   'remote_ip', 'remote_port', 'req_headers', 'resp_headers', 'req_body',
@@ -362,13 +364,23 @@ function norm(v) {
   return String(v)
 }
 
-function openDatabase(dbPath) {
+function openDatabase(dbPath, scope) {
   if (dbPath !== ':memory:') mkdirSync(dirname(dbPath), { recursive: true })
+  const existed = dbPath !== ':memory:' && existsSync(dbPath)
   const handle = new DatabaseSync(dbPath)
+  try {
   handle.exec('PRAGMA journal_mode = WAL')
   handle.exec('PRAGMA synchronous = NORMAL')
   handle.exec('PRAGMA temp_store = MEMORY')
   handle.exec('PRAGMA cache_size = -32000')
+  const hasMeta = handle.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'meta'").get()
+  const oldVersion = hasMeta ? Number(handle.prepare("SELECT v FROM meta WHERE k = 'schema_version'").get()?.v || 0) : 0
+  if (oldVersion > SCHEMA_VERSION) throw new Error(`database schema ${oldVersion} is newer than supported ${SCHEMA_VERSION}`)
+  if (existed && hasMeta && oldVersion < SCOPE_VERSION) {
+    // VACUUM INTO snapshots the WAL too; a raw file copy can silently omit committed rows.
+    const backup = `${dbPath}.pre-v${SCOPE_VERSION}-${Date.now()}.bak`
+    handle.exec(`VACUUM INTO '${backup.replaceAll("'", "''")}'`)
+  }
   handle.exec(DDL)
   // CREATE TABLE IF NOT EXISTS 不会给已存在的表补列，加列必须显式迁移
   ensureColumn(handle, 'scripts', 'start_line', 'INTEGER NOT NULL DEFAULT 0')
@@ -378,10 +390,18 @@ function openDatabase(dbPath) {
   for (const [column, decl] of PROXY_COLUMNS) ensureColumn(handle, 'requests', column, decl)
   // v7：事件流加了 level（info/warn/error），老库的 events 没有这一列
   ensureColumn(handle, 'events', 'level', "TEXT DEFAULT 'info'")
-  handle
-    .prepare('INSERT INTO meta (k, v) VALUES (?, ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v')
-    .run('schema_version', String(SCHEMA_VERSION))
+  const owner = handle.prepare("SELECT v FROM meta WHERE k = 'workspace_id'").get()?.v
+  const profile = handle.prepare("SELECT v FROM meta WHERE k = 'profile_id'").get()?.v
+  if (owner && (owner !== scope.workspaceId || profile !== scope.profileId)) {
+    throw new Error(`scope mismatch: database belongs to ${owner}/${profile}`)
+  }
+  migrateScope(handle, { ...scope, adoptLegacy: scope.workspaceId === 'default' })
+  handle.exec('PRAGMA foreign_keys = ON')
   return handle
+  } catch (error) {
+    handle.close()
+    throw error
+  }
 }
 
 function ensureColumn(handle, table, column, declaration) {
@@ -394,10 +414,10 @@ function buildStatements() {
   return {
     /* 站点资源：cookie 罐的四条基本操作 */
     insertCookie: db.prepare(
-      'INSERT INTO cookies (key, name, domain, host, path, value, value_len, trunc, expires, session, secure, ' +
+      'INSERT INTO cookies (workspace_id, profile_id, key, name, domain, host, path, value, value_len, trunc, expires, session, secure, ' +
         'http_only, same_site, priority, source_scheme, source_port, partition_key, size, first_seen, last_seen, ' +
         'first_inst, last_inst, change_count) VALUES (' +
-        new Array(23).fill('?').join(', ') + ')'
+        new Array(25).fill('?').join(', ') + ')'
     ),
     updateCookie: db.prepare(
       'UPDATE cookies SET value = ?, value_len = ?, trunc = ?, expires = ?, session = ?, secure = ?, http_only = ?, ' +
@@ -408,10 +428,10 @@ function buildStatements() {
     deleteCookie: db.prepare('DELETE FROM cookies WHERE key = ?'),
     cookieSent: db.prepare('UPDATE cookies SET sent_count = ?, sent_hosts = ?, cross_site = ? WHERE key = ?'),
     upsertSiteOrigin: db.prepare(
-      'INSERT INTO site_origins (origin, first_seen, updated_at, last_inst, cookie_count, local_count, local_bytes, ' +
+      'INSERT INTO site_origins (workspace_id, profile_id, origin, first_seen, updated_at, last_inst, cookie_count, local_count, local_bytes, ' +
         'session_count, session_bytes, idb_names, idb_stores, cache_names, cache_entries, sw_count, usage_bytes, ' +
         'quota_bytes, usage_breakdown, detail) VALUES (' +
-        new Array(18).fill('?').join(', ') + ') ' +
+        new Array(20).fill('?').join(', ') + ') ' +
         'ON CONFLICT(origin) DO UPDATE SET updated_at = excluded.updated_at, last_inst = excluded.last_inst, ' +
         'cookie_count = excluded.cookie_count, local_count = excluded.local_count, local_bytes = excluded.local_bytes, ' +
         'session_count = excluded.session_count, session_bytes = excluded.session_bytes, idb_names = excluded.idb_names, ' +
@@ -2652,6 +2672,7 @@ function cookieSync(args) {
       const prev = existing.get(key)
       if (!prev) {
         S.insertCookie.run(
+          dbScope.workspaceId, dbScope.profileId,
           key, String(item.name ?? ''), domain, host, path, stored, rawValue.length, truncated ? 1 : 0,
           norm(item.expires), item.session ? 1 : 0, item.secure ? 1 : 0, item.httpOnly ? 1 : 0,
           norm(item.sameSite), norm(item.priority), norm(item.sourceScheme), norm(item.sourcePort),
@@ -3194,7 +3215,13 @@ const OPS = {
   open(args) {
     if (db) db.close()
     Object.assign(config, args.config || {})
-    db = openDatabase(args.dbPath)
+    const workspaceId = args.config?.workspaceId ?? 'default'
+    const profileId = args.config?.profileId ?? 'primary'
+    if (typeof workspaceId !== 'string' || !workspaceId || typeof profileId !== 'string' || !profileId) {
+      throw new Error('workspaceId/profileId must be nonempty strings')
+    }
+    dbScope = { workspaceId, profileId }
+    db = openDatabase(args.dbPath, dbScope)
     dbFilePath = args.dbPath
     S = buildStatements()
     return { schemaVersion: SCHEMA_VERSION, dbPath: args.dbPath, config: { ...config } }
@@ -3238,6 +3265,9 @@ const OPS = {
     try {
       for (const row of rows) {
         const values = REQUEST_COLUMNS.map((column) => {
+          if (column === 'workspace_id') return dbScope.workspaceId
+          if (column === 'profile_id') return dbScope.profileId
+          if (column === 'legacy_origin') return 'observed'
           if (column === 'inst') return inst
           return norm(row[column])
         })
@@ -3280,6 +3310,15 @@ const OPS = {
         )
         if (Number(info.changes) > 0) updated += 1
         else if (missing.length < 512) missing.push(item.seq)
+        if (Number(info.changes) > 0) {
+          if (item.hash) {
+            db.prepare('INSERT INTO body_refs(workspace_id, profile_id, inst, seq, hash) VALUES (?, ?, ?, ?, ?) ON CONFLICT(workspace_id, profile_id, inst, seq) DO UPDATE SET hash = excluded.hash')
+              .run(dbScope.workspaceId, dbScope.profileId, inst, item.seq, item.hash)
+          } else {
+            db.prepare('DELETE FROM body_refs WHERE workspace_id = ? AND profile_id = ? AND inst = ? AND seq = ?')
+              .run(dbScope.workspaceId, dbScope.profileId, inst, item.seq)
+          }
+        }
       }
       db.exec('COMMIT')
     } catch (err) {
@@ -3496,6 +3535,7 @@ const OPS = {
     try {
       for (const row of rows) {
         S.upsertSiteOrigin.run(
+          dbScope.workspaceId, dbScope.profileId,
           String(row.origin), now, now, inst,
           row.cookieCount ?? 0, row.localStorageCount ?? 0, row.localStorageBytes ?? 0,
           row.sessionStorageCount ?? 0, row.sessionStorageBytes ?? 0,
@@ -3571,6 +3611,14 @@ function handle(line) {
   }
 
   try {
+    if (msg.op !== 'open') {
+      const requestedWorkspace = msg.args?.workspaceId
+      const requestedProfile = msg.args?.profileId
+      if ((requestedWorkspace !== undefined && requestedWorkspace !== dbScope.workspaceId) ||
+          (requestedProfile !== undefined && requestedProfile !== dbScope.profileId)) {
+        throw new Error('scope mismatch: requested workspace/profile does not own this database')
+      }
+    }
     const result = op(msg.args || {})
     if (msg.id !== undefined) send({ id: msg.id, ok: true, result })
   } catch (err) {

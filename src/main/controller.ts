@@ -137,6 +137,8 @@ const MAX_INLINE_BASE64 = 4 * 1024 * 1024
 const SCREENSHOT_KEEP = 200
 
 export interface ControllerOptions {
+  workspaceId?: string
+  profileId?: string
   userDataDir: string
   startUrl: string
   profile: Profile
@@ -278,6 +280,8 @@ export class Controller extends EventEmitter {
 
     const storageConfig: StorageConfig = {
       dbPath: options.dbPath,
+      workspaceId: options.workspaceId ?? 'default',
+      profileId: options.profileId ?? 'primary',
       contentDir: options.contentDir,
       storeBodies: options.captureBodies,
       bodyMaxBytes: options.bodyMaxBytes,
