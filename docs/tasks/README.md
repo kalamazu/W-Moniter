@@ -18,7 +18,7 @@
 | [T-007](T-007-task-journal-diagnostics.md) | 待验收 | 任务日志诊断与恢复可见性 | M0 §3.2 | Codex | [A-007](../acceptance/A-007-task-journal-diagnostics.md) |
 | [T-008](T-008-content-integrity-api.md) | 待验收 | ContentStore 完整性与范围读取 API | M1 §4 | Codex | [A-008](../acceptance/A-008-content-integrity-api.md) |
 | [T-009](T-009-content-observability.md) | 待验收 | 内容存储统计与工作区可视化 | M1 / M2 | Codex | [A-009](../acceptance/A-009-content-observability.md) |
-| [T-010](T-010-capture-coverage-probe.md) | 可认领 | 全量采集路径与缺口真值矩阵 | M1 §4.2 | 未认领 | 完成后创建 A-010 |
+| [T-010](T-010-capture-coverage-probe.md) | 待验收 | 全量采集路径与缺口真值矩阵 | M1 §4.2 | Codex | [A-010](../acceptance/A-010-capture-coverage-probe.md) |
 | [T-011](T-011-scoped-metadata-migration.md) | 可认领 | 工作区元数据归属与范围校验迁移 | M2 §5 / §10.2 | 未认领 | 完成后创建 A-011 |
 | [T-012](T-012-streaming-content-service.md) | 可认领 | 流式内容服务第一条纵向链路 | M1 §4 / §10.3 | 未认领 | 完成后创建 A-012 |
 | [T-013](T-013-workspace-auth-ledger.md) | 可认领 | 工作区登录证据台账 | M2 §5 | 未认领 | 完成后创建 A-013 |

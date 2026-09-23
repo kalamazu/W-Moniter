@@ -1,11 +1,11 @@
 # T-010：全量采集路径与缺口真值矩阵
 
-- 状态：可认领
+- 状态：待验收
 - 蓝图映射：M1 §4.2、§13.2；E04
 - 优先级：P0
-- 认领：未认领
-- 基线 commit：待认领时填写
-- 验收：A-010（实现完成后创建）
+- 认领：Codex · 2026-09-23
+- 基线 commit：`ff55e4d`
+- 验收：[A-010](../acceptance/A-010-capture-coverage-probe.md)
 
 ## 背景与目标
 
@@ -31,6 +31,8 @@ T-004～T-005 已让常规非流式响应进入 ContentStore，但 SSE、WS、�
 
 ## 完成记录
 
-- 实现 commit：待填写（本任务独立提交）。
-- 修改文件、测试命令与结果、已知限制：待填写。
-- 回滚：`git revert <本任务提交>`；fixture 和文档一并回退，不改用户数据。
+- 实现 commit：`4bd3984`，独立于后续迁移/内容服务。
+- 修改：`scripts/test-origin.mjs`、`scripts/probes/capture-paths.mjs`、`cdp-alternatives.mjs`、`src/main/browser/body-capture.ts`、能力账本和 ADR-0003。
+- 验证：直连 L/H 探针各 3/3；独立 CDP 1/1；代理两组合的结果完整记录（大上传停滞、WS 失败）；`npm run test:content` 7/7，`npm run test:rules:e2e` 22/22，typecheck/build 通过。
+- 已知限制：探针识别但不修复上传原文、SSE/WS、下载与代理缺口；2 MiB 内存观察不足以证明 1 GiB 有界，移交 T-012 和后续来源适配任务。
+- 回滚：`git revert 4bd3984`；fixture 和文档一并回退，不改用户数据。
