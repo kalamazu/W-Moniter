@@ -1,0 +1,10 @@
+{
+  "manifest_version": 3,
+  "name": "Monitor State Probe",
+  "version": "1.0.0",
+  "description": "Controlled extension capability probe; never distributed to user profiles automatically.",
+  "permissions": ["management", "storage"],
+  "host_permissions": ["http://127.0.0.1/*", "http://localhost/*"],
+  "background": { "service_worker": "background.js" },
+  "options_page": "options.html"
+}

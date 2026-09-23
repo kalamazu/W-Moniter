@@ -8,7 +8,7 @@ import { ActionPolicy } from './policy'
 import { TaskService, type TaskJournalDiagnostics } from './task-service'
 import { WorkspaceTargetResolver } from './target-resolver'
 
-type WorkspaceAction = 'workspaces.list' | 'workspace.create' | 'workspace.open' | 'workspace.suspend' | 'tasks.diagnostics' | 'rules.get' | 'rules.save' | 'content.verify' | 'content.readRange' | 'content.revoke' | 'capture.evidence' | 'capture.summary' | 'workspaces.contentStats' | 'auth.summary' | 'auth.verifyFixture'
+type WorkspaceAction = 'workspaces.list' | 'workspace.create' | 'workspace.open' | 'workspace.suspend' | 'tasks.diagnostics' | 'rules.get' | 'rules.save' | 'content.verify' | 'content.readRange' | 'content.revoke' | 'capture.evidence' | 'capture.summary' | 'workspaces.contentStats' | 'auth.summary' | 'auth.verifyFixture' | 'extensions.summary' | 'extensions.setDesired'
 
 export interface WorkspaceActionRuntime {
   create(input: WorkspaceCreateInput): WorkspaceSummary
@@ -20,6 +20,8 @@ export interface WorkspaceActionRuntime {
   revokeContent(id: string, hash: string, reason: string): Promise<unknown>
   getAuth(id: string): Promise<unknown>
   verifyAuth(id: string, origin: string): Promise<unknown>
+  getExtensions(id: string): Promise<unknown>
+  setExtensionDesired(id: string, input: { extensionId: string; version?: string; permissions?: string[] }): Promise<unknown>
 }
 
 const DESCRIPTORS: Record<WorkspaceAction, ActionDescriptor> = {
@@ -38,6 +40,8 @@ const DESCRIPTORS: Record<WorkspaceAction, ActionDescriptor> = {
   'workspaces.contentStats': { name: 'workspaces.contentStats', kind: 'query', target: 'optional', description: '全部工作区的内容与缺口摘要' },
   'auth.summary': { name: 'auth.summary', kind: 'query', target: 'required', description: '读取指定工作区的登录证据摘要，不包含 Cookie 值' },
   'auth.verifyFixture': { name: 'auth.verifyFixture', kind: 'mutation', target: 'required', description: '在明确工作区对受控本地 fixture 主动验证身份' }
+  ,'extensions.summary': { name: 'extensions.summary', kind: 'query', target: 'required', description: '读取工作区扩展观察与期望对账；Profile 快照不是完整枚举' }
+  ,'extensions.setDesired': { name: 'extensions.setDesired', kind: 'mutation', target: 'required', description: '记录工作区扩展期望版本和权限，不安装或启停扩展' }
 }
 
 /** 统一注册表的第一个垂直切片；其它领域服务以后按同样方式注册。 */
@@ -124,6 +128,11 @@ export class WorkspaceActionRegistry {
         case 'auth.verifyFixture':
           return this.runtime.verifyAuth((request.target as Extract<TargetRef, { kind: 'workspace' }>).workspaceId,
             String((input as { origin?: string }).origin ?? ''))
+        case 'extensions.summary':
+          return this.runtime.getExtensions((request.target as Extract<TargetRef, { kind: 'workspace' }>).workspaceId)
+        case 'extensions.setDesired':
+          return this.runtime.setExtensionDesired((request.target as Extract<TargetRef, { kind: 'workspace' }>).workspaceId,
+            input as { extensionId: string; version?: string; permissions?: string[] })
       }
     })
   }

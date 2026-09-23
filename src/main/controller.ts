@@ -7,6 +7,7 @@ import { ContentStore } from './content/store'
 import { ContentClient } from './content/client'
 import { verifyFixture } from './auth/fixture'
 import { cookieClue } from './auth/observer'
+import { scanProfileExtensions } from './extensions/profile-scan'
 import { CaptureEvidenceLedger, type CaptureEvidenceSummary } from './content/evidence'
 import { CdpClient } from './browser/cdp'
 import { Collector } from './browser/collector'
@@ -1472,6 +1473,20 @@ export class Controller extends EventEmitter {
   async authSummary(): Promise<unknown> {
     if (!this.storage.isEnabled()) throw new Error('目标工作区存储未运行')
     return this.storage.call('authSummary', {})
+  }
+
+  async extensionSummary(): Promise<unknown> {
+    if (!this.storage.isEnabled()) throw new Error('目标工作区存储未运行')
+    const fixtureDir = process.env[`MONITOR_TEST_EXTENSION_DIR_${this.options.profile}`] ?? process.env['MONITOR_TEST_EXTENSION_DIR']
+    const snapshot = await scanProfileExtensions(this.options.userDataDir, this.getStatus().targets.map(target => target.url), fixtureDir)
+    await this.storage.call('extensionObserve', snapshot)
+    return this.storage.call('extensionSummary', {})
+  }
+
+  async setExtensionDesired(input: { extensionId: string; version?: string; permissions?: string[] }): Promise<unknown> {
+    if (!this.storage.isEnabled()) throw new Error('目标工作区存储未运行')
+    await this.storage.call('extensionSetDesired', input)
+    return this.extensionSummary()
   }
 
   async verifyFixtureAuth(originInput: string): Promise<unknown> {

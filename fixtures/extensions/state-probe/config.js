@@ -1,0 +1,1 @@
+self.MONITOR_REPORT_URL = null

@@ -740,6 +740,7 @@ export function startOrigin(port = 0) {
   const matrixReports = []
   const streamReports = []
   const authSessions = new Map()
+  const extensionReports = []
   const openStreams = new Set()
   /** WS 双向真值日志：handshake / in（页面发出）/ out（服务端发出）/ close */
   const wsLog = []
@@ -827,6 +828,11 @@ export function startOrigin(port = 0) {
       authSessions.set(token, account)
       return send(200, 'text/html; charset=utf-8', `<h1>Logged in: ${account.replaceAll('<', '&lt;')}</h1>`,
         { 'set-cookie': `auth_session=${token}; HttpOnly; SameSite=Lax; Path=/` })
+    }
+    if (path === '/extension-report') {
+      await new Promise(resolve => req.readableEnded ? resolve() : req.once('end', resolve))
+      try { extensionReports.push(JSON.parse(bodyText)) } catch { extensionReports.push({ error: 'invalid_report' }) }
+      return send(200, 'application/json', '{"ok":true}')
     }
     if (path === '/auth/whoami') {
       const token = /(?:^|;\s*)auth_session=([^;]+)/.exec(req.headers.cookie ?? '')?.[1]
@@ -1086,6 +1092,7 @@ export function startOrigin(port = 0) {
         requests,
         matrixReports,
         streamReports,
+        extensionReports,
         wsLog,
         close: () =>
           new Promise((done) => {

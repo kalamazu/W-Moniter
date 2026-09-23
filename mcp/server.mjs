@@ -478,6 +478,18 @@ const TOOLS = [
     run: ({ workspaceId }) => request('GET', `/workspaces/${encodeURIComponent(workspaceId)}/auth`)
   },
   {
+    name: 'monitor_extensions',
+    description: '读取明确工作区的扩展 Profile 观察、期望和漂移；部分扫描缺失只表示未知。',
+    inputSchema: { type: 'object', properties: { workspaceId: { type: 'string' } }, required: ['workspaceId'], additionalProperties: false },
+    run: ({ workspaceId }) => request('GET', `/workspaces/${encodeURIComponent(workspaceId)}/extensions`)
+  },
+  {
+    name: 'monitor_extension_set_desired',
+    description: '记录明确工作区的扩展期望版本/权限；不安装、卸载或启停。',
+    inputSchema: { type: 'object', properties: { workspaceId: { type: 'string' }, extensionId: { type: 'string' }, version: { type: 'string' }, permissions: { type: 'array', items: { type: 'string' } } }, required: ['workspaceId', 'extensionId'], additionalProperties: false },
+    run: ({ workspaceId, extensionId, version, permissions }) => request('POST', `/workspaces/${encodeURIComponent(workspaceId)}/extensions/desired`, { body: { extensionId, version, permissions } })
+  },
+  {
     name: 'monitor_auth_verify_fixture',
     description: '只对明确工作区和本地受控 fixture origin 主动验证登录；不支持任意真实网站。',
     inputSchema: { type: 'object', properties: { workspaceId: { type: 'string' }, origin: { type: 'string' } }, required: ['workspaceId', 'origin'], additionalProperties: false },

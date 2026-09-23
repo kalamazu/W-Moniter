@@ -175,9 +175,16 @@ function createControllerForWorkspace(workspace: WorkspaceSummary): Controller {
   if (!workspaceService) throw new Error('WorkspaceService 尚未初始化')
   const paths = workspaceService.pathsFor(workspace.id)
   mkdirSync(paths.downloadDir, { recursive: true })
+  const testExtensionDir = !app.isPackaged
+    ? process.env[`MONITOR_TEST_EXTENSION_DIR_${workspace.profile}`] ?? process.env['MONITOR_TEST_EXTENSION_DIR']
+    : undefined
   return new Controller({
     workspaceId: workspace.id,
     profileId: 'primary',
+    ...(testExtensionDir ? { extraArgs: [
+      `--disable-extensions-except=${testExtensionDir}`,
+      `--load-extension=${testExtensionDir}`
+    ] } : {}),
     userDataDir: paths.profileDir,
     startUrl: START_URL,
     profile: workspace.profile,
@@ -944,6 +951,16 @@ app.whenReady().then(async () => {
       const instance = workspaceControllers.get(id)
       if (!instance) throw new Error('目标工作区未运行，无法主动验证')
       return instance.verifyFixtureAuth(origin)
+    },
+    getExtensions: (id) => {
+      const instance = workspaceControllers.get(id)
+      if (!instance) throw new Error('目标工作区未运行，扩展观察暂不可读')
+      return instance.extensionSummary()
+    },
+    setExtensionDesired: (id, input) => {
+      const instance = workspaceControllers.get(id)
+      if (!instance) throw new Error('目标工作区未运行，无法记录扩展期望')
+      return instance.setExtensionDesired(input)
     }
   }, { journalPath: join(DATA_DIR, 'tasks', 'journal.json') })
   activeWorkspace = workspaceService.active()

@@ -22,13 +22,14 @@ import { mkdirSync, statSync, writeFileSync, readFileSync, existsSync } from 'no
 import { dirname, join } from 'node:path'
 import { migrateScope, SCOPE_VERSION } from './migrations/009-scope.mjs'
 import { migrateAuth } from './migrations/010-auth.mjs'
+import { migrateExtensions } from './migrations/011-extensions.mjs'
 
 // node:sqlite 在 22.x 仍标记 experimental，会往 stderr 吐警告。
 // stderr 是日志通道，别让它被警告淹没。
 process.removeAllListeners('warning')
 process.on('warning', () => {})
 
-const SCHEMA_VERSION = 10
+const SCHEMA_VERSION = 11
 
 const config = {
   /** 单条 body 落盘上限，超过只留 hash + size */
@@ -379,7 +380,7 @@ function openDatabase(dbPath, scope) {
   if (oldVersion > SCHEMA_VERSION) throw new Error(`database schema ${oldVersion} is newer than supported ${SCHEMA_VERSION}`)
   if (existed && hasMeta && oldVersion < SCHEMA_VERSION) {
     // VACUUM INTO snapshots the WAL too; a raw file copy can silently omit committed rows.
-    const backup = `${dbPath}.pre-v${oldVersion < SCOPE_VERSION ? SCOPE_VERSION : SCHEMA_VERSION}-${Date.now()}.bak`
+    const backup = `${dbPath}.pre-v${oldVersion < SCOPE_VERSION ? SCOPE_VERSION : oldVersion < 10 ? 10 : 11}-${Date.now()}.bak`
     handle.exec(`VACUUM INTO '${backup.replaceAll("'", "''")}'`)
   }
   handle.exec(DDL)
@@ -398,6 +399,7 @@ function openDatabase(dbPath, scope) {
   }
   migrateScope(handle, { ...scope, adoptLegacy: scope.workspaceId === 'default' })
   migrateAuth(handle)
+  migrateExtensions(handle)
   handle.exec('PRAGMA foreign_keys = ON')
   return handle
   } catch (error) {
@@ -3228,6 +3230,85 @@ const OPS = {
     dbFilePath = args.dbPath
     S = buildStatements()
     return { schemaVersion: SCHEMA_VERSION, dbPath: args.dbPath, config: { ...config } }
+  },
+
+  extensionSetDesired(args) {
+    const id = String(args.extensionId ?? '')
+    if (!/^[a-p]{32}$/.test(id)) throw new Error('invalid extension ID')
+    const version = args.version == null ? null : String(args.version).slice(0, 80)
+    const permissions = Array.isArray(args.permissions) ? [...new Set(args.permissions.map(String))].sort() : null
+    if (permissions?.some(value => value.length > 200) || (permissions && permissions.length > 100)) throw new Error('invalid permissions')
+    const now = Date.now()
+    db.prepare(`INSERT INTO extension_desired(workspace_id,profile_id,extension_id,version,permissions,updated_at)
+      VALUES(?,?,?,?,?,?) ON CONFLICT(workspace_id,profile_id,extension_id) DO UPDATE SET
+      version=excluded.version,permissions=excluded.permissions,updated_at=excluded.updated_at`)
+      .run(dbScope.workspaceId, dbScope.profileId, id, version, permissions ? JSON.stringify(permissions) : null, now)
+    return { extensionId: id, version, permissions, updatedAt: now }
+  },
+
+  extensionObserve(args) {
+    const source = String(args.source ?? '')
+    if (!['profile', 'management'].includes(source)) throw new Error('invalid extension observation source')
+    const complete = source === 'management' && args.complete === true
+    const rows = Array.isArray(args.rows) ? args.rows : []
+    if (rows.length > 1000) throw new Error('too many extensions')
+    const now = Date.now()
+    db.exec('BEGIN IMMEDIATE')
+    try {
+      const put = db.prepare(`INSERT INTO extension_observed(workspace_id,profile_id,extension_id,name,version,permissions,enabled,source,observed_at)
+        VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(workspace_id,profile_id,extension_id) DO UPDATE SET
+        name=excluded.name,version=excluded.version,permissions=excluded.permissions,
+        enabled=excluded.enabled,source=excluded.source,observed_at=excluded.observed_at`)
+      for (const row of rows) {
+        const id = String(row.id ?? '')
+        if (!/^[a-p]{32}$/.test(id)) throw new Error('invalid observed extension ID')
+        const perms = Array.isArray(row.permissions) ? [...new Set(row.permissions.map(String))].sort() : null
+        put.run(dbScope.workspaceId, dbScope.profileId, id, String(row.name ?? '').slice(0, 200),
+          row.version == null ? null : String(row.version).slice(0, 80), perms ? JSON.stringify(perms) : null,
+          typeof row.enabled === 'boolean' ? Number(row.enabled) : null, source, now)
+      }
+      if (complete) {
+        const ids = new Set(rows.map(row => String(row.id)))
+        for (const old of db.prepare('SELECT extension_id FROM extension_observed WHERE workspace_id=? AND profile_id=?').all(dbScope.workspaceId, dbScope.profileId)) {
+          if (!ids.has(old.extension_id)) db.prepare('DELETE FROM extension_observed WHERE workspace_id=? AND profile_id=? AND extension_id=?').run(dbScope.workspaceId, dbScope.profileId, old.extension_id)
+        }
+      }
+      db.prepare(`INSERT INTO extension_scans(workspace_id,profile_id,source,complete,reason,observed_at) VALUES(?,?,?,?,?,?)
+        ON CONFLICT(workspace_id,profile_id) DO UPDATE SET source=excluded.source,complete=excluded.complete,reason=excluded.reason,observed_at=excluded.observed_at`)
+        .run(dbScope.workspaceId, dbScope.profileId, source, Number(complete), args.reason ? String(args.reason).slice(0, 300) : null, now)
+      db.exec('COMMIT')
+    } catch (error) { db.exec('ROLLBACK'); throw error }
+    return { count: rows.length, complete, observedAt: now }
+  },
+
+  extensionSummary() {
+    const scan = db.prepare('SELECT source,complete,reason,observed_at FROM extension_scans WHERE workspace_id=? AND profile_id=?').get(dbScope.workspaceId, dbScope.profileId) ?? null
+    const desired = db.prepare('SELECT extension_id,version,permissions,updated_at FROM extension_desired WHERE workspace_id=? AND profile_id=?').all(dbScope.workspaceId, dbScope.profileId)
+    const observed = db.prepare('SELECT extension_id,name,version,permissions,enabled,source,observed_at FROM extension_observed WHERE workspace_id=? AND profile_id=?').all(dbScope.workspaceId, dbScope.profileId)
+    const actual = new Map(observed.map(row => [row.extension_id, row]))
+    return { workspaceId: dbScope.workspaceId, profileId: dbScope.profileId, scan, items: [
+      ...desired.map(want => {
+        const got = actual.get(want.extension_id)
+        const expectedPermissions = want.permissions ? JSON.parse(want.permissions) : null
+        const actualPermissions = got?.permissions ? JSON.parse(got.permissions) : null
+        const reasons = []
+        const stale = got && scan && got.observed_at !== scan.observed_at
+        if (stale) reasons.push('not_observed_in_latest_scan')
+        if (!got) reasons.push(scan?.complete ? 'missing' : 'not_observed_in_partial_scan')
+        if (got && want.version && got.version && want.version !== got.version) reasons.push('version_mismatch')
+        if (got && expectedPermissions && actualPermissions && JSON.stringify(expectedPermissions) !== JSON.stringify(actualPermissions)) reasons.push('permissions_mismatch')
+        if (got && got.enabled === 0) reasons.push('disabled')
+        if (got && (want.version && !got.version || expectedPermissions && !actualPermissions)) reasons.push('insufficient_observation')
+        return { extensionId: want.extension_id, desired: { version: want.version, permissions: expectedPermissions, updatedAt: want.updated_at },
+          observed: got ? { name: got.name, version: got.version, permissions: actualPermissions, enabled: got.enabled === null ? null : Boolean(got.enabled), source: got.source, observedAt: got.observed_at } : null,
+          state: stale ? 'unknown' : reasons.length ? reasons.every(reason => ['not_observed_in_partial_scan','insufficient_observation'].includes(reason)) ? 'unknown' : 'drift' : 'aligned', reasons }
+      }),
+      ...observed.filter(row => !desired.some(want => want.extension_id === row.extension_id)).map(row => ({ extensionId: row.extension_id,
+        desired: null, observed: { name: row.name, version: row.version, permissions: row.permissions ? JSON.parse(row.permissions) : null,
+          enabled: row.enabled === null ? null : Boolean(row.enabled), source: row.source, observedAt: row.observed_at },
+        state: scan && row.observed_at !== scan.observed_at ? 'unknown' : 'observed_only',
+        reasons: scan && row.observed_at !== scan.observed_at ? ['not_observed_in_latest_scan'] : [] }))
+    ] }
   },
 
   authSummary() {

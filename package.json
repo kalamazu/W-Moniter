@@ -21,6 +21,8 @@
     "test:sessions": "node scripts/test-sessions.mjs",
     "test:workspaces": "node scripts/test-workspaces.mjs",
     "test:auth-ledger": "node scripts/test-auth-ledger.mjs",
+    "test:extension-probe": "node scripts/probes/extension-management.mjs",
+    "test:extensions": "node scripts/test-extensions.mjs",
     "test:actions": "node scripts/test-actions.mjs",
     "test:content": "node scripts/test-content-capture.mjs",
     "test:stream-content": "node scripts/test-stream-content.mjs",

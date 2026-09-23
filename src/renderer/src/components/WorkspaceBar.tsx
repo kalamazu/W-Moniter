@@ -29,6 +29,20 @@ export function WorkspaceBar({ overview, onChange }: Props): React.JSX.Element |
   const [statsTick, setStatsTick] = useState(0)
   const [contentStats, setContentStats] = useState<Record<string, { objects: number; bytes: number; gaps: number; lastError?: string }>>({})
   const [authRows, setAuthRows] = useState<Array<{ origin: string; state: string; account_label: string | null; observed_at: number; source: string }>>([])
+  const [extensions, setExtensions] = useState<{ scan: { observed_at: number; reason: string } | null; items: Array<{ extensionId: string; state: string; reasons: string[]; observed: { name: string; version: string | null } | null }> } | null>(null)
+
+  useEffect(() => {
+    const id = overview?.activeWorkspaceId
+    if (!id) { setExtensions(null); return }
+    setExtensions(null)
+    let alive = true
+    const refresh = (): void => { void window.monitor.executeAction({ action: 'extensions.summary', input: {}, target: { kind: 'workspace', workspaceId: id } })
+      .then(result => { if (alive && result.output) setExtensions(result.output as typeof extensions) })
+      .catch(() => undefined) }
+    refresh()
+    const timer = setInterval(refresh, 2000)
+    return () => { alive = false; clearInterval(timer) }
+  }, [overview?.activeWorkspaceId, statsTick])
 
   useEffect(() => {
     const id = overview?.activeWorkspaceId
@@ -147,6 +161,13 @@ export function WorkspaceBar({ overview, onChange }: Props): React.JSX.Element |
           {new URL(row.origin).host} · {row.state === 'verified' ? `已验证 ${row.account_label ?? ''}` : row.state === 'suspected' ? '有线索，未验证' : row.state === 'stale' ? '待复核' : row.state === 'logged_out' ? '已登出' : '未知'}
         </small>) : <small>未验证</small>}
         <button type="button" disabled={busy} onClick={() => void verifyFixture()}>验证受控站点</button>
+      </div>}
+      {active?.state === 'running' && <div className="workspace-auth" aria-label="扩展状态">
+        <span>扩展：</span>
+        {extensions?.items.length ? extensions.items.slice(0, 3).map(item => <small key={item.extensionId}
+          title={`${item.extensionId} · ${item.reasons.join(', ') || '已观察'} · ${extensions.scan ? new Date(extensions.scan.observed_at).toLocaleString() : '未核对'}`}>
+          {item.observed?.name ?? item.extensionId.slice(0, 8)} {item.observed?.version ?? ''} · {item.state === 'drift' ? '漂移' : item.state === 'unknown' ? '未知' : item.state === 'aligned' ? '一致' : '仅观察'}
+        </small>) : <small title={extensions?.scan?.reason ?? '尚未扫描'}>未知（Profile 部分观察）</small>}
       </div>}
       <select
         className="workspace-profile"
