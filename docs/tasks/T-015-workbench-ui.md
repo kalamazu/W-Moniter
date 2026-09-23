@@ -31,7 +31,7 @@
 
 ## 完成记录
 
-- 实现 commit：待本轮提交
+- 实现 commit：`38dedbd`（`feat(ui): introduce responsive workbench navigation`）
 - 修改文件：`App.tsx`、`App.css`、`TitleBar.tsx`、`WorkspaceBar.tsx`、`PaneGrid.tsx`、`WorkbenchNav.tsx`、`CommandPalette.tsx`、`ContextDrawer.tsx`、工作台 UI 验收脚本。
 - 测试命令与结果：`npm run typecheck` 通过；`npm run build` 通过；`npm run test:workbench-ui` 8/8；`npm run test:layout` 的 A1～K1 回归通过（该长流程在当前命令会话 30 秒上限前未输出其收尾 L 段，需验收者完整复跑）。
 - 已知限制：设置页只呈现已实现能力与快捷键；Cookie/站点存储编辑、请求重放和插件实际管理没有后端授权动作，故未提供假开关。侧栏的展开状态尚不落盘。
