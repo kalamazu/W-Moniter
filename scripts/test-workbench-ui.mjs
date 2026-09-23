@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /** T-015 UI 验收：结构、键盘命令、视图导航与窄宽度下的窗口三键。 */
-import { mkdtempSync } from 'node:fs'
+import { mkdirSync, mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { launchApp, makeChecker, sleep } from './app-harness.mjs'
@@ -8,8 +8,10 @@ import { startOrigin } from './test-origin.mjs'
 
 const { check, assert, report } = makeChecker()
 const dataDir = mkdtempSync(join(tmpdir(), 'workbench-ui-'))
+const shotDir = process.env['WORKBENCH_SHOT_DIR'] || null
+if (shotDir) mkdirSync(shotDir, { recursive: true })
 const origin = await startOrigin(0)
-const app = await launchApp({ url: `http://127.0.0.1:${origin.port}/`, dataDir, port: 9795, tab: 'list' })
+const app = await launchApp({ url: `http://127.0.0.1:${origin.port}/`, dataDir, port: 9795, tab: 'list', shotDir })
 
 try {
   await app.waitConnected(1)
@@ -27,6 +29,7 @@ try {
     assert(initial.controls[0].x < initial.controls[1].x && initial.controls[1].x < initial.controls[2].x, '窗口按钮顺序异常')
     assert(Math.abs(initial.controls[2].right - initial.bar.right) < 2, `关闭按钮没有贴住窗口右边：close=${initial.controls[2].right} bar=${initial.bar.right}`)
   })
+  await app.shot('workbench-wide.png')
 
   // Electron 暴露的是 page target，没有 Browser 域；用同一 CDP 页面会话的设备指标
   // 覆盖来触发真实 CSS media query，不靠修改 DOM 宽度伪造。
@@ -37,6 +40,7 @@ try {
     assert(narrow.buttons.length === 3 && narrow.buttons.every((item) => item.width >= 40), `窄窗口按钮被隐藏/压缩：${JSON.stringify(narrow.buttons)}`)
     assert(Math.abs(narrow.buttons[2].right - narrow.titleRight) < 2, `关闭按钮未贴右：${JSON.stringify(narrow)}`)
   })
+  await app.shot('workbench-narrow.png')
   await app.cdp.send('Emulation.clearDeviceMetricsOverride')
 
   await app.evaluate(`document.querySelector('button[aria-label="分析"]')?.click()`)
@@ -56,6 +60,7 @@ try {
   await sleep(100)
   const drawer = await app.evaluate(`document.querySelector('.context-drawer [aria-label="关闭"]') !== null && document.querySelector('.drawer-head strong')?.textContent`)
   check('U8 设置是明确的独立区域', () => assert(drawer === '设置', `设置抽屉未打开：${drawer}`))
+  await app.shot('workbench-settings.png')
 } finally {
   await app.close()
   await origin.close?.()

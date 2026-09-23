@@ -134,6 +134,7 @@ export async function launchApp(options) {
     url,
     dataDir,
     port,
+    executable = null,
     profile = 'L',
     tab = 'list',
     shotDir = null,
@@ -142,8 +143,8 @@ export async function launchApp(options) {
 
   const logFd = openSync(join(dataDir, 'app.log'), 'a')
   const app = spawn(
-    ELECTRON,
-    ['out/main/index.js', '--no-sandbox', `--remote-debugging-port=${port}`],
+    executable ?? ELECTRON,
+    [...(executable ? [] : ['out/main/index.js']), '--no-sandbox', `--remote-debugging-port=${port}`],
     {
       cwd: ROOT,
       stdio: ['ignore', logFd, logFd],

@@ -98,6 +98,7 @@ try {
   const fromMcp = await mcp.call('monitor_auth_ledger', { workspaceId: id })
   check('HTTP and MCP use the same summary', () => assert(JSON.stringify(fromMcp.output) === JSON.stringify(b.body.output), JSON.stringify(fromMcp)))
   await sleep(2300)
+  await app.evaluate("document.querySelector('.workspace-evidence')?.setAttribute('open', '')")
   const ui = await app.evaluate('document.body.innerText')
   check('workspace UI shows verified identity and source', () => assert(ui.includes('已验证 Bob'), ui.slice(0, 400)))
 

@@ -15,6 +15,7 @@ let app
 try {
   app = await launchApp({ url: `http://127.0.0.1:${origin.port}/stream-test.html?mb=${mb}`, dataDir,
     port: Number(process.env['STREAM_BROWSER_CDP_PORT'] ?? 9548),
+    ...(process.env['PACKAGED_APP'] ? { executable: process.env['PACKAGED_APP'] } : {}),
     extraEnv: { MONITOR_CAPTURE_BODIES: '1', MONITOR_PROXY: '1' } })
   await app.waitConnected(1)
   for (let n = 0; n < 600 && !origin.streamReports.length; n += 1) await sleep(200)

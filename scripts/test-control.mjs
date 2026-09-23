@@ -244,9 +244,13 @@ try {
     assert(hostFilter.body?.total > 0, `domain=${hostValue} 查不到：${hostFilter.body?.total}`)
   })
 
-  const searchFilter = await api('GET', '/requests', { query: { q: 'sw-install', limit: 5 } })
+  // 用本轮实际采集到的 host 验证 q 别名。service worker 的 install 请求受
+  // 浏览器缓存/启动时序影响，不保证每轮都会产生，拿它当固定夹具会造成假红。
+  const searchNeedle = hostValue
+  const searchFilter = await api('GET', '/requests', { query: { q: searchNeedle, limit: 5 } })
   check('全文别名 q → search 生效', () => {
-    assert(searchFilter.body?.total > 0, `q=sw-install 查不到：${searchFilter.body?.total}`)
+    assert(typeof searchNeedle === 'string' && searchNeedle.length > 0, `q=${searchNeedle}`)
+    assert(searchFilter.body?.total > 0, `q=${searchNeedle} 查不到：${searchFilter.body?.total}`)
   })
 
   const stats = await api('GET', '/stats')

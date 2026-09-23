@@ -53,12 +53,20 @@ try {
   const target = { kind: 'workspace', workspaceId: 'default' }
   const verified = await action({ action: 'content.verify', target, input: { hash } })
   const range = await action({ action: 'content.readRange', target, input: { hash, start: 1048570, end: 1048590 } })
+  const emptyRange = await action({ action: 'content.readRange', target, input: { hash, start: 17, end: 17 } })
+  const maxRange = await action({ action: 'content.readRange', target, input: { hash, start: 0, end: 1024 * 1024 } })
+  const overLimit = await app.evaluate(`window.monitor.executeAction(${JSON.stringify({ action: 'content.readRange', target, input: { hash, start: 0, end: 1024 * 1024 + 1 } })})`)
   const evidence = await action({ action: 'capture.evidence', target, input: { seq: row.seq } })
   check('大正文可校验、跨块范围读取，并保留请求级采集证据', () => {
     assert(verified.task.state === 'succeeded' && verified.output.valid && verified.output.size === 2 * 1024 * 1024, '完整性校验失败')
     assert(range.output.size === 20 && Buffer.from(range.output.b64, 'base64').every((byte) => byte === 9), '跨块范围返回错误')
     assert(evidence.output.events.some((event) => event.state === 'stored' && event.hash === hash), '缺少成功采集证据')
     assert(manifest.chunkHashes.length === 2 && manifest.chunkHashes[0] === manifest.chunkHashes[1], '重复块未去重')
+  })
+  check('空范围与 1 MiB 上限有确定结果，超过上限明确拒绝', () => {
+    assert(emptyRange.task.state === 'succeeded' && emptyRange.output.size === 0 && emptyRange.output.b64 === '', '空范围读取错误')
+    assert(maxRange.task.state === 'succeeded' && maxRange.output.size === 1024 * 1024, '1 MiB 边界读取错误')
+    assert(overLimit.task.state === 'failed' && overLimit.task.error?.code === 'invalid_action', '超过 1 MiB 未明确拒绝')
   })
   mcp = McpClient.spawn(process.execPath, [join(ROOT, 'mcp', 'server.mjs')], { cwd: ROOT, env: { ...process.env, MONITOR_DATA_DIR: dataDir } })
   await mcp.initialize('content-acceptance')
@@ -78,6 +86,11 @@ try {
       assert(main?.content.bytes >= 2 * 1024 * 1024 && main.capture.captured >= 1, '默认工作区统计缺失')
       assert(empty?.content.objects === 0 && empty.capture.captured === 0, '新工作区统计串入内容')
     }
+  })
+  await app.evaluate("document.querySelector('.workspace-evidence')?.setAttribute('open', '')")
+  const statsUiText = await app.evaluate('document.body.innerText')
+  check('工作区证据区按需展示正文对象、字节与缺口摘要', () => {
+    assert(statsUiText.includes('正文：') && statsUiText.includes('对象') && statsUiText.includes('缺口'), statsUiText.slice(0, 700))
   })
   const chunkPath = join(dataDir, 'content', 'chunks', manifest.chunkHashes[0])
   const originalChunk = readFileSync(chunkPath)

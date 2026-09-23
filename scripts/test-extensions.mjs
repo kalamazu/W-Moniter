@@ -95,6 +95,7 @@ try {
     assert(JSON.stringify(shape(fromMcp.output?.items)) === JSON.stringify(shape(b.body.output?.items)))
   })
   await sleep(2500)
+  await app.evaluate("document.querySelector('.workspace-evidence')?.setAttribute('open', '')")
   const ui = await app.evaluate('document.body.innerText')
   check('UI renders observed B extension', () => assert(ui.includes('2.0.0'), ui.slice(0, 700)))
   await api('POST', `/workspaces/${encodeURIComponent(bId)}/suspend`)

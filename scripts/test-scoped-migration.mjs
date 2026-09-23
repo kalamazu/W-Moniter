@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict'
 import { DatabaseSync } from 'node:sqlite'
 import { spawn } from 'node:child_process'
-import { mkdtempSync, readdirSync, copyFileSync, rmSync, readFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readdirSync, copyFileSync, rmSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -54,6 +54,9 @@ function client() {
 try {
   const path = join(temp, 'legacy.db')
   const old = new DatabaseSync(path)
+  // 保持一个旧库连接存活并关闭自动 checkpoint，让已提交行留在 WAL；迁移入口的
+  // VACUUM INTO 必须把这部分也收入备份，不能只复制主 db 文件。
+  old.exec('PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0')
   old.exec(legacyDDL)
   old.prepare('INSERT INTO meta(k,v) VALUES (?,?)').run('schema_version', '8')
   old.prepare('INSERT INTO instances(started_at) VALUES (?)').run(1)
@@ -63,11 +66,12 @@ try {
     .run('session|example.test', 'session', 'example.test', 'example.test', 1, 1)
   old.prepare('INSERT INTO site_origins(origin,first_seen,updated_at) VALUES (?,?,?)')
     .run('https://example.test', 1, 1)
-  old.close()
+  check('legacy fixture has committed WAL state before migration', () => assert.ok(existsSync(path + '-wal')))
 
   const a = client()
   const opened = await a.send('open', { dbPath: path, config: { workspaceId: 'default', profileId: 'primary' } })
   check('v8→scoped schema open', () => { assert.equal(opened.ok, true); assert.ok(opened.result.schemaVersion >= 9) })
+  old.close()
   const bad = await a.send('queryRequests', { workspaceId: 'other', inst: 1 })
   check('cross-workspace query rejected', () => { assert.equal(bad.ok, false); assert.match(bad.error, /scope mismatch/) })
   const good = await a.send('queryRequests', { workspaceId: 'default', inst: 1 })
