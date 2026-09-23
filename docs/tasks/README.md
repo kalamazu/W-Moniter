@@ -13,11 +13,11 @@
 | [T-002](T-002-persistent-task-journal.md) | 已通过 | 持久任务账本与恢复语义 | M0 §3.2 | Codex | [A-002](../acceptance/A-002-persistent-task-journal.md) |
 | [T-003](T-003-content-store-core.md) | 已通过 | ContentStore 内容寻址与分块写入 | M1 §4 | Codex | [A-003](../acceptance/A-003-content-store-core.md) |
 | [T-004](T-004-body-capture-to-content-store.md) | 已通过 | 响应正文写入 ContentStore | M1 §4 | Codex | [A-004](../acceptance/A-004-body-capture-to-content-store.md) |
-| [T-005](T-005-capture-gap-evidence.md) | 可认领 | 采集缺口、保留策略与证据查询 | M1 §4 | 未认领 | 完成后创建 A-005 |
-| [T-006](T-006-targeted-rule-actions.md) | 可认领 | 规则动作的显式工作区目标 | M0 §3.1 / M2 §5 | 未认领 | 完成后创建 A-006 |
-| [T-007](T-007-task-journal-diagnostics.md) | 可认领 | 任务日志诊断与恢复可见性 | M0 §3.2 | 未认领 | 完成后创建 A-007 |
-| [T-008](T-008-content-integrity-api.md) | 可认领 | ContentStore 完整性与范围读取 API | M1 §4 | 未认领 | 完成后创建 A-008 |
-| [T-009](T-009-content-observability.md) | 可认领 | 内容存储统计与工作区可视化 | M1 / M2 | 未认领 | 完成后创建 A-009 |
+| [T-005](T-005-capture-gap-evidence.md) | 待验收 | 采集缺口、保留策略与证据查询 | M1 §4 | Codex | [A-005](../acceptance/A-005-capture-gap-evidence.md) |
+| [T-006](T-006-targeted-rule-actions.md) | 待验收 | 规则动作的显式工作区目标 | M0 §3.1 / M2 §5 | Codex | [A-006](../acceptance/A-006-targeted-rule-actions.md) |
+| [T-007](T-007-task-journal-diagnostics.md) | 待验收 | 任务日志诊断与恢复可见性 | M0 §3.2 | Codex | [A-007](../acceptance/A-007-task-journal-diagnostics.md) |
+| [T-008](T-008-content-integrity-api.md) | 待验收 | ContentStore 完整性与范围读取 API | M1 §4 | Codex | [A-008](../acceptance/A-008-content-integrity-api.md) |
+| [T-009](T-009-content-observability.md) | 待验收 | 内容存储统计与工作区可视化 | M1 / M2 | Codex | [A-009](../acceptance/A-009-content-observability.md) |
 
 ## 生命周期与规则
 
@@ -30,3 +30,5 @@
 5. 小修复可挂在父任务的 checklist 中；涉及数据模型、跨进程协议、用户流程或验收门槛时必须单列任务卡。
 
 新任务从 [任务模板](TEMPLATE.md) 创建。验收任务放在 `docs/acceptance/`，与实现任务分离。
+
+本轮 T-005～T-009 因共享 ActionRegistry/Controller 使用了集成提交 `94958b0`，只能整体回退，未达到第 3 条的“逐任务独立回退”理想状态。验收前需确认是否接受该批次回退粒度；后续任务应先拆接口再分任务提交。

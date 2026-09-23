@@ -72,6 +72,9 @@ MCP server 的地址发现顺序：
 | GET | `/scripts/:hash` | 脚本源码 |
 | GET | `/console` | 页面 console 回流（最多 500 条） |
 | GET | `/rules` · `/rules/stats` | 规则集 / 命中统计 |
+| GET | `/workspaces/:id/rules` · `/workspaces/:id/capture/summary` · `/workspaces/:id/requests/:seq/body-evidence` | 显式工作区规则与采集证据；返回 ActionResult |
+| GET | `/workspaces/:id/content/:hash/verify` · `/workspaces/:id/content/:hash/range?start=&end=` | 校验与至多 1 MiB 范围读取（base64）；不返回磁盘路径 |
+| GET | `/workspaces/content-stats` · `/tasks/diagnostics` | 各工作区正文/缺口摘要与任务 journal 诊断 |
 | GET | `/instances` · `/sessions` | 实例列表 / 会话视图（含存储分区） |
 | GET | `/dom/tree` · `/dom/inspect` | DOM 树（`nodeId`/`depth`）/ 元素检查（`selector` 或 `nodeId`） |
 | GET | `/events` · `/events/stats` | 事件流水（导航 / console 告警 / 异常 / 下载 / 对话框 / WS 生命周期）与按 kind·level 的计数；`since` 是**自增 id 游标**，拿返回里的 `nextSince` 反复拉就只拿新增 |
@@ -119,7 +122,8 @@ HTTP / MCP 都没有读写路由。它是给坐在屏幕前的人摆的：agent 
 | POST | `/probe` | `{ options? }` 跑检测探针，返回四组报告 |
 | POST | `/input` | `{ kind, … }` 拟人化输入：move / click / type / scroll；`click` / `type` 可只给 `selector`（见 §3.2） |
 | POST | `/dom/highlight` | `{ nodeId, on }` 页面里高亮节点 |
-| POST | `/rules` | 整体写规则集（覆盖式），坏规则返回 `invalid` |
+| POST | `/workspaces/:id/rules` | `{ set: RuleSet, expectedVersion?, idempotencyKey? }`；显式目标覆盖式保存，返回 ActionResult.output.invalid |
+| POST | `/workspaces/:id/content/:hash/revoke` | `{ reason, idempotencyKey? }`；先记录清理意图，再删内容与引用，返回 ActionResult |
 | POST | `/sessions/profile` | `{ profile }` 切 Profile（**收工重启**，不是热切） |
 | POST | `/clear` · `/console/clear` | 清采集缓冲（`/status` 的计数同时归零；库里的历史不动）/ 清 console |
 | POST | `/contracts` | `{ label?, sampleLimit?, domain? }` 给当前接口契约拍快照，回 `{ id, endpoints, truncated }` |
@@ -344,7 +348,7 @@ cookie 罐的 added / changed / removed 与「是谁改的」归因、六个存�
 - **`/evaluate` 只在 Profile L 可用**：H 按 §3.4 的设计不开 `Runtime`，这是故意的（见设计文档 §3.4）。
 - 截图的边界：全页上限 16000px（`clamped`）；`inline` 上限 4MB base64（超出只给路径）；
   元素截图要求节点有布局（`display:none` 不行）。截图**不做像素级比对**，验收比的是「图片头尺寸 = 页面自报尺寸」。
-- 规则写入是覆盖式的（与面板「保存并生效」同一条路径），没有增量 patch 接口。
+- 规则写入是覆盖式的（与面板「保存并生效」同一条路径），没有增量 patch 接口；旧 `POST /rules` 也必须提供 `{ workspaceId, set }`，推荐使用显式工作区路由。
 - **请求头有内核侧盲区**：头走 `Network.*ExtraInfo`，而 Worker / Service Worker 的会话
   根本不发这两个事件（实测：worker 会话只有 `requestWillBeSent` / `responseReceived`），
   所以那些请求的 `req_headers` / `resp_headers` 是 `null`。页面主线程的请求不受影响。

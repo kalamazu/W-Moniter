@@ -215,15 +215,16 @@ async function main() {
 
   const summary = readEnvValue(out.join(''), 'MONITOR_SUMMARY')
   if (summary) {
+    const active = summary.workspaces?.default ?? Object.values(summary.workspaces ?? {})[0] ?? summary
     console.log(
-      `\n采集侧            ${summary.requestCount} 请求 / target ${summary.targets}` +
-        `\n存储侧            写入 ${summary.storage.rowsWritten}，被约束丢 ${summary.storage.rowsIgnored}，` +
-        `队列残留 ${summary.storage.queueDepth}，丢弃 ${summary.storage.droppedRequests}` +
-        `\nbody 采集         pause ${summary.body.paused}，拿到 ${summary.body.captured}` +
-        `，超限 ${summary.body.tooLarge}，流式跳过 ${summary.body.streaming}` +
-        `，超时 ${summary.body.timeouts}，异常 ${summary.body.errors}，未关联 ${summary.body.unmatched}` +
-        `\nbody 关联         重试 ${summary.storage.bodiesRetried}，转收尾 ${summary.storage.bodiesParked}` +
-        `，收尾补上 ${summary.storage.bodiesResolvedAtShutdown}，确认真丢 ${summary.storage.bodiesUnmatched}`
+      `\n采集侧            ${active.requestCount} 请求 / target ${active.targets}` +
+        `\n存储侧            写入 ${active.storage.rowsWritten}，被约束丢 ${active.storage.rowsIgnored}，` +
+        `队列残留 ${active.storage.queueDepth}，丢弃 ${active.storage.droppedRequests}` +
+        `\nbody 采集         pause ${active.body.paused}，拿到 ${active.body.captured}` +
+        `，超限 ${active.body.tooLarge}，流式跳过 ${active.body.streaming}` +
+        `，超时 ${active.body.timeouts}，异常 ${active.body.errors}，未关联 ${active.body.unmatched}` +
+        `\nbody 关联         重试 ${active.storage.bodiesRetried}，转收尾 ${active.storage.bodiesParked}` +
+        `，收尾补上 ${active.storage.bodiesResolvedAtShutdown}，确认真丢 ${active.storage.bodiesUnmatched}`
     )
   }
 
