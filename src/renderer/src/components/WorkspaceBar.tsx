@@ -27,7 +27,7 @@ export function WorkspaceBar({ overview, onChange }: Props): React.JSX.Element |
   const [error, setError] = useState<string | null>(null)
   const [profile, setProfile] = useState<'L' | 'H'>('L')
   const [statsTick, setStatsTick] = useState(0)
-  const [contentStats, setContentStats] = useState<Record<string, { objects: number; bytes: number; gaps: number; lastError?: string }>>({})
+  const [contentStats, setContentStats] = useState<Record<string, { objects: number; bytes: number; gaps: number; lastError?: string; recovered: number; recoveryFailed: number }>>({})
   const [authRows, setAuthRows] = useState<Array<{ origin: string; state: string; account_label: string | null; observed_at: number; source: string }>>([])
   const [extensions, setExtensions] = useState<{ scan: { observed_at: number; reason: string } | null; items: Array<{ extensionId: string; state: string; reasons: string[]; observed: { name: string; version: string | null } | null }> } | null>(null)
 
@@ -61,9 +61,10 @@ export function WorkspaceBar({ overview, onChange }: Props): React.JSX.Element |
     let alive = true
     const refresh = (): void => { void window.monitor.executeAction({ action: 'workspaces.contentStats', input: {}, target: { kind: 'workspace-collection' } }).then((result) => {
       if (!alive || !Array.isArray(result.output)) return
-      const next: Record<string, { objects: number; bytes: number; gaps: number; lastError?: string }> = {}
-      for (const entry of result.output as Array<{ workspaceId: string; content: { objects: number; bytes: number }; capture: { gaps: number; lastError?: string } }>) {
-        next[entry.workspaceId] = { objects: entry.content.objects, bytes: entry.content.bytes, gaps: entry.capture.gaps, lastError: entry.capture.lastError }
+      const next: Record<string, { objects: number; bytes: number; gaps: number; lastError?: string; recovered: number; recoveryFailed: number }> = {}
+      for (const entry of result.output as Array<{ workspaceId: string; content: { objects: number; bytes: number }; capture: { gaps: number; lastError?: string; recovery?: { committed: number; cancelled: number; failed: number } } }>) {
+        next[entry.workspaceId] = { objects: entry.content.objects, bytes: entry.content.bytes, gaps: entry.capture.gaps, lastError: entry.capture.lastError,
+          recovered: (entry.capture.recovery?.committed ?? 0) + (entry.capture.recovery?.cancelled ?? 0), recoveryFailed: entry.capture.recovery?.failed ?? 0 }
       }
       setContentStats(next)
     }).catch(() => undefined) }
@@ -150,7 +151,7 @@ export function WorkspaceBar({ overview, onChange }: Props): React.JSX.Element |
           >
             <span>{workspace.name}</span>
             <small>{workspace.profile} · {STATE_LABEL[workspace.state] ?? workspace.state}</small>
-            {contentStats[workspace.id] && <small title="已存正文对象 / 正文字节 / 采集缺口 / 最近错误">正文 {contentStats[workspace.id].objects} · {Math.round(contentStats[workspace.id].bytes / 1024)} KiB · 缺口 {contentStats[workspace.id].gaps}{contentStats[workspace.id].lastError ? ` · ${contentStats[workspace.id].lastError}` : ''}</small>}
+            {contentStats[workspace.id] && <small title="已存正文对象 / 正文字节 / 采集缺口 / 清理恢复 / 最近错误">正文 {contentStats[workspace.id].objects} · {Math.round(contentStats[workspace.id].bytes / 1024)} KiB · 缺口 {contentStats[workspace.id].gaps} · 恢复 {contentStats[workspace.id].recovered}{contentStats[workspace.id].recoveryFailed ? ` · 恢复失败 ${contentStats[workspace.id].recoveryFailed}` : ''}{contentStats[workspace.id].lastError ? ` · ${contentStats[workspace.id].lastError}` : ''}</small>}
           </button>
         ))}
       </div>

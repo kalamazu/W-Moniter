@@ -24,6 +24,7 @@ export interface CaptureEvidenceSummary {
   lastError?: string
   lastCaptureAt?: number
   chainValid: boolean
+  recovery: { committed: number; cancelled: number; failed: number; lastAt?: number }
 }
 
 export interface PendingRetention {
@@ -80,7 +81,15 @@ export class CaptureEvidenceLedger {
     const { rows, valid } = await this.readRows()
     const latest = new Map<string, CaptureEvidence>()
     for (const item of rows) latest.set(`${item.inst}:${item.seq}`, item)
-    const result: CaptureEvidenceSummary = { captured: 0, gaps: 0, deleted: 0, byReason: {}, chainValid: valid }
+    const result: CaptureEvidenceSummary = { captured: 0, gaps: 0, deleted: 0, byReason: {}, chainValid: valid,
+      recovery: { committed: 0, cancelled: 0, failed: 0 } }
+    for (const item of rows) {
+      if (item.phase !== 'retention' || !item.reason?.includes('启动恢复')) continue
+      if (item.state === 'retention_committed') result.recovery.committed += 1
+      if (item.state === 'retention_cancelled') result.recovery.cancelled += 1
+      if (item.state === 'retention_recovery_failed') result.recovery.failed += 1
+      if (item.state.startsWith('retention_')) result.recovery.lastAt = Math.max(result.recovery.lastAt ?? 0, item.at)
+    }
     for (const item of latest.values()) {
       if (item.state === 'retention_intent' || item.state === 'retention_committed' || item.state === 'retention_cancelled') continue
       result.lastCaptureAt = Math.max(result.lastCaptureAt ?? 0, item.at)

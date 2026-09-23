@@ -43,9 +43,22 @@ async function navigate(dataDir, url) {
   if (!response.ok) throw new Error(`navigate HTTP ${response.status}: ${await response.text()}`)
 }
 
+async function captureSummary(dataDir) {
+  const path = join(dataDir, 'control.json')
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    try {
+      const info = JSON.parse(readFileSync(path, 'utf8'))
+      const response = await fetch(`http://127.0.0.1:${info.port}/workspaces/default/capture/summary`, { headers: { authorization: `Bearer ${info.token}` } })
+      if (response.ok) return response.json()
+    } catch { /* control child may still be restarting with the workspace */ }
+    await sleep(100)
+  }
+  throw new Error('capture summary unavailable')
+}
+
 try {
   const recoveryDir = mkdtempSync(join(tmpdir(), 'monitor-retention-recovery-')); dirs.push(recoveryDir)
-  const interrupted = await open(recoveryDir, 9561, { MONITOR_TEST_RETENTION_FAULT_AT: 'after_content_revoke' })
+  const interrupted = await open(recoveryDir, 9661, { MONITOR_TEST_RETENTION_FAULT_AT: 'after_content_revoke' })
   await navigate(recoveryDir, base)
   const stored = await waitBig(interrupted, 'stored', 2)
   const hash = stored[0].request.body_hash
@@ -57,7 +70,7 @@ try {
     assert(failed.task.state === 'failed' && /after_content_revoke/.test(failed.task.error?.message ?? ''), JSON.stringify(failed))
   })
   await interrupted.close(); running = running.filter(item => item !== interrupted)
-  const resumed = await open(recoveryDir, 9562)
+  const resumed = await open(recoveryDir, 9662)
   const db = new DatabaseSync(join(recoveryDir, 'monitor.db'))
   const originalStates = stored.map(detail => db.prepare('SELECT body_state FROM requests WHERE inst=? AND seq=?').get(detail.request.inst, detail.request.seq))
   db.close()
@@ -68,22 +81,24 @@ try {
     const { digest, ...entry } = row
     return digest === createHash('sha256').update(JSON.stringify(entry)).digest('hex') && (index === 0 ? row.previous === 'genesis' : row.previous === evidenceRows[index - 1].digest)
   })
+  const recoverySummary = await captureSummary(recoveryDir)
   check('重启后幂等补齐共享引用、证据与终态', () => {
     assert(originalStates.length >= 2 && originalStates.every(row => row.body_state === 'retained_deleted'), JSON.stringify(originalStates))
     assert(events.some(row => row.state === 'retained_deleted' && /启动恢复/.test(row.reason ?? '')), JSON.stringify(events))
     assert(byHash.some(row => row.state === 'retention_committed' && /启动恢复/.test(row.reason ?? '')))
     assert(previousValid)
+    assert(recoverySummary.output?.recovery?.committed >= 1, JSON.stringify(recoverySummary))
   })
   await resumed.close(); running = running.filter(item => item !== resumed)
 
   const cancelledDir = mkdtempSync(join(tmpdir(), 'monitor-retention-cancel-')); dirs.push(cancelledDir)
-  const beforeDelete = await open(cancelledDir, 9565, { MONITOR_TEST_RETENTION_FAULT_AT: 'after_intent' })
+  const beforeDelete = await open(cancelledDir, 9665, { MONITOR_TEST_RETENTION_FAULT_AT: 'after_intent' })
   const beforeRow = (await waitBig(beforeDelete))[0]
   const beforeHash = beforeRow.request.body_hash
   const beforeFailed = await beforeDelete.evaluate(`window.monitor.executeAction(${JSON.stringify({ action: 'content.revoke', target: { kind: 'workspace', workspaceId: 'default' }, input: { hash: beforeHash, reason: '意图中断验收' } })})`)
   assert(beforeFailed.task.state === 'failed')
   await beforeDelete.close(); running = running.filter(item => item !== beforeDelete)
-  const afterIntent = await open(cancelledDir, 9566)
+  const afterIntent = await open(cancelledDir, 9666)
   const cancelDb = new DatabaseSync(join(cancelledDir, 'monitor.db'))
   const cancelState = cancelDb.prepare('SELECT body_state FROM requests WHERE inst=? AND seq=?').get(beforeRow.request.inst, beforeRow.request.seq)
   cancelDb.close()
@@ -95,7 +110,7 @@ try {
   await afterIntent.close(); running = running.filter(item => item !== afterIntent)
 
   const timeoutDir = mkdtempSync(join(tmpdir(), 'monitor-body-timeout-')); dirs.push(timeoutDir)
-  const timeoutApp = await open(timeoutDir, 9563, { MONITOR_TEST_BODY_FETCH_TIMEOUT: '1', MONITOR_BODY_TIMEOUT_MS: '20' })
+  const timeoutApp = await open(timeoutDir, 9663, { MONITOR_TEST_BODY_FETCH_TIMEOUT: '1', MONITOR_BODY_TIMEOUT_MS: '20' })
   const timeout = (await waitBig(timeoutApp, 'timeout'))[0]
   const timeoutEvidence = await timeoutApp.evaluate(`window.monitor.executeAction(${JSON.stringify({ action: 'capture.evidence', target: { kind: 'workspace', workspaceId: 'default' }, input: { seq: timeout.request.seq } })})`)
   check('受控 CDP body 超时经真实采集链投影为 timeout 证据', () => {
@@ -104,7 +119,7 @@ try {
   await timeoutApp.close(); running = running.filter(item => item !== timeoutApp)
 
   const failureDir = mkdtempSync(join(tmpdir(), 'monitor-content-failure-')); dirs.push(failureDir)
-  const failureApp = await open(failureDir, 9564, { MONITOR_TEST_CONTENT_PUT_FAIL: '1' })
+  const failureApp = await open(failureDir, 9664, { MONITOR_TEST_CONTENT_PUT_FAIL: '1' })
   const failure = (await waitBig(failureApp, 'content_error'))[0]
   const failureEvidence = await failureApp.evaluate(`window.monitor.executeAction(${JSON.stringify({ action: 'capture.evidence', target: { kind: 'workspace', workspaceId: 'default' }, input: { seq: failure.request.seq } })})`)
   check('内容盘写失败经真实采集链投影为 content_error 证据', () => {
