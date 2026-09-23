@@ -44,10 +44,12 @@ interface Props {
   onLayout: (next: PanelLayout) => void
   renderPanel: (id: PanelId) => React.ReactNode
   onPick: (index: number, id: PanelId) => void
+  activeIndex: number
+  onActivate: (index: number) => void
   onClose: (index: number) => void
 }
 
-export function PaneGrid({ layout, onLayout, renderPanel, onPick, onClose }: Props): React.JSX.Element {
+export function PaneGrid({ layout, onLayout, renderPanel, onPick, activeIndex, onActivate, onClose }: Props): React.JSX.Element {
   const boxRef = useRef<HTMLDivElement | null>(null)
   const paneRefs = useRef<Array<HTMLElement | null>>([])
   const drag = useRef<{ index: number; startPos: number; start: number[]; totalPx: number } | null>(null)
@@ -139,11 +141,12 @@ export function PaneGrid({ layout, onLayout, renderPanel, onPick, onClose }: Pro
             />
           )}
           <section
-            className="pane"
+            className={`pane${activeIndex === index ? ' is-active' : ''}`}
             ref={(el) => {
               paneRefs.current[index] = el
             }}
             style={{ flexGrow: layout.sizes[index] ?? 1, flexBasis: 0 }}
+            onMouseDown={() => onActivate(index)}
           >
             <header className="pane-head">
               <span className="pane-pick-wrap">

@@ -23,6 +23,7 @@
 | [T-012](T-012-streaming-content-service.md) | 待验收 | 流式内容服务第一条纵向链路 | M1 §4 / §10.3 | Codex | [A-012](../acceptance/A-012-streaming-content-service.md) |
 | [T-013](T-013-workspace-auth-ledger.md) | 待验收 | 工作区登录证据台账 | M2 §5 | Codex | [A-013](../acceptance/A-013-workspace-auth-ledger.md) |
 | [T-014](T-014-extension-observation.md) | 待验收 | 插件能力验证与期望/实际对账 | M2 §5 | Codex | [A-014](../acceptance/A-014-extension-observation.md) |
+| [T-015](T-015-workbench-ui.md) | 待验收 | 工作台信息架构与响应式窗口控制 | M2 §5 / M5 §11 | Codex | [A-015](../acceptance/A-015-workbench-ui.md) |
 
 T-010～T-014 已逐项实现、留证并进入独立验收队列；其中 A-014 明列实际启停和完整管理清单的能力缺口，不能把“待验收”理解为已通过。T-005～T-009 的独立验收也仍需补齐。
 

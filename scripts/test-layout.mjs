@@ -52,7 +52,7 @@ const SNAP = `(() => {
   if (!box) return { ok: false, reason: 'no-panes' }
   const panes = Array.from(box.children).filter((el) => el.classList.contains('pane'))
   const rect = box.getBoundingClientRect()
-  const topTabs = Array.from(document.querySelectorAll('.targets .tabs .tab'))
+  const topTabs = Array.from(document.querySelectorAll('[aria-label="布局操作"] .tab'))
   const addBtn = topTabs.find((b) => b.textContent.indexOf('分栏') >= 0)
   return {
     ok: true,
@@ -109,7 +109,7 @@ const DRAG = (splitIndex, dx, dy) => `(async () => {
   return { ok: true, midClass, afterClass: document.body.className }
 })()`
 
-const findTab = (text) => `Array.from(document.querySelectorAll('.targets .tabs .tab')).find((b) => b.textContent.indexOf(${JSON.stringify(text)}) >= 0)`
+const findTab = (text) => `Array.from(document.querySelectorAll('[aria-label="布局操作"] .tab')).find((b) => b.textContent.indexOf(${JSON.stringify(text)}) >= 0)`
 
 /** 顶栏按钮：＋ 分栏 / ⇔ 左右 / ⟲ 复位 */
 const CLICK_TAB = (text) => `(() => {

@@ -10,6 +10,7 @@ interface Props {
   /** 附着的 target 数 / 总数，跟状态灯一起说明「内核现在连上了几个页面」 */
   targets: TargetInfo[]
   onRefresh: () => void
+  onOpenCommand: () => void
   /** 开关窗口吸附（让浏览器贴到控制窗口旁边） */
   onToggleDock: () => void
   /** 换一侧贴。只有吸附着的时候才显示这个按钮 */
@@ -58,6 +59,7 @@ export function TitleBar({
   matched,
   targets,
   onRefresh,
+  onOpenCommand,
   onToggleDock,
   onFlipDock
 }: Props): React.JSX.Element {
@@ -90,6 +92,7 @@ export function TitleBar({
 
   return (
     <header className="titlebar">
+      <div className="tb-content">
       <span className="tb-mark" aria-hidden="true">
         <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" strokeWidth="1.7">
           <rect x="2.6" y="4.4" width="18.8" height="13" rx="2.6" />
@@ -119,6 +122,10 @@ export function TitleBar({
       </div>
 
       <div className="tb-actions">
+        <button type="button" className="tb-btn tb-command" onClick={onOpenCommand} title="命令面板（Ctrl+Shift+P）">
+          <span aria-hidden="true">⌕</span> 命令
+          <kbd>Ctrl Shift P</kbd>
+        </button>
         <button
           type="button"
           className={`tb-btn tb-dock${dockClass}`}
@@ -168,7 +175,7 @@ export function TitleBar({
         </button>
         <button
           type="button"
-          className="tb-btn"
+          className="tb-btn tb-optional"
           onClick={() => void window.monitor.clear()}
           title="清空本次会话的采集缓冲（库里的历史不动）"
         >
@@ -176,12 +183,13 @@ export function TitleBar({
         </button>
         <button
           type="button"
-          className="tb-btn"
+          className="tb-btn tb-optional"
           onClick={() => void window.monitor.openDataDir()}
           title="在资源管理器里打开数据目录"
         >
           数据目录
         </button>
+      </div>
       </div>
 
       <div className="tb-win">

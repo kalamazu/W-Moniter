@@ -151,25 +151,33 @@ export function WorkspaceBar({ overview, onChange }: Props): React.JSX.Element |
           >
             <span>{workspace.name}</span>
             <small>{workspace.profile} · {STATE_LABEL[workspace.state] ?? workspace.state}</small>
-            {contentStats[workspace.id] && <small title="已存正文对象 / 正文字节 / 采集缺口 / 清理恢复 / 最近错误">正文 {contentStats[workspace.id].objects} · {Math.round(contentStats[workspace.id].bytes / 1024)} KiB · 缺口 {contentStats[workspace.id].gaps} · 恢复 {contentStats[workspace.id].recovered}{contentStats[workspace.id].recoveryFailed ? ` · 恢复失败 ${contentStats[workspace.id].recoveryFailed}` : ''}{contentStats[workspace.id].lastError ? ` · ${contentStats[workspace.id].lastError}` : ''}</small>}
           </button>
         ))}
       </div>
       <button type="button" className="workspace-suspend" title="刷新各工作区正文与缺口统计" onClick={() => setStatsTick((value) => value + 1)}>刷新统计</button>
-      {active?.state === 'running' && <div className="workspace-auth" aria-label="登录证据台账">
-        <span>登录证据：</span>
-        {authRows.length ? authRows.slice(0, 3).map(row => <small key={row.origin} title={`${row.origin} · ${row.source} · ${new Date(row.observed_at).toLocaleString()}`}>
-          {new URL(row.origin).host} · {row.state === 'verified' ? `已验证 ${row.account_label ?? ''}` : row.state === 'suspected' ? '有线索，未验证' : row.state === 'stale' ? '待复核' : row.state === 'logged_out' ? '已登出' : '未知'}
-        </small>) : <small>未验证</small>}
-        <button type="button" disabled={busy} onClick={() => void verifyFixture()}>验证受控站点</button>
-      </div>}
-      {active?.state === 'running' && <div className="workspace-auth" aria-label="扩展状态">
-        <span>扩展：</span>
-        {extensions?.items.length ? extensions.items.slice(0, 3).map(item => <small key={item.extensionId}
-          title={`${item.extensionId} · ${item.reasons.join(', ') || '已观察'} · ${extensions.scan ? new Date(extensions.scan.observed_at).toLocaleString() : '未核对'}`}>
-          {item.observed?.name ?? item.extensionId.slice(0, 8)} {item.observed?.version ?? ''} · {item.state === 'drift' ? '漂移' : item.state === 'unknown' ? '未知' : item.state === 'aligned' ? '一致' : '仅观察'}
-        </small>) : <small title={extensions?.scan?.reason ?? '尚未扫描'}>未知（Profile 部分观察）</small>}
-      </div>}
+      {active?.state === 'running' && <details className="workspace-evidence">
+        <summary title="登录、扩展和正文采集证据">证据</summary>
+        <div className="workspace-evidence-popover">
+          <div className="workspace-auth" aria-label="正文采集摘要">
+            <span>正文：</span>
+            <small>{contentStats[active.id] ? `${contentStats[active.id].objects} 对象 · ${Math.round(contentStats[active.id].bytes / 1024)} KiB · 缺口 ${contentStats[active.id].gaps} · 恢复 ${contentStats[active.id].recovered}${contentStats[active.id].recoveryFailed ? ` · 恢复失败 ${contentStats[active.id].recoveryFailed}` : ''}` : '正在读取统计'}</small>
+          </div>
+          <div className="workspace-auth" aria-label="登录证据台账">
+            <span>登录：</span>
+            {authRows.length ? authRows.slice(0, 3).map(row => <small key={row.origin} title={`${row.origin} · ${row.source} · ${new Date(row.observed_at).toLocaleString()}`}>
+              {new URL(row.origin).host} · {row.state === 'verified' ? `已验证 ${row.account_label ?? ''}` : row.state === 'suspected' ? '有线索，未验证' : row.state === 'stale' ? '待复核' : row.state === 'logged_out' ? '已登出' : '未知'}
+            </small>) : <small>未验证</small>}
+            <button type="button" disabled={busy} onClick={() => void verifyFixture()}>验证受控站点</button>
+          </div>
+          <div className="workspace-auth" aria-label="扩展状态">
+            <span>扩展：</span>
+            {extensions?.items.length ? extensions.items.slice(0, 3).map(item => <small key={item.extensionId}
+              title={`${item.extensionId} · ${item.reasons.join(', ') || '已观察'} · ${extensions.scan ? new Date(extensions.scan.observed_at).toLocaleString() : '未核对'}`}>
+              {item.observed?.name ?? item.extensionId.slice(0, 8)} {item.observed?.version ?? ''} · {item.state === 'drift' ? '漂移' : item.state === 'unknown' ? '未知' : item.state === 'aligned' ? '一致' : '仅观察'}
+            </small>) : <small title={extensions?.scan?.reason ?? '尚未扫描'}>未知（Profile 部分观察）</small>}
+          </div>
+        </div>
+      </details>}
       <select
         className="workspace-profile"
         aria-label="新工作区采集 Profile"

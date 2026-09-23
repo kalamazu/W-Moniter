@@ -19,6 +19,9 @@ import { TitleBar } from './components/TitleBar'
 import { Waterfall } from './components/Waterfall'
 import { WsPanel } from './components/WsPanel'
 import { WorkspaceBar } from './components/WorkspaceBar'
+import { CommandPalette, type CommandItem } from './components/CommandPalette'
+import { ContextDrawer } from './components/ContextDrawer'
+import { WorkbenchNav, areaForPanel, type WorkbenchArea } from './components/WorkbenchNav'
 import { buildQuery, formatSize, type UiFilters } from './format'
 import { useRequests } from './hooks/useRequests'
 
@@ -80,6 +83,11 @@ export default function App(): React.JSX.Element {
   // 开局要自动选中的那条请求；选中一次就把针清掉，之后不再干扰用户
   const selectNeedle = useRef(initialSelectNeedle())
   const [layout, setLayout] = useState<PanelLayout>(() => initialLayout())
+  const [activePane, setActivePane] = useState(0)
+  const [workbenchArea, setWorkbenchArea] = useState<WorkbenchArea>(() => areaForPanel(initialLayout().panes[0]))
+  const [sidebarOpen, setSidebarOpen] = useState(true)
+  const [commandOpen, setCommandOpen] = useState(false)
+  const [drawer, setDrawer] = useState<'runtime' | 'settings' | null>(null)
   /** 落盘的布局恢复完了没有 —— 没恢复完别把默认值写回去，否则「上次摆的」会被默认盖掉 */
   const [layoutReady, setLayoutReady] = useState(false)
   const [waterfallLimit, setWaterfallLimit] = useState(2000)
@@ -223,6 +231,42 @@ export default function App(): React.JSX.Element {
 
   const resetLayout = useCallback((): void => setLayout(DEFAULT_LAYOUT), [])
 
+  const openPanel = useCallback((id: PanelId): void => {
+    setLayout((prev) => ({ ...prev, panes: prev.panes.map((panel, index) => index === activePane ? id : panel) }))
+    setWorkbenchArea(areaForPanel(id))
+  }, [activePane])
+
+  // 关闭当前栏或工作区恢复了更少的栏时，焦点必须收敛到仍存在的窗格；否则命令面板会对一个
+  // 已不存在的 index 写入，表面上像是“命令没生效”。
+  useEffect(() => {
+    setActivePane((index) => Math.min(index, Math.max(0, layout.panes.length - 1)))
+  }, [layout.panes.length])
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if ((event.ctrlKey || event.metaKey) && event.shiftKey && event.key.toLowerCase() === 'p') {
+        event.preventDefault()
+        setCommandOpen((open) => !open)
+      }
+      if (event.key === 'Escape') {
+        setCommandOpen(false)
+        setDrawer(null)
+      }
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [])
+
+  const commands = useMemo<CommandItem[]>(() => [
+    ...PANELS.map((panel) => ({ id: `view:${panel.id}`, title: `打开：${panel.label}`, detail: '在当前活动窗格显示', run: () => openPanel(panel.id) })),
+    { id: 'layout:add', title: '工作区：添加分栏', detail: `最多 ${MAX_PANES} 栏`, run: addPane },
+    { id: 'layout:direction', title: '工作区：切换排列方向', detail: '左右排列 / 上下排列', run: flipDir },
+    { id: 'layout:reset', title: '工作区：恢复默认布局', detail: '请求列表 + 请求详情', run: resetLayout },
+    { id: 'runtime', title: '打开：运行时上下文', detail: '查看 targets、连接和当前工作区', run: () => setDrawer('runtime') },
+    { id: 'settings', title: '打开：设置', detail: '查看界面、快捷键和能力边界', run: () => setDrawer('settings') },
+    { id: 'refresh', title: '操作：刷新请求数据', detail: '重新查询当前请求列表', run: requests.refresh }
+  ], [addPane, flipDir, openPanel, requests.refresh, resetLayout])
+
   /** 面板渲染表。详情是独立面板：想「列表 + 详情」就摆两栏，只想看列表就摆一栏 */
   const renderPanel = useCallback(
     (id: PanelId): React.ReactNode => {
@@ -291,6 +335,7 @@ export default function App(): React.JSX.Element {
         matched={requests.total}
         targets={status?.targets ?? []}
         onRefresh={requests.refresh}
+        onOpenCommand={() => setCommandOpen(true)}
         onToggleDock={toggleDock}
         onFlipDock={flipDock}
       />
@@ -311,25 +356,28 @@ export default function App(): React.JSX.Element {
         </div>
       ) : null}
 
-      <div className="targets">
-        <span className="targets-label">target</span>
-        {status?.targets.map((target) => (
-          <span
-            key={target.targetId}
-            className={`chip chip-xs ${target.attached ? 'chip-hot' : 'chip-dim'}`}
-            title={`${target.type} · ${target.url}`}
-          >
-            {target.type}
-            {target.url ? ` ${target.url.replace(/^https?:\/\//, '').slice(0, 28)}` : ''}
-          </span>
-        ))}
-        {status?.targets.length === 0 && <span className="dim small">还没有 target</span>}
-
-        <span className="spacer" />
-
-        <div className="tabs">
+      <div className="workbench">
+        <WorkbenchNav
+          area={workbenchArea}
+          open={sidebarOpen}
+          activePanel={layout.panes[activePane] ?? layout.panes[0]}
+          onArea={setWorkbenchArea}
+          onToggle={() => setSidebarOpen((open) => !open)}
+          onOpenPanel={openPanel}
+          onOpenRuntime={() => setDrawer('runtime')}
+          onOpenSettings={() => setDrawer('settings')}
+        />
+        <main className="workbench-main">
+          <div className="view-context">
+            <button type="button" className="runtime-summary" onClick={() => setDrawer('runtime')} title="查看当前 target、连接和工作区">
+              <span className={`dot dot-${state}`} />
+              运行中 {status?.targets.filter((target) => target.attached).length ?? 0}/{status?.targets.length ?? 0} targets
+            </button>
+            <span className="view-context-title">{PANELS.find((panel) => panel.id === (layout.panes[activePane] ?? layout.panes[0]))?.label ?? '工作区'}</span>
+            <span className="spacer" />
+            <div className="tabs tabs-sm" aria-label="布局操作">
           <button type="button" className="tab" onClick={addPane} disabled={layout.panes.length >= MAX_PANES} title={`再加一栏（最多 ${MAX_PANES} 栏）`}>
-            ＋ 分栏
+              ＋ 分栏
           </button>
           <button type="button" className="tab" onClick={flipDir} title="各栏左右排 / 上下排">
             {layout.dir === 'row' ? '⇔ 左右' : '⇕ 上下'}
@@ -338,7 +386,7 @@ export default function App(): React.JSX.Element {
             ⟲ 复位
           </button>
         </div>
-      </div>
+          </div>
 
       {(layout.panes.includes('list') || layout.panes.includes('waterfall')) && (
       <div className="toolbar">
@@ -406,10 +454,20 @@ export default function App(): React.JSX.Element {
       <PaneGrid
         layout={layout}
         onLayout={setLayout}
-        onPick={pickPanel}
-        onClose={closePane}
+        onPick={(index, id) => { setActivePane(index); pickPanel(index, id); setWorkbenchArea(areaForPanel(id)) }}
+        activeIndex={activePane}
+        onActivate={setActivePane}
+        onClose={(index) => {
+          setActivePane((current) => {
+            const nextCount = Math.max(1, layout.panes.length - 1)
+            return current > index ? current - 1 : Math.min(current, nextCount - 1)
+          })
+          closePane(index)
+        }}
         renderPanel={renderPanel}
       />
+        </main>
+      </div>
 
       <footer className="foot">
         <span className="mono dim">{status?.browserPath ?? '未找到内核'}</span>
@@ -428,6 +486,8 @@ export default function App(): React.JSX.Element {
           </span>
         )}
       </footer>
+      <CommandPalette open={commandOpen} items={commands} onClose={() => setCommandOpen(false)} />
+      <ContextDrawer mode={drawer} status={status} state={state} workspaces={workspaces} onClose={() => setDrawer(null)} />
     </div>
   )
 }
