@@ -1,11 +1,11 @@
 # T-011：工作区元数据归属与范围校验迁移
 
-- 状态：可认领
+- 状态：待验收
 - 蓝图映射：M2 §5、§10.2；E06
 - 优先级：P0
-- 认领：未认领
-- 基线 commit：待认领时填写
-- 验收：A-011（实现完成后创建）
+- 认领：Codex · 2026-09-23
+- 基线 commit：`7186ca2`
+- 验收：[A-011](../acceptance/A-011-scoped-metadata-migration.md)
 
 ## 背景与目标
 
@@ -31,6 +31,8 @@
 
 ## 完成记录
 
-- 实现 commit：待填写（本任务独立提交）。
-- 修改文件、测试命令与结果、已知限制：待填写。
+- 实现 commit：`faba1d7`（本任务独立提交）。
+- 修改文件：`storage/migrations/009-scope.mjs`、`storage/server.mjs`、`src/main/storage/client.ts`、`src/main/controller.ts`、`src/main/index.ts`、`scripts/test-scoped-migration.mjs`、`package.json`、[ADR-0004](../adr/0004-scoped-metadata.md)。
+- 验证：`test:scoped-migration` 12/12，`test:storage` 54/54，`test:workspaces` 7/7，`test:sitedata` 30/30，`test:control` 33/33；`typecheck` 与 `build` 通过。
+- 已知限制：仍为每工作区单库；旧 `inst/seq` 只在库内唯一；没有合库级联合主键；已迁移的数据不能用 Git 回滚，须用 `.pre-v9-*.bak` 恢复。
 - 回滚：`git revert <本任务提交>` 仅回退代码；已迁移用户库须按迁移备份/回退规程处理，不用 Git 操作回滚数据。
