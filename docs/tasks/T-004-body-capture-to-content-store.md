@@ -1,6 +1,6 @@
 # T-004：响应正文写入 ContentStore
 
-状态：可认领
+状态：已通过
 蓝图映射：M1 §4
 优先级：P0
 依赖：T-003
@@ -15,3 +15,10 @@
 - 采集失败写入明确 capture-gap，不能伪装为无正文。
 - 旧 body 读取接口在兼容期可读取新引用。
 - A-004 覆盖大正文、二进制和失败路径。
+
+## 完成记录
+
+- 认领：Codex · 2026-09-23；基线：`1c36c1d`。
+- 实现：Fetch 正文不再因声明大小超过旧上限跳过；正文写入 ContentStore，SQLite 记录 body hash 引用，读取接口兼容返回内容库字节。
+- 实现 commit：`2014701`；回滚：`git revert 2014701`。
+- 验证：`npm run test:content`（2MiB 二进制完整读取）、`npm run typecheck`。

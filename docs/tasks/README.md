@@ -10,9 +10,9 @@
 | --- | --- | --- | --- | --- | --- |
 | [T-000](T-000-workspace-core.md) | 已通过 | 工作区 Core：隔离、并发、焦点、休眠 | M0 / M2 | 已完成 | [A-000](../acceptance/A-000-workspace-core.md) |
 | [T-001](T-001-action-task-contract.md) | 已通过 | 统一身份、动作与任务契约 | M0 §3.1 / §3.2 | Codex | [A-001](../acceptance/A-001-action-task-contract.md) |
-| [T-002](T-002-persistent-task-journal.md) | 可认领 | 持久任务账本与恢复语义 | M0 §3.2 | 未认领 | 完成后创建 A-002 |
-| [T-003](T-003-content-store-core.md) | 可认领 | ContentStore 内容寻址与分块写入 | M1 §4 | 未认领 | 完成后创建 A-003 |
-| [T-004](T-004-body-capture-to-content-store.md) | 可认领 | 响应正文写入 ContentStore | M1 §4 | 未认领 | 完成后创建 A-004 |
+| [T-002](T-002-persistent-task-journal.md) | 已通过 | 持久任务账本与恢复语义 | M0 §3.2 | Codex | [A-002](../acceptance/A-002-persistent-task-journal.md) |
+| [T-003](T-003-content-store-core.md) | 已通过 | ContentStore 内容寻址与分块写入 | M1 §4 | Codex | [A-003](../acceptance/A-003-content-store-core.md) |
+| [T-004](T-004-body-capture-to-content-store.md) | 已通过 | 响应正文写入 ContentStore | M1 §4 | Codex | [A-004](../acceptance/A-004-body-capture-to-content-store.md) |
 | [T-005](T-005-capture-gap-evidence.md) | 可认领 | 采集缺口、保留策略与证据查询 | M1 §4 | 未认领 | 完成后创建 A-005 |
 | [T-006](T-006-targeted-rule-actions.md) | 可认领 | 规则动作的显式工作区目标 | M0 §3.1 / M2 §5 | 未认领 | 完成后创建 A-006 |
 
