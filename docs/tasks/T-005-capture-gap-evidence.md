@@ -1,6 +1,6 @@
 # T-005：采集缺口、保留策略与证据查询
 
-状态：待验收
+状态：返工
 认领：Codex · 2026-09-23
 基线 commit：`80a3cce`
 蓝图映射：M1 §4
@@ -22,4 +22,4 @@
 
 实现提交：`94958b0`（T-005～T-009 共用集成提交）。`CaptureEvidenceLedger` 按请求记录采集成功、失败及显式清理原因；`content.revoke` 对账引用后删除 manifest 和无引用块，更新请求状态。UI/HTTP/MCP 可查请求证据及汇总；休眠工作区仍可查账本事件。
 
-自动验证：`npm run test:actions` 13/13、`npm run test:content` 7/7。独立验收见 [A-005](../acceptance/A-005-capture-gap-evidence.md)。自动 TTL/配额清理不在本任务，见 ADR-0002。
+自动验证：`npm run test:actions` 13/13、`npm run test:content` 7/7。独立验收见 [A-005](../acceptance/A-005-capture-gap-evidence.md)。自动 TTL/配额清理不在本任务，见 ADR-0002。独立验收于 2026-09-23 判定返工：正常路径测试通过，但 retention 中断后没有恢复/对账机制，且未做真实 CDP 超时和内容盘写失败的端到端故障注入；修复条件见 A-005。
