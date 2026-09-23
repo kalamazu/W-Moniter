@@ -1,4 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto'
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { dirname } from 'node:path'
 import {
   ActionError,
   RemoteEffectUnknownError,
@@ -29,6 +31,12 @@ interface StoredTask {
 export class TaskService {
   private readonly tasks = new Map<string, StoredTask>()
   private readonly idempotency = new Map<string, string>()
+  private readonly journalPath?: string
+
+  constructor(options: { journalPath?: string } = {}) {
+    this.journalPath = options.journalPath
+    this.restore()
+  }
 
   async execute<I, O>(request: ActionRequest<I>, handler: ActionHandler<I, O>): Promise<ActionResult<O>> {
     const inputHash = hash({ input: request.input, target: request.target })
@@ -58,6 +66,7 @@ export class TaskService {
     const stored: StoredTask = { snapshot, inputHash, controller: new AbortController(), output: null, completed: false }
     this.tasks.set(snapshot.id, stored)
     if (idempotencyKey) this.idempotency.set(`${request.action}:${idempotencyKey}`, snapshot.id)
+    this.persist()
 
     if (stored.controller.signal.aborted) return this.finishCanceled<O>(stored)
     snapshot.state = 'running'
@@ -69,6 +78,7 @@ export class TaskService {
       snapshot.state = 'succeeded'
       snapshot.finishedAt = Date.now()
       stored.completed = true
+      this.persist()
       return { task: copy(snapshot), output }
     } catch (error) {
       snapshot.finishedAt = Date.now()
@@ -84,6 +94,7 @@ export class TaskService {
           message: error instanceof Error ? error.message : String(error)
         }
       }
+      this.persist()
       return { task: copy(snapshot), output: null }
     }
   }
@@ -98,6 +109,7 @@ export class TaskService {
       stored.snapshot.error = { code: 'task_canceled', message: '任务已取消' }
       stored.completed = true
     }
+    this.persist()
     return copy(stored.snapshot)
   }
 
@@ -111,7 +123,38 @@ export class TaskService {
     stored.snapshot.finishedAt = Date.now()
     stored.snapshot.error = { code: 'task_canceled', message: '任务已取消' }
     stored.completed = true
+    this.persist()
     return { task: copy(stored.snapshot), output: null }
+  }
+
+  private restore(): void {
+    if (!this.journalPath || !existsSync(this.journalPath)) return
+    try {
+      const stored = JSON.parse(readFileSync(this.journalPath, 'utf8')) as Array<{ snapshot: TaskSnapshot; output: unknown | null }>
+      for (const entry of stored) {
+        const snapshot = copy(entry.snapshot)
+        if (snapshot.state === 'queued' || snapshot.state === 'running') {
+          snapshot.state = 'unknown'
+          snapshot.finishedAt = Date.now()
+          snapshot.error = { code: 'effect_unknown', message: '应用重启时任务尚未完成；远端效果未知' }
+        }
+        const task: StoredTask = { snapshot, inputHash: snapshot.inputHash, controller: new AbortController(), output: entry.output ?? null, completed: true }
+        this.tasks.set(snapshot.id, task)
+        if (snapshot.idempotencyKey) this.idempotency.set(`${snapshot.action}:${snapshot.idempotencyKey}`, snapshot.id)
+      }
+      this.persist()
+    } catch {
+      // 损坏日志不能阻止浏览器启动；下一次写入会用有效快照覆盖它。
+    }
+  }
+
+  private persist(): void {
+    if (!this.journalPath) return
+    mkdirSync(dirname(this.journalPath), { recursive: true })
+    const rows = [...this.tasks.values()].map((item) => ({ snapshot: item.snapshot, output: item.output }))
+    const temporary = `${this.journalPath}.${process.pid}.tmp`
+    writeFileSync(temporary, JSON.stringify(rows) + '\n', 'utf8')
+    renameSync(temporary, this.journalPath)
   }
 }
 

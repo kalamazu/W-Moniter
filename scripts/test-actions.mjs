@@ -110,6 +110,14 @@ try {
     assert(unknown.task.state === 'unknown' && unknown.task.error?.code === 'effect_unknown', 'unknown 状态或错误码不正确')
     assert(canceled.state === 'canceled' && canceledResult.task.state === 'canceled', '取消没有稳定落为 canceled')
   })
+  const journal = join(taskBuildDir, 'journal.json')
+  const persisted = new TaskService({ journalPath: journal })
+  const first = await persisted.execute({ action: 'test.persist', input: { n: 1 }, idempotencyKey: 'persist-key' }, async () => ({ ok: true }))
+  const restarted = new TaskService({ journalPath: journal })
+  const replay = await restarted.execute({ action: 'test.persist', input: { n: 1 }, idempotencyKey: 'persist-key' }, async () => { throw new Error('不应重复执行') })
+  check('任务账本重启后保留幂等结果', () => {
+    assert(first.task.id === replay.task.id && replay.task.state === 'succeeded', '重启后没有复用持久任务')
+  })
   rmSync(taskBuildDir, { recursive: true, force: true })
 } catch (error) {
   check('统一动作协议端到端流程', () => { throw error })

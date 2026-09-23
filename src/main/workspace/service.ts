@@ -18,6 +18,7 @@ interface WorkspaceStore {
 export interface WorkspaceRuntimePaths {
   profileDir: string
   dbPath: string
+  contentDir: string
   downloadDir: string
   rulesPath: string
   uiSettingsPath: string
@@ -186,6 +187,7 @@ export class WorkspaceService {
     return {
       profileDir: join(workspaceDir, 'browser-profile'),
       dbPath: join(workspaceDir, 'monitor.db'),
+      contentDir: join(workspaceDir, 'content'),
       downloadDir: join(workspaceDir, 'downloads'),
       rulesPath: join(workspaceDir, 'rules.json'),
       uiSettingsPath: join(workspaceDir, 'ui-settings.json')

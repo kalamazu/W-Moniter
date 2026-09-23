@@ -57,6 +57,7 @@ interface PendingBody {
   bytes: Uint8Array
   trunc: boolean
 }
+interface PendingContentRef { seq: number; hash: string; size: number; trunc: boolean }
 
 interface PendingUpdate {
   seq: number
@@ -191,6 +192,7 @@ export class StorageClient extends EventEmitter {
 
   private readonly requestQueue: RequestRecord[] = []
   private readonly bodyQueue: PendingBody[] = []
+  private readonly contentRefQueue: PendingContentRef[] = []
   private readonly updateQueue: PendingUpdate[] = []
   private readonly scriptQueue: ScriptRecord[] = []
   private readonly eventQueue: MonitoredEvent[] = []
@@ -249,6 +251,7 @@ export class StorageClient extends EventEmitter {
       queueDepth:
         this.requestQueue.length +
         this.bodyQueue.length +
+        this.contentRefQueue.length +
         this.updateQueue.length +
         this.parkedUpdates.length
     }
@@ -388,6 +391,13 @@ export class StorageClient extends EventEmitter {
     })
   }
 
+  /** ContentStore 已提交后只把引用交给 SQLite，正文绝不再经 NDJSON/base64 复制。 */
+  appendContentBody(seq: number, hash: string, size: number, trunc: boolean): void {
+    if (!this.health.enabled) return
+    this.contentRefQueue.push({ seq, hash, size, trunc })
+    this.pushUpdate({ seq, state: 'stored', size, hash, trunc })
+  }
+
   /**
    * 脚本入库。和请求一样只入队 —— 采集回调路径上不做任何 IO。
    * 源码可能很大，所以队列有上限，超了丢最旧的并计数。
@@ -475,6 +485,7 @@ export class StorageClient extends EventEmitter {
     if (
       this.requestQueue.length === 0 &&
       this.bodyQueue.length === 0 &&
+      this.contentRefQueue.length === 0 &&
       this.scriptQueue.length === 0 &&
       this.eventQueue.length === 0 &&
       this.wsQueue.length === 0 &&
@@ -568,6 +579,13 @@ export class StorageClient extends EventEmitter {
         this.health.bodiesSkipped += result.skipped
       }
 
+      while (this.contentRefQueue.length > 0) {
+        const batch = this.contentRefQueue.slice(0, BODY_BATCH)
+        await this.call('appendBodyRefs', { inst: this.inst, items: batch })
+        this.contentRefQueue.splice(0, batch.length)
+        this.health.bodiesReferenced += batch.length
+      }
+
       // 注意：这里是 if 不是 while。用 while 会把重试塞回队列后
       // 立刻又取出来，20 次重试在同一轮里烧完 —— 等于没重试。
       // 每轮 flush 只处理一批，重试自然跨轮发生。
@@ -649,7 +667,7 @@ export class StorageClient extends EventEmitter {
     // 三个队列都要看 —— 只看前两个会把 body 关联留在队列里烂掉。
     const deadline = Date.now() + 5000
     const pending = (): number =>
-      this.requestQueue.length + this.bodyQueue.length + this.updateQueue.length
+      this.requestQueue.length + this.bodyQueue.length + this.contentRefQueue.length + this.updateQueue.length
     while (Date.now() < deadline && pending() > 0) {
       await this.flush()
       if (pending() === 0) break

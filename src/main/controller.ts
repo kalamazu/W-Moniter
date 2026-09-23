@@ -3,6 +3,7 @@ import type { ChildProcess } from 'node:child_process'
 import { mkdirSync, readdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
 import { join } from 'node:path'
+import { ContentStore } from './content/store'
 import { CdpClient } from './browser/cdp'
 import { Collector } from './browser/collector'
 import { launchBrowser } from './browser/launch'
@@ -141,6 +142,7 @@ export interface ControllerOptions {
   headless: boolean
   extraArgs?: string[]
   dbPath: string
+  contentDir: string
   captureBodies: boolean
   /** 下载落盘目录（默认 <数据目录>/downloads）。设空串就交回浏览器默认行为 */
   downloadDir?: string
@@ -220,6 +222,7 @@ export class Controller extends EventEmitter {
 
   private consoleSnapshot: ConsoleEntry[] = []
   private storage: StorageClient
+  private readonly content: ContentStore
   /** P5：本地代理 + 三源关联。代理没开时两者都是空的 */
   private proxy: ProxyClient | null = null
   /**
@@ -268,6 +271,7 @@ export class Controller extends EventEmitter {
   constructor(private readonly options: ControllerOptions) {
     super()
     this.profile = options.profile
+    this.content = new ContentStore(options.contentDir)
 
     const storageConfig: StorageConfig = {
       dbPath: options.dbPath,
@@ -1142,7 +1146,12 @@ export class Controller extends EventEmitter {
 
   private onBody(body: CapturedBody): void {
     if (body.bytes && body.bytes.byteLength > 0) {
-      this.storage.appendBody(body.seq, body.bytes, false)
+      void this.content.put(body.bytes).then((ref) => {
+        this.storage.appendContentBody(body.seq, ref.hash, ref.size, false)
+      }).catch((error) => {
+        this.storage.markBody(body.seq, 'content_error', body.bytes?.byteLength ?? 0)
+        this.emit('log', `[content] 正文落盘失败 seq=${body.seq}: ${(error as Error).message}`)
+      })
       return
     }
     // 拿不到 body 的情况也必须留痕，否则「没有 body」和「没采到」分不清
@@ -1208,9 +1217,13 @@ export class Controller extends EventEmitter {
   }
 
   async getBody(hash: string, withData: boolean): Promise<BodyPayload | null> {
-    if (!this.storage.isEnabled()) return null
     try {
-      return (await this.storage.call('getBody', { hash, withData })) as BodyPayload | null
+      const fromDb = this.storage.isEnabled()
+        ? (await this.storage.call('getBody', { hash, withData: false })) as BodyPayload | null
+        : null
+      const bytes = withData ? await this.content.get(hash) : null
+      if (bytes) return { hash, size: bytes.byteLength, stored: true, trunc: false, b64: Buffer.from(bytes).toString('base64') }
+      return fromDb
     } catch {
       return null
     }

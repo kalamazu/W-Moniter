@@ -725,6 +725,24 @@ function appendBodies(inst, items) {
   return { stored, referenced, skipped, evicted }
 }
 
+/** ContentStore 已经原子提交过的正文：SQLite 只登记引用，不接收 BLOB。 */
+function appendBodyRefs(inst, items) {
+  const now = Date.now()
+  db.exec('BEGIN')
+  try {
+    for (const item of items) {
+      if (!item?.hash) continue
+      // stored=1 表示正文由受信任内容库持有；blob=null 是刻意的，不是丢失。
+      S.upsertBodyNew.run(String(item.hash), Number(item.size ?? 0), item.trunc ? 1 : 0, null, now, now)
+    }
+    db.exec('COMMIT')
+  } catch (err) {
+    db.exec('ROLLBACK')
+    throw err
+  }
+  return { referenced: items.length }
+}
+
 /** LRU：先按条数，再按字节数，把最久没被引用的 blob 降级成 hash-only */
 function enforceBodyBudget() {
   let evicted = 0
@@ -3224,6 +3242,9 @@ const OPS = {
 
   appendBodies(args) {
     return appendBodies(args.inst, args.items || [])
+  },
+  appendBodyRefs(args) {
+    return appendBodyRefs(args.inst, args.items || [])
   },
 
   setRequestBodies(args) {

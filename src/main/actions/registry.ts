@@ -22,14 +22,16 @@ const DESCRIPTORS: Record<WorkspaceAction, ActionDescriptor> = {
 
 /** 统一注册表的第一个垂直切片；其它领域服务以后按同样方式注册。 */
 export class WorkspaceActionRegistry {
-  private readonly tasks = new TaskService()
+  private readonly tasks: TaskService
   private readonly policy = new ActionPolicy()
   private readonly targets: WorkspaceTargetResolver
 
   constructor(
     private readonly workspaces: WorkspaceService,
-    private readonly runtime: WorkspaceActionRuntime
+    private readonly runtime: WorkspaceActionRuntime,
+    options: { journalPath?: string } = {}
   ) {
+    this.tasks = new TaskService(options)
     this.targets = new WorkspaceTargetResolver(workspaces)
   }
 

@@ -509,7 +509,15 @@ export class BodyCapture {
     this.inFlight += 1
 
     try {
-      const seq = p.networkId ? this.resolveSeq(sessionId, p.networkId) : undefined
+      let seq = p.networkId ? this.resolveSeq(sessionId, p.networkId) : undefined
+      // Fetch Response 事件偶尔先于 Network.responseReceived；短暂等待关联索引，
+      // 不能把这种正常乱序误记为 unmatched 并丢掉正文。
+      if (seq === undefined && p.networkId) {
+        for (let attempt = 0; attempt < 20 && seq === undefined; attempt += 1) {
+          await sleep(10)
+          seq = this.resolveSeq(sessionId, p.networkId)
+        }
+      }
 
       // responseStatusCode 缺席 ≠ 已经到响应了：连接失败走的是 responseErrorReason
       if (!p.responseErrorReason && p.responseStatusCode === undefined) {
@@ -530,7 +538,8 @@ export class BodyCapture {
       const mimeType = headerValue(p.responseHeaders, 'content-type')
       const bodyless = isBodyless(status)
       const streaming = looksStreaming(mimeType)
-      const tooLarge = declared !== null && declared > this.config.maxBytes
+      // 正文大小不再决定是否采集：ContentStore 分块落盘，展示和保留才另设上限。
+      const tooLarge = false
 
       // 三种用途共用这一次管道往返：存 body、rewriteBody 要 body、
       // 改响应头要重发响应（也得有 body）
@@ -588,12 +597,6 @@ export class BodyCapture {
     if (isBodyless(status)) {
       this.stats.empty += 1
       this.onBody({ seq, bytes: null, state: 'empty', size: 0 })
-      return
-    }
-
-    if (declared !== null && declared > this.config.maxBytes) {
-      this.stats.tooLarge += 1
-      this.onBody({ seq, bytes: null, state: 'too_large', size: 0, declaredSize: declared })
       return
     }
 

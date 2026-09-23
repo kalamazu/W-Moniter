@@ -160,6 +160,7 @@ let activeWorkspace: WorkspaceSummary | null = null
 function currentWorkspacePaths(): {
   profileDir: string
   dbPath: string
+  contentDir: string
   downloadDir: string
   rulesPath: string
   uiSettingsPath: string
@@ -179,6 +180,7 @@ function createControllerForWorkspace(workspace: WorkspaceSummary): Controller {
     profile: workspace.profile,
     headless: HEADLESS,
     dbPath: paths.dbPath,
+    contentDir: paths.contentDir,
     downloadDir: paths.downloadDir,
     captureBodies: CAPTURE_BODIES,
     bodyMaxBytes: BODY_MAX_BYTES,
@@ -898,6 +900,7 @@ app.whenReady().then(async () => {
     legacy: {
       profileDir: PROFILE_DIR,
       dbPath: DB_PATH,
+      contentDir: join(DATA_DIR, 'content'),
       downloadDir: DOWNLOAD_DIR,
       rulesPath: RULES_PATH,
       uiSettingsPath: SETTINGS_PATH
@@ -909,7 +912,7 @@ app.whenReady().then(async () => {
     create: createWorkspace,
     open: openWorkspace,
     suspend: suspendWorkspace
-  })
+  }, { journalPath: join(DATA_DIR, 'tasks', 'journal.json') })
   activeWorkspace = workspaceService.active()
   await openWorkspace(activeWorkspace.id)
 
