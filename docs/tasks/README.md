@@ -15,6 +15,9 @@
 | [T-004](T-004-body-capture-to-content-store.md) | 已通过 | 响应正文写入 ContentStore | M1 §4 | Codex | [A-004](../acceptance/A-004-body-capture-to-content-store.md) |
 | [T-005](T-005-capture-gap-evidence.md) | 可认领 | 采集缺口、保留策略与证据查询 | M1 §4 | 未认领 | 完成后创建 A-005 |
 | [T-006](T-006-targeted-rule-actions.md) | 可认领 | 规则动作的显式工作区目标 | M0 §3.1 / M2 §5 | 未认领 | 完成后创建 A-006 |
+| [T-007](T-007-task-journal-diagnostics.md) | 可认领 | 任务日志诊断与恢复可见性 | M0 §3.2 | 未认领 | 完成后创建 A-007 |
+| [T-008](T-008-content-integrity-api.md) | 可认领 | ContentStore 完整性与范围读取 API | M1 §4 | 未认领 | 完成后创建 A-008 |
+| [T-009](T-009-content-observability.md) | 可认领 | 内容存储统计与工作区可视化 | M1 / M2 | 未认领 | 完成后创建 A-009 |
 
 ## 生命周期与规则
 
