@@ -14,18 +14,18 @@
 | [T-003](T-003-content-store-core.md) | 已通过 | ContentStore 内容寻址与分块写入 | M1 §4 | Codex | [A-003](../acceptance/A-003-content-store-core.md) |
 | [T-004](T-004-body-capture-to-content-store.md) | 已通过 | 响应正文写入 ContentStore | M1 §4 | Codex | [A-004](../acceptance/A-004-body-capture-to-content-store.md) |
 | [T-005](T-005-capture-gap-evidence.md) | 已通过 | 采集缺口、保留策略与证据查询 | M1 §4 | Codex | [A-005](../acceptance/A-005-capture-gap-evidence.md) |
-| [T-006](T-006-targeted-rule-actions.md) | 待验收 | 规则动作的显式工作区目标 | M0 §3.1 / M2 §5 | Codex | [A-006](../acceptance/A-006-targeted-rule-actions.md) |
-| [T-007](T-007-task-journal-diagnostics.md) | 待验收 | 任务日志诊断与恢复可见性 | M0 §3.2 | Codex | [A-007](../acceptance/A-007-task-journal-diagnostics.md) |
-| [T-008](T-008-content-integrity-api.md) | 待验收 | ContentStore 完整性与范围读取 API | M1 §4 | Codex | [A-008](../acceptance/A-008-content-integrity-api.md) |
-| [T-009](T-009-content-observability.md) | 待验收 | 内容存储统计与工作区可视化 | M1 / M2 | Codex | [A-009](../acceptance/A-009-content-observability.md) |
-| [T-010](T-010-capture-coverage-probe.md) | 待验收 | 全量采集路径与缺口真值矩阵 | M1 §4.2 | Codex | [A-010](../acceptance/A-010-capture-coverage-probe.md) |
-| [T-011](T-011-scoped-metadata-migration.md) | 待验收 | 工作区元数据归属与范围校验迁移 | M2 §5 / §10.2 | Codex | [A-011](../acceptance/A-011-scoped-metadata-migration.md) |
-| [T-012](T-012-streaming-content-service.md) | 待验收 | 流式内容服务第一条纵向链路 | M1 §4 / §10.3 | Codex | [A-012](../acceptance/A-012-streaming-content-service.md) |
-| [T-013](T-013-workspace-auth-ledger.md) | 待验收 | 工作区登录证据台账 | M2 §5 | Codex | [A-013](../acceptance/A-013-workspace-auth-ledger.md) |
-| [T-014](T-014-extension-observation.md) | 待验收 | 插件能力验证与期望/实际对账 | M2 §5 | Codex | [A-014](../acceptance/A-014-extension-observation.md) |
-| [T-015](T-015-workbench-ui.md) | 待验收 | 工作台信息架构与响应式窗口控制 | M2 §5 / M5 §11 | Codex | [A-015](../acceptance/A-015-workbench-ui.md) |
+| [T-006](T-006-targeted-rule-actions.md) | 已通过 | 规则动作的显式工作区目标 | M0 §3.1 / M2 §5 | Codex | [A-006](../acceptance/A-006-targeted-rule-actions.md) |
+| [T-007](T-007-task-journal-diagnostics.md) | 已通过 | 任务日志诊断与恢复可见性 | M0 §3.2 | Codex | [A-007](../acceptance/A-007-task-journal-diagnostics.md) |
+| [T-008](T-008-content-integrity-api.md) | 已通过 | ContentStore 完整性与范围读取 API | M1 §4 | Codex | [A-008](../acceptance/A-008-content-integrity-api.md) |
+| [T-009](T-009-content-observability.md) | 已通过 | 内容存储统计与工作区可视化 | M1 / M2 | Codex | [A-009](../acceptance/A-009-content-observability.md) |
+| [T-010](T-010-capture-coverage-probe.md) | 已通过 | 全量采集路径与缺口真值矩阵 | M1 §4.2 | Codex | [A-010](../acceptance/A-010-capture-coverage-probe.md) |
+| [T-011](T-011-scoped-metadata-migration.md) | 已通过 | 工作区元数据归属与范围校验迁移 | M2 §5 / §10.2 | Codex | [A-011](../acceptance/A-011-scoped-metadata-migration.md) |
+| [T-012](T-012-streaming-content-service.md) | 已通过 | 流式内容服务第一条纵向链路 | M1 §4 / §10.3 | Codex | [A-012](../acceptance/A-012-streaming-content-service.md) |
+| [T-013](T-013-workspace-auth-ledger.md) | 已通过 | 工作区登录证据台账 | M2 §5 | Codex | [A-013](../acceptance/A-013-workspace-auth-ledger.md) |
+| [T-014](T-014-extension-observation.md) | 返工 | 插件能力验证与期望/实际对账 | M2 §5 | Codex | [A-014](../acceptance/A-014-extension-observation.md) |
+| [T-015](T-015-workbench-ui.md) | 已通过 | 工作台信息架构与响应式窗口控制 | M2 §5 / M5 §11 | Codex | [A-015](../acceptance/A-015-workbench-ui.md) |
 
-T-010～T-014 已逐项实现、留证并进入独立验收队列；其中 A-014 明列实际启停和完整管理清单的能力缺口，不能把“待验收”理解为已通过。T-005～T-009 的独立验收也仍需补齐。
+2026-09-24 已完成 T-006～T-015 独立验收：T-006～T-013 与 T-015 通过；T-014 因没有实际执行受控扩展的禁用/启用操作而返工。T-010 通过的是“缺口真值矩阵”，不代表 M1 全量采集门槛已达成。
 
 ## 生命周期与规则
 

@@ -1,6 +1,6 @@
 # T-008：ContentStore 完整性与范围读取 API
 
-状态：待验收
+状态：已通过
 认领：Codex · 2026-09-23
 基线 commit：`80a3cce`
 蓝图映射：M1 §4
