@@ -67,7 +67,7 @@ try {
 
   const a = client()
   const opened = await a.send('open', { dbPath: path, config: { workspaceId: 'default', profileId: 'primary' } })
-  check('v8→v9 open', () => { assert.equal(opened.ok, true); assert.equal(opened.result.schemaVersion, 9) })
+  check('v8→scoped schema open', () => { assert.equal(opened.ok, true); assert.ok(opened.result.schemaVersion >= 9) })
   const bad = await a.send('queryRequests', { workspaceId: 'other', inst: 1 })
   check('cross-workspace query rejected', () => { assert.equal(bad.ok, false); assert.match(bad.error, /scope mismatch/) })
   const good = await a.send('queryRequests', { workspaceId: 'default', inst: 1 })
@@ -113,6 +113,19 @@ try {
   const recovered = await recovery.send('open', { dbPath: restored, config: { workspaceId: 'default', profileId: 'primary' } })
   check('v8 backup can be migrated again', () => assert.equal(recovered.ok, true))
   await recovery.close()
+
+  const v9path = join(temp, 'v9.db')
+  const sourceDb = new DatabaseSync(path)
+  sourceDb.exec(`VACUUM INTO '${v9path.replaceAll("'", "''")}'`)
+  sourceDb.close()
+  const v9 = new DatabaseSync(v9path)
+  v9.exec('DROP TABLE auth_observations; DROP TABLE site_identities; DELETE FROM schema_migrations WHERE version=10; UPDATE meta SET v=\'9\' WHERE k=\'schema_version\'')
+  v9.close()
+  const upgrade = client()
+  const upgraded = await upgrade.send('open', { dbPath: v9path, config: { workspaceId: 'default', profileId: 'primary' } })
+  check('v9→v10 auth migration is applied', () => assert.equal(upgraded.result?.schemaVersion, 10))
+  await upgrade.close()
+  check('v9 backup is created before auth migration', () => assert(readdirSync(temp).some(name => name.startsWith('v9.db.pre-v10-'))))
   console.log(`\n${passed}/${passed} passed`)
 } finally {
   if (!resolve(temp).startsWith(resolve(tmpdir()) + '\\')) throw new Error('unsafe temp cleanup')

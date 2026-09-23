@@ -5,6 +5,8 @@ import { randomUUID } from 'node:crypto'
 import { join } from 'node:path'
 import { ContentStore } from './content/store'
 import { ContentClient } from './content/client'
+import { verifyFixture } from './auth/fixture'
+import { cookieClue } from './auth/observer'
 import { CaptureEvidenceLedger, type CaptureEvidenceSummary } from './content/evidence'
 import { CdpClient } from './browser/cdp'
 import { Collector } from './browser/collector'
@@ -566,6 +568,7 @@ export class Controller extends EventEmitter {
         args: launched.args
       })
       this.emit('log', `存储: ${health.enabled ? `已启用 (node ${health.nodeVersion})` : `未启用 - ${health.error}`}`)
+      if (health.enabled) await this.storage.call('authMarkStale', {}).catch(error => this.emit('log', `[auth] 恢复降级失败：${String(error)}`))
 
       const bodyConfig: BodyConfig = {
         enabled: this.options.captureBodies,
@@ -1452,13 +1455,31 @@ export class Controller extends EventEmitter {
         changes: CookieChangeDetail[]
       }
       for (const change of result.changes) {
-        this.onEvent({ ts: Date.now(), kind: 'cookie', level: 'info', url: change.url, detail: change })
+        // Cookie 值只能留在受控 Cookie 罐，不得进入普通事件/身份摘要。
+        const { value: _secretValue, ...safeChange } = change
+        this.onEvent({ ts: Date.now(), kind: 'cookie', level: 'info', url: change.url, detail: safeChange })
+        const clue = cookieClue(change)
+        if (clue) void this.storage.call('authRecord', clue)
+          .catch(error => this.emit('log', `[auth] Cookie 线索记录失败：${String(error)}`))
       }
       return { total: result.total, added: result.added, changed: result.changed, removed: result.removed }
     } catch (error) {
       this.emit('log', `[cookie] 对账失败：${(error as Error).message}`)
       return null
     }
+  }
+
+  async authSummary(): Promise<unknown> {
+    if (!this.storage.isEnabled()) throw new Error('目标工作区存储未运行')
+    return this.storage.call('authSummary', {})
+  }
+
+  async verifyFixtureAuth(originInput: string): Promise<unknown> {
+    if (!this.storage.isEnabled() || !this.site) throw new Error('目标工作区未运行')
+    await this.refreshCookieJar()
+    const cookies = await this.site.listCookies()
+    const verdict = await verifyFixture(originInput, cookies)
+    return this.storage.call('authRecord', { ...verdict, source: 'fixture' })
   }
 
   private scheduleCookieRefresh(): void {

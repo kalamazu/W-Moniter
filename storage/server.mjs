@@ -21,13 +21,14 @@ import { createHash } from 'node:crypto'
 import { mkdirSync, statSync, writeFileSync, readFileSync, existsSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { migrateScope, SCOPE_VERSION } from './migrations/009-scope.mjs'
+import { migrateAuth } from './migrations/010-auth.mjs'
 
 // node:sqlite 在 22.x 仍标记 experimental，会往 stderr 吐警告。
 // stderr 是日志通道，别让它被警告淹没。
 process.removeAllListeners('warning')
 process.on('warning', () => {})
 
-const SCHEMA_VERSION = 9
+const SCHEMA_VERSION = 10
 
 const config = {
   /** 单条 body 落盘上限，超过只留 hash + size */
@@ -376,9 +377,9 @@ function openDatabase(dbPath, scope) {
   const hasMeta = handle.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'meta'").get()
   const oldVersion = hasMeta ? Number(handle.prepare("SELECT v FROM meta WHERE k = 'schema_version'").get()?.v || 0) : 0
   if (oldVersion > SCHEMA_VERSION) throw new Error(`database schema ${oldVersion} is newer than supported ${SCHEMA_VERSION}`)
-  if (existed && hasMeta && oldVersion < SCOPE_VERSION) {
+  if (existed && hasMeta && oldVersion < SCHEMA_VERSION) {
     // VACUUM INTO snapshots the WAL too; a raw file copy can silently omit committed rows.
-    const backup = `${dbPath}.pre-v${SCOPE_VERSION}-${Date.now()}.bak`
+    const backup = `${dbPath}.pre-v${oldVersion < SCOPE_VERSION ? SCOPE_VERSION : SCHEMA_VERSION}-${Date.now()}.bak`
     handle.exec(`VACUUM INTO '${backup.replaceAll("'", "''")}'`)
   }
   handle.exec(DDL)
@@ -396,6 +397,7 @@ function openDatabase(dbPath, scope) {
     throw new Error(`scope mismatch: database belongs to ${owner}/${profile}`)
   }
   migrateScope(handle, { ...scope, adoptLegacy: scope.workspaceId === 'default' })
+  migrateAuth(handle)
   handle.exec('PRAGMA foreign_keys = ON')
   return handle
   } catch (error) {
@@ -3226,6 +3228,61 @@ const OPS = {
     dbFilePath = args.dbPath
     S = buildStatements()
     return { schemaVersion: SCHEMA_VERSION, dbPath: args.dbPath, config: { ...config } }
+  },
+
+  authSummary() {
+    const now = Date.now()
+    return db.prepare('SELECT origin, state, account_label, source, observed_at, verified_at, fresh_until FROM site_identities WHERE workspace_id = ? AND profile_id = ? ORDER BY observed_at DESC')
+      .all(dbScope.workspaceId, dbScope.profileId)
+      .map(row => ({ ...row, state: row.state === 'verified' && row.fresh_until < now ? 'stale' : row.state }))
+  },
+
+  authRecord(args) {
+    const origin = new URL(String(args.origin)).origin
+    if (!/^https?:/.test(origin)) throw new Error('auth origin must be HTTP(S)')
+    let state = String(args.state)
+    const source = String(args.source)
+    if (!['suspected', 'verified', 'logged_out', 'unknown', 'stale'].includes(state)) throw new Error('invalid auth state')
+    if (!['cookie', 'navigation', 'fixture', 'restore'].includes(source)) throw new Error('invalid auth source')
+    if (state === 'verified' && source !== 'fixture') throw new Error('verified requires active fixture evidence')
+    const previous = db.prepare('SELECT state FROM site_identities WHERE workspace_id=? AND profile_id=? AND origin=?')
+      .get(dbScope.workspaceId, dbScope.profileId, origin)
+    // A restored browser may still carry an old cookie. Seeing it again is not
+    // fresh proof of login and must not erase the explicit stale verdict.
+    if (source === 'cookie' && state === 'suspected' && previous?.state === 'stale') state = 'stale'
+    const account = state === 'verified' ? String(args.accountLabel ?? '').slice(0, 160) : null
+    if (state === 'verified' && !account) throw new Error('verified account label required')
+    const now = Date.now()
+    const freshUntil = state === 'verified' ? now + 5 * 60_000 : null
+    db.exec('BEGIN IMMEDIATE')
+    try {
+      db.prepare(`INSERT INTO site_identities(workspace_id,profile_id,origin,state,account_label,source,observed_at,verified_at,fresh_until)
+        VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(workspace_id,profile_id,origin) DO UPDATE SET
+        state=excluded.state,account_label=excluded.account_label,source=excluded.source,
+        observed_at=excluded.observed_at,verified_at=excluded.verified_at,fresh_until=excluded.fresh_until`)
+        .run(dbScope.workspaceId, dbScope.profileId, origin, state, account, source, now,
+          state === 'verified' ? now : null, freshUntil)
+      db.prepare(`INSERT INTO auth_observations(workspace_id,profile_id,origin,state,source,account_label,observed_at,detail)
+        VALUES(?,?,?,?,?,?,?,?)`).run(dbScope.workspaceId, dbScope.profileId, origin, state, source, account, now,
+          args.detail ? String(args.detail).slice(0, 500) : null)
+      db.exec('COMMIT')
+    } catch (error) { db.exec('ROLLBACK'); throw error }
+    return { origin, state, accountLabel: account, source, observedAt: now, freshUntil }
+  },
+
+  authMarkStale() {
+    const rows = db.prepare("SELECT origin FROM site_identities WHERE workspace_id=? AND profile_id=? AND state='verified'")
+      .all(dbScope.workspaceId, dbScope.profileId)
+    const now = Date.now()
+    db.exec('BEGIN IMMEDIATE')
+    try {
+      db.prepare("UPDATE site_identities SET state='stale', source='restore', observed_at=?, fresh_until=NULL WHERE workspace_id=? AND profile_id=? AND state='verified'")
+        .run(now, dbScope.workspaceId, dbScope.profileId)
+      const insert = db.prepare("INSERT INTO auth_observations(workspace_id,profile_id,origin,state,source,observed_at) VALUES(?,?,?,'stale','restore',?)")
+      for (const row of rows) insert.run(dbScope.workspaceId, dbScope.profileId, row.origin, now)
+      db.exec('COMMIT')
+    } catch (error) { db.exec('ROLLBACK'); throw error }
+    return { stale: rows.length }
   },
 
   beginInstance(args) {

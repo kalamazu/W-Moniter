@@ -934,6 +934,16 @@ app.whenReady().then(async () => {
       const instance = workspaceControllers.get(id)
       if (!instance) throw new Error('目标工作区未运行，清理前需打开工作区以对账 SQLite 引用')
       return instance.revokeContent(hash, reason)
+    },
+    getAuth: (id) => {
+      const instance = workspaceControllers.get(id)
+      if (!instance) throw new Error('目标工作区未运行，登录证据暂不可读')
+      return instance.authSummary()
+    },
+    verifyAuth: (id, origin) => {
+      const instance = workspaceControllers.get(id)
+      if (!instance) throw new Error('目标工作区未运行，无法主动验证')
+      return instance.verifyFixtureAuth(origin)
     }
   }, { journalPath: join(DATA_DIR, 'tasks', 'journal.json') })
   activeWorkspace = workspaceService.active()

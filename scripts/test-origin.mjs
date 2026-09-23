@@ -9,7 +9,7 @@
  *   node scripts/test-origin.mjs 8777        # 单独起，手工点
  */
 
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { createServer } from 'node:http'
 
 /** 1x1 透明 PNG，图像接口都用它，靠 padding 造不同大小 */
@@ -739,6 +739,7 @@ export function startOrigin(port = 0) {
   const requests = []
   const matrixReports = []
   const streamReports = []
+  const authSessions = new Map()
   const openStreams = new Set()
   /** WS 双向真值日志：handshake / in（页面发出）/ out（服务端发出）/ close */
   const wsLog = []
@@ -818,6 +819,26 @@ export function startOrigin(port = 0) {
       await new Promise(resolve => req.readableEnded ? resolve() : req.once('end', resolve))
       try { streamReports.push(JSON.parse(bodyText)) } catch { streamReports.push({ error: 'invalid_report' }) }
       return send(200, 'application/json', '{"ok":true}')
+    }
+    if (path === '/auth/login') {
+      const account = String(url.searchParams.get('account') ?? '').slice(0, 80)
+      if (!account) return send(400, 'text/plain', 'account required')
+      const token = randomUUID()
+      authSessions.set(token, account)
+      return send(200, 'text/html; charset=utf-8', `<h1>Logged in: ${account.replaceAll('<', '&lt;')}</h1>`,
+        { 'set-cookie': `auth_session=${token}; HttpOnly; SameSite=Lax; Path=/` })
+    }
+    if (path === '/auth/whoami') {
+      const token = /(?:^|;\s*)auth_session=([^;]+)/.exec(req.headers.cookie ?? '')?.[1]
+      const account = token ? authSessions.get(token) : null
+      if (account === 'slow') await new Promise(resolve => setTimeout(resolve, 8000))
+      return account ? send(200, 'application/json', JSON.stringify({ account })) : send(401, 'application/json', '{"error":"logged_out"}')
+    }
+    if (path === '/auth/logout' || path === '/auth/expire') {
+      const token = /(?:^|;\s*)auth_session=([^;]+)/.exec(req.headers.cookie ?? '')?.[1]
+      if (token) authSessions.delete(token)
+      return send(200, 'text/html; charset=utf-8', '<h1>Logged out</h1>',
+        path === '/auth/logout' ? { 'set-cookie': 'auth_session=; Max-Age=0; HttpOnly; SameSite=Lax; Path=/' } : {})
     }
     if (path === '/matrix-binary') return send(200, 'application/octet-stream', Buffer.alloc(2 * 1024 * 1024, 37))
     if (path === '/matrix-cache') return send(200, 'application/json', '{"cached":true}', { 'cache-control': 'max-age=3600' })

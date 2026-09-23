@@ -28,6 +28,19 @@ export function WorkspaceBar({ overview, onChange }: Props): React.JSX.Element |
   const [profile, setProfile] = useState<'L' | 'H'>('L')
   const [statsTick, setStatsTick] = useState(0)
   const [contentStats, setContentStats] = useState<Record<string, { objects: number; bytes: number; gaps: number; lastError?: string }>>({})
+  const [authRows, setAuthRows] = useState<Array<{ origin: string; state: string; account_label: string | null; observed_at: number; source: string }>>([])
+
+  useEffect(() => {
+    const id = overview?.activeWorkspaceId
+    if (!id) { setAuthRows([]); return }
+    let alive = true
+    const refresh = (): void => { void window.monitor.executeAction({ action: 'auth.summary', input: {}, target: { kind: 'workspace', workspaceId: id } })
+      .then(result => { if (alive) setAuthRows(Array.isArray(result.output) ? result.output as typeof authRows : []) })
+      .catch(() => { if (alive) setAuthRows([]) }) }
+    refresh()
+    const timer = setInterval(refresh, 2000)
+    return () => { alive = false; clearInterval(timer) }
+  }, [overview?.activeWorkspaceId, statsTick])
 
   useEffect(() => {
     if (!overview) return
@@ -95,6 +108,19 @@ export function WorkspaceBar({ overview, onChange }: Props): React.JSX.Element |
     }
   }
 
+  const verifyFixture = async (): Promise<void> => {
+    if (!active) return
+    const origin = window.prompt('受控本地站点 origin（例如 http://127.0.0.1:8841/）')?.trim()
+    if (!origin) return
+    setBusy(true); setError(null)
+    try {
+      const result = await window.monitor.executeAction({ action: 'auth.verifyFixture', input: { origin }, target: { kind: 'workspace', workspaceId: active.id } })
+      if (result.task.error) throw new Error(result.task.error.message)
+      setStatsTick(value => value + 1)
+    } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)) }
+    finally { setBusy(false) }
+  }
+
   return (
     <section className="workspace-bar" aria-label="工作区">
       <span className="workspace-label">工作区</span>
@@ -115,6 +141,13 @@ export function WorkspaceBar({ overview, onChange }: Props): React.JSX.Element |
         ))}
       </div>
       <button type="button" className="workspace-suspend" title="刷新各工作区正文与缺口统计" onClick={() => setStatsTick((value) => value + 1)}>刷新统计</button>
+      {active?.state === 'running' && <div className="workspace-auth" aria-label="登录证据台账">
+        <span>登录证据：</span>
+        {authRows.length ? authRows.slice(0, 3).map(row => <small key={row.origin} title={`${row.origin} · ${row.source} · ${new Date(row.observed_at).toLocaleString()}`}>
+          {new URL(row.origin).host} · {row.state === 'verified' ? `已验证 ${row.account_label ?? ''}` : row.state === 'suspected' ? '有线索，未验证' : row.state === 'stale' ? '待复核' : row.state === 'logged_out' ? '已登出' : '未知'}
+        </small>) : <small>未验证</small>}
+        <button type="button" disabled={busy} onClick={() => void verifyFixture()}>验证受控站点</button>
+      </div>}
       <select
         className="workspace-profile"
         aria-label="新工作区采集 Profile"

@@ -8,7 +8,7 @@ import { ActionPolicy } from './policy'
 import { TaskService, type TaskJournalDiagnostics } from './task-service'
 import { WorkspaceTargetResolver } from './target-resolver'
 
-type WorkspaceAction = 'workspaces.list' | 'workspace.create' | 'workspace.open' | 'workspace.suspend' | 'tasks.diagnostics' | 'rules.get' | 'rules.save' | 'content.verify' | 'content.readRange' | 'content.revoke' | 'capture.evidence' | 'capture.summary' | 'workspaces.contentStats'
+type WorkspaceAction = 'workspaces.list' | 'workspace.create' | 'workspace.open' | 'workspace.suspend' | 'tasks.diagnostics' | 'rules.get' | 'rules.save' | 'content.verify' | 'content.readRange' | 'content.revoke' | 'capture.evidence' | 'capture.summary' | 'workspaces.contentStats' | 'auth.summary' | 'auth.verifyFixture'
 
 export interface WorkspaceActionRuntime {
   create(input: WorkspaceCreateInput): WorkspaceSummary
@@ -18,6 +18,8 @@ export interface WorkspaceActionRuntime {
   saveRules(id: string, set: RuleSet): { ok: boolean; invalid: unknown[] }
   getEvidence(id: string, seq: number): Promise<unknown>
   revokeContent(id: string, hash: string, reason: string): Promise<unknown>
+  getAuth(id: string): Promise<unknown>
+  verifyAuth(id: string, origin: string): Promise<unknown>
 }
 
 const DESCRIPTORS: Record<WorkspaceAction, ActionDescriptor> = {
@@ -33,7 +35,9 @@ const DESCRIPTORS: Record<WorkspaceAction, ActionDescriptor> = {
   'content.revoke': { name: 'content.revoke', kind: 'mutation', target: 'required', description: '删除正文并记录保留策略证据' },
   'capture.evidence': { name: 'capture.evidence', kind: 'query', target: 'required', description: '读取请求正文采集证据' },
   'capture.summary': { name: 'capture.summary', kind: 'query', target: 'required', description: '统计工作区采集缺口' },
-  'workspaces.contentStats': { name: 'workspaces.contentStats', kind: 'query', target: 'optional', description: '全部工作区的内容与缺口摘要' }
+  'workspaces.contentStats': { name: 'workspaces.contentStats', kind: 'query', target: 'optional', description: '全部工作区的内容与缺口摘要' },
+  'auth.summary': { name: 'auth.summary', kind: 'query', target: 'required', description: '读取指定工作区的登录证据摘要，不包含 Cookie 值' },
+  'auth.verifyFixture': { name: 'auth.verifyFixture', kind: 'mutation', target: 'required', description: '在明确工作区对受控本地 fixture 主动验证身份' }
 }
 
 /** 统一注册表的第一个垂直切片；其它领域服务以后按同样方式注册。 */
@@ -115,6 +119,11 @@ export class WorkspaceActionRegistry {
             const [content, capture] = await Promise.all([new ContentStore(path).stats(), new CaptureEvidenceLedger(path).summary()])
             return { workspaceId: workspace.id, name: workspace.name, content, capture }
           }))
+        case 'auth.summary':
+          return this.runtime.getAuth((request.target as Extract<TargetRef, { kind: 'workspace' }>).workspaceId)
+        case 'auth.verifyFixture':
+          return this.runtime.verifyAuth((request.target as Extract<TargetRef, { kind: 'workspace' }>).workspaceId,
+            String((input as { origin?: string }).origin ?? ''))
       }
     })
   }

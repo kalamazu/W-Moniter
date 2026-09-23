@@ -472,6 +472,18 @@ const TOOLS = [
     run: () => request('GET', '/workspaces/content-stats')
   },
   {
+    name: 'monitor_auth_ledger',
+    description: '读取明确工作区的登录证据、身份与新鲜度；Cookie 线索不等于已验证登录。',
+    inputSchema: { type: 'object', properties: { workspaceId: { type: 'string' } }, required: ['workspaceId'], additionalProperties: false },
+    run: ({ workspaceId }) => request('GET', `/workspaces/${encodeURIComponent(workspaceId)}/auth`)
+  },
+  {
+    name: 'monitor_auth_verify_fixture',
+    description: '只对明确工作区和本地受控 fixture origin 主动验证登录；不支持任意真实网站。',
+    inputSchema: { type: 'object', properties: { workspaceId: { type: 'string' }, origin: { type: 'string' } }, required: ['workspaceId', 'origin'], additionalProperties: false },
+    run: ({ workspaceId, origin }) => request('POST', `/workspaces/${encodeURIComponent(workspaceId)}/auth/verify-fixture`, { body: { origin } })
+  },
+  {
     name: 'monitor_capture_evidence',
     description: '按明确工作区 ID 和请求 seq 读取正文采集或缺口证据。',
     inputSchema: { type: 'object', properties: { workspaceId: { type: 'string' }, seq: { type: 'number' } }, required: ['workspaceId', 'seq'], additionalProperties: false },

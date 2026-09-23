@@ -301,7 +301,7 @@ try {
     assert(firstSeen.changeCount === 1, `第一次见到就该是 1，实际 ${firstSeen.changeCount}`)
   })
 
-  await check('Set-Cookie 那条：事件流里有 kind=cookie 的 added，且归因到响应 URL', async () => {
+  await check('Set-Cookie 事件归因到响应 URL，但普通事件不泄露值', async () => {
     const hit = await waitFor(
       'sd_http 的 cookie 事件',
       async () => {
@@ -317,7 +317,7 @@ try {
     )
     assert(String(hit.url ?? '').includes('/api/sd-set-cookie'), `归因到的 url 不对：${hit.url}`)
     assert(hit.detail.source === 'set-cookie', `source=${hit.detail.source}`)
-    assert(hit.detail.value === 'H1', `value=${hit.detail.value}`)
+    assert(hit.detail.value === undefined, `事件泄露了 Cookie 值：${hit.detail.value}`)
   })
 
   await check('页面改值 → 罐里跟着变，changeCount 从 1 涨到 2（看得出「被改过」）', async () => {
