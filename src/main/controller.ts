@@ -4,6 +4,7 @@ import { mkdirSync, readdirSync, statSync, unlinkSync, writeFileSync } from 'nod
 import { randomUUID } from 'node:crypto'
 import { join } from 'node:path'
 import { ContentStore } from './content/store'
+import { ContentClient } from './content/client'
 import { CaptureEvidenceLedger, type CaptureEvidenceSummary } from './content/evidence'
 import { CdpClient } from './browser/cdp'
 import { Collector } from './browser/collector'
@@ -104,6 +105,7 @@ const FLUSH_INTERVAL_MS = 150
 function proxyPatchOf(record: RequestRecord): Partial<RequestRecord> {
   return {
     proxyFlowId: record.proxyFlowId,
+    ...(record.proxyContentRef ? { proxyContentRef: record.proxyContentRef } : {}),
     mergeState: record.mergeState,
     timings: record.timings,
     ...(record.upstreamIp ? { upstreamIp: record.upstreamIp } : {}),
@@ -226,6 +228,7 @@ export class Controller extends EventEmitter {
   private consoleSnapshot: ConsoleEntry[] = []
   private storage: StorageClient
   private readonly content: ContentStore
+  private contentClient: ContentClient | null = null
   private readonly evidence: CaptureEvidenceLedger
   /** P5：本地代理 + 三源关联。代理没开时两者都是空的 */
   private proxy: ProxyClient | null = null
@@ -407,6 +410,7 @@ export class Controller extends EventEmitter {
     const keyFile = this.options.proxyKeyFile ?? join(this.options.userDataDir, 'proxy-ca.key')
     const client = new ProxyClient({
       keyFile,
+      ...(this.contentClient?.connection ? { contentEndpoint: this.contentClient.connection } : {}),
       // 代理侧 body 采样上限和 CDP 那条路保持同一个数
       bodyMaxBytes: this.options.bodyMaxBytes,
       /**
@@ -423,6 +427,9 @@ export class Controller extends EventEmitter {
         : {})
     })
     client.on('flow', (flow: ProxyFlow) => {
+      if (process.env['MONITOR_CONTENT_DEBUG'] === '1' && (flow.contentRef || flow.contentError)) {
+        this.emit('log', `[content] 代理流 ${flow.url}: ${flow.contentRef?.hash ?? flow.contentError}`)
+      }
       this.correlator.addFlow(flow)
       // UI 侧只需要节流后的计数，flow 本体在记录关联时随记录一起走
       this.patchStatus({
@@ -473,6 +480,15 @@ export class Controller extends EventEmitter {
     }
 
     try {
+      if (this.options.captureBodies) {
+        try {
+          this.contentClient ??= new ContentClient(this.options.contentDir)
+          await this.contentClient.start()
+        } catch (error) {
+          this.emit('log', `[content] 流服务未启动，回退兼容路径：${String(error)}`)
+          this.contentClient = null
+        }
+      }
       // 代理必须在浏览器之前起来：--proxy-server 里的端口要等代理 listen 完才知道
       const proxyArgs = await this.startProxy()
       const extraArgs = [...(this.options.extraArgs ?? []), ...proxyArgs]
@@ -519,6 +535,8 @@ export class Controller extends EventEmitter {
       child.on('exit', (code, signal) => {
         if (this.child !== child) return
         this.stop()
+        void this.proxy?.stop()
+        void this.contentClient?.stop()
         this.patchStatus({
           state: 'error',
           error: `浏览器已退出 (code=${code ?? 'null'}, signal=${signal ?? 'null'})`
@@ -551,6 +569,7 @@ export class Controller extends EventEmitter {
 
       const bodyConfig: BodyConfig = {
         enabled: this.options.captureBodies,
+        proxyStreaming: Boolean(this.proxy && this.contentClient?.connection),
         resourceTypes: new Set(this.options.bodyTypes),
         maxBytes: this.options.bodyMaxBytes,
         timeoutMs: this.options.bodyTimeoutMs
@@ -646,6 +665,8 @@ export class Controller extends EventEmitter {
     await this.proxy?.drain()
     this.stop()
     await this.proxy?.stop()
+    await this.contentClient?.stop()
+    this.contentClient = null
     await this.storage.shutdown()
   }
 
@@ -1081,6 +1102,9 @@ export class Controller extends EventEmitter {
     // 终态行本身可能后到；pending 行先到时算出来的结果就缓存在这里
     void first
     const merged = this.correlator.match(record)
+    if (process.env['MONITOR_CONTENT_DEBUG'] === '1' && record.url.includes('/matrix-binary')) {
+      this.emit('log', `[content] match seq=${record.seq} merge=${merged.mergeState} ref=${merged.proxyContentRef?.hash ?? '-'}`)
+    }
     if (merged.mergeState === 'merged') {
       const keep = proxyPatchOf(merged)
       this.mergeCache.set(cacheKey, keep)
@@ -1119,6 +1143,9 @@ export class Controller extends EventEmitter {
    */
   private applyRevisions(): void {
     for (const revision of this.correlator.takeRevisions()) {
+      if (process.env['MONITOR_CONTENT_DEBUG'] === '1' && revision.url.includes('/matrix-binary')) {
+        this.emit('log', `[content] revision seq=${revision.seq} ref=${revision.proxyContentRef?.hash ?? '-'}`)
+      }
       const patch = proxyPatchOf(revision)
       this.mergeCache.set(mergeCacheKey(revision), patch)
       this.countTimings(revision)
@@ -1128,6 +1155,9 @@ export class Controller extends EventEmitter {
   }
 
   private enqueue(record: RequestRecord, first = true): void {
+    if (process.env['MONITOR_CONTENT_DEBUG'] === '1' && record.url.includes('/matrix-binary')) {
+      this.emit('log', `[content] enqueue seq=${record.seq} merge=${record.mergeState} ref=${record.proxyContentRef?.hash ?? '-'} first=${first}`)
+    }
     // 同一条请求会来两次（pending 行 + 终态行），只数第一次 ——
     // 这样「本次采集」和「已落库」是一致的一对数
     if (first) this.requestCount += 1
@@ -1135,6 +1165,10 @@ export class Controller extends EventEmitter {
 
     // 落盘队列是无阻塞的，这里只管 UI
     this.storage.append(record)
+    if (record.proxyContentRef) {
+      const ref = record.proxyContentRef
+      this.storage.appendContentBody(record.seq, ref.hash, ref.size, false)
+    }
 
     // 背压：UI 消费不过来时丢最旧的，元数据优先于完整性
     if (this.queue.length > 20_000) {
@@ -1154,7 +1188,7 @@ export class Controller extends EventEmitter {
 
   private onBody(body: CapturedBody): void {
     if (body.bytes && body.bytes.byteLength > 0) {
-      void this.content.put(body.bytes).then((ref) => {
+      void (this.contentClient?.connection ? this.contentClient.put(body.bytes) : this.content.put(body.bytes)).then((ref) => {
         this.storage.appendContentBody(body.seq, ref.hash, ref.size, false)
         void this.evidence.record({ inst: this.storage.getInstId(), seq: body.seq, phase: 'content', state: 'stored', size: ref.size, hash: ref.hash })
           .catch((error) => this.emit('log', `[evidence] 正文记录失败 seq=${body.seq}: ${String(error)}`))

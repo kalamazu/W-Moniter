@@ -2,7 +2,7 @@
 /** T-010: origin truth, page consumption and monitor evidence are separate witnesses. */
 import { createHash } from 'node:crypto'
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve, sep } from 'node:path'
 import { startOrigin } from '../test-origin.mjs'
@@ -21,7 +21,8 @@ try {
   app = await launchApp({
     url: `http://127.0.0.1:${origin.port}/capture-matrix.html${skipUpload ? '?skipUpload' : ''}`, dataDir,
     port: Number(process.env['CAPTURE_CDP_PORT'] ?? 9545), profile,
-    extraEnv: { MONITOR_CAPTURE_BODIES: '1', MONITOR_BODY_TIMEOUT_MS: '10000', MONITOR_PROXY: proxy ? '1' : '0' }
+    extraEnv: { MONITOR_CAPTURE_BODIES: '1', MONITOR_BODY_TIMEOUT_MS: '10000', MONITOR_PROXY: proxy ? '1' : '0',
+      ...(process.env['CAPTURE_DEBUG'] === '1' ? { MONITOR_CONTENT_DEBUG: '1' } : {}) }
   })
   await app.waitConnected(1)
   for (let retry = 0; retry < 100 && !origin.matrixReports.length; retry += 1) await sleep(200)
@@ -73,6 +74,7 @@ try {
   const binary = coverage.find((item) => item.route === 'matrix-binary')
   check('监控记录可与独立真值逐条比对', () => {
     assert(binary.observed, `二进制请求未被记录：${JSON.stringify(binary)}`)
+    if (proxy) assert(binary.bodyState === 'stored', `代理流正文未完成提交：${JSON.stringify(binary)}`)
     if (binary.bodyState === 'stored') assert(binary.bodyHash === binaryTruth, `已存正文 hash 与真值不符：${JSON.stringify(binary)}`)
     if (page) {
       const truncated = coverage.find((item) => item.route === 'matrix-truncate')
@@ -102,6 +104,9 @@ try {
 } catch (error) {
   check('采集路径探针流程', () => { throw error })
 } finally {
+  if (process.env['CAPTURE_DEBUG'] === '1' && existsSync(join(dataDir, 'app.log'))) {
+    console.log('APP_LOG_TAIL ' + readFileSync(join(dataDir, 'app.log'), 'utf8').slice(-6000))
+  }
   if (app) await app.close()
   await origin.close()
   if (existsSync(dataDir) && resolve(dataDir).startsWith(resolve(tmpdir()) + sep)) rmSync(dataDir, { recursive: true, force: true })

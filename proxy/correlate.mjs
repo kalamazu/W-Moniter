@@ -165,6 +165,7 @@ function withFlow(record, flow, ties = 1) {
   return {
     ...record,
     proxyFlowId: flow.flowId,
+    ...(flow.contentRef ? { proxyContentRef: flow.contentRef } : {}),
     mergeState: 'merged',
     timings: flow.timings ?? {},
     upstreamIp: flow.upstreamIp,

@@ -13,6 +13,8 @@ export interface NetTimings {
 }
 
 export interface ProxyFlow {
+  contentRef?: { hash: string; size: number; chunks: number }
+  contentError?: string
   flowId: string
   startedAt: number
   finishedAt?: number

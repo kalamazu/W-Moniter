@@ -55,7 +55,8 @@ const config = {
    * 重叠的后果是同一条 body 被改两遍（脚本不一定幂等），比漏改严重得多。
    * 拿不到 content-length 的（chunked）两边都不动 —— 这是已知边界，不是漏做。
    */
-  sinkAboveBytes: 0
+  sinkAboveBytes: 0,
+  contentEndpoint: null
 }
 
 let authority = null
@@ -347,16 +348,54 @@ function proxyRequest(clientReq, clientRes, target, reqBody) {
       applyHeaderRules()
       flow.bodyEncodedUpstream = enc
       flow.lane = 'pass'
+      // Tee raw upstream bytes to the local content service. The browser pipe is
+      // independent; slow disk only pauses the upstream on socket backpressure.
+      let sink = null
+      const mediaType = String(upRes.headers['content-type'] ?? '').toLowerCase()
+      const indefinitelyStreaming = mediaType.includes('text/event-stream') || mediaType.includes('multipart/x-mixed-replace') || mediaType.includes('application/grpc')
+      if (config.contentEndpoint && !indefinitelyStreaming && flow.status !== 204 && flow.status !== 304) {
+        const endpoint = config.contentEndpoint
+        sink = http.request({ hostname: endpoint.host, port: endpoint.port, method: 'PUT', path: '/object',
+          headers: { authorization: `Bearer ${endpoint.token}`,
+            ...(upRes.headers['content-length'] ? { 'x-expected-bytes': String(upRes.headers['content-length']) } : {}) } }, response => {
+          const parts = []
+          response.on('data', part => parts.push(part))
+          response.on('end', () => {
+            if (response.statusCode === 200) {
+              try { flow.contentRef = JSON.parse(Buffer.concat(parts).toString('utf8')) }
+              catch { flow.contentError = 'invalid content service reply' }
+            } else flow.contentError = `content service HTTP ${response.statusCode}`
+          })
+        })
+        sink.on('error', error => { flow.contentError = error.message; sink = null; upRes.resume() })
+      }
       upRes.on('data', (c) => {
         if (firstByteAt === null) firstByteAt = now()
         bytes += c.length
         takeSample(c)
+        if (sink && !sink.write(c)) upRes.pause()
       })
-      upRes.on('end', () => {
+      sink?.on('drain', () => upRes.resume())
+      upRes.on('close', () => { if (!flow.finishedAt) sink?.destroy() })
+      clientRes.on('close', () => { if (!flow.finishedAt) sink?.destroy() })
+      upRes.on('end', async () => {
+        // Upstream request emits 'close' as soon as its response ends. Mark the
+        // flow terminal before awaiting the content ACK, or close will publish a
+        // premature no-ref flow and steal the CDP correlation slot.
+        flow.finishedAt = Date.now()
+        if (sink) {
+          sink.end()
+          // Finish event must not claim complete before the content service ACK.
+          await new Promise(resolve => {
+            if (sink.writableFinished && sink.destroyed) return resolve()
+            sink.once('response', response => response.once('end', resolve))
+            sink.once('error', resolve)
+            setTimeout(resolve, 15000).unref()
+          })
+        }
         const last = now()
         flow.timings.download = ms(last - (firstByteAt ?? last))
         flow.responseBytes = bytes
-        flow.finishedAt = Date.now()
         if (config.captureBodies) {
           flow.responseBodyRef = {
             encoding: enc,

@@ -22,6 +22,8 @@
     "test:workspaces": "node scripts/test-workspaces.mjs",
     "test:actions": "node scripts/test-actions.mjs",
     "test:content": "node scripts/test-content-capture.mjs",
+    "test:stream-content": "node scripts/test-stream-content.mjs",
+    "test:stream-browser": "node scripts/probes/streaming-browser.mjs",
     "test:capture-paths": "node scripts/probes/capture-paths.mjs",
     "test:capture-cdp": "node scripts/probes/cdp-alternatives.mjs",
     "test:dock": "node scripts/test-dock.mjs",

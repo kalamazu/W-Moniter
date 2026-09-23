@@ -22,6 +22,8 @@ extraResources:
     to: mcp
   - from: storage
     to: storage
+  - from: content
+    to: content
   - from: proxy
     to: proxy
   # 窗口吸附的 Win32 助手（PowerShell 脚本，被主进程 spawn 起来，同样读不了 asar）

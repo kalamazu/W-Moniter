@@ -738,6 +738,7 @@ main()
 export function startOrigin(port = 0) {
   const requests = []
   const matrixReports = []
+  const streamReports = []
   const openStreams = new Set()
   /** WS 双向真值日志：handshake / in（页面发出）/ out（服务端发出）/ close */
   const wsLog = []
@@ -790,6 +791,34 @@ export function startOrigin(port = 0) {
 
     if (path === '/') return send(200, 'text/html; charset=utf-8', PAGE)
     if (path === '/capture-matrix.html') return send(200, 'text/html; charset=utf-8', CAPTURE_MATRIX_PAGE)
+    if (path === '/stream-test.html') return send(200, 'text/html; charset=utf-8', `<!doctype html><meta charset="utf-8"><title>stream test</title><script>
+      (async () => { const mb = Number(new URLSearchParams(location.search).get('mb') || 100);
+        const response = await fetch('/stream-test-data?mb=' + mb);
+        const reader = response.body.getReader(); let bytes = 0;
+        for (;;) { const { done, value } = await reader.read(); if (done) break; bytes += value.length }
+        await fetch('/stream-test-report', { method:'POST', body:JSON.stringify({ mb, bytes, ok:response.ok }) });
+      })().catch(error => fetch('/stream-test-report', {method:'POST', body:JSON.stringify({ error:String(error) })}));
+      </script>`)
+    if (path === '/stream-test-data') {
+      const mb = Number(url.searchParams.get('mb'))
+      if (![100, 1024].includes(mb)) return send(400, 'text/plain', 'invalid size')
+      const block = Buffer.alloc(1024 * 1024, 73)
+      const hash = createHash('sha256')
+      for (let i = 0; i < mb; i += 1) hash.update(block)
+      entry.bodyHash = hash.digest('hex')
+      entry.sentBytes = 0
+      res.writeHead(200, { 'content-type': 'application/octet-stream', 'content-length': String(mb * block.length), 'cache-control': 'no-store' })
+      for (let i = 0; i < mb && !res.destroyed; i += 1) {
+        entry.sentBytes += block.length
+        if (!res.write(block)) await new Promise(resolve => res.once('drain', resolve))
+      }
+      return res.end()
+    }
+    if (path === '/stream-test-report') {
+      await new Promise(resolve => req.readableEnded ? resolve() : req.once('end', resolve))
+      try { streamReports.push(JSON.parse(bodyText)) } catch { streamReports.push({ error: 'invalid_report' }) }
+      return send(200, 'application/json', '{"ok":true}')
+    }
     if (path === '/matrix-binary') return send(200, 'application/octet-stream', Buffer.alloc(2 * 1024 * 1024, 37))
     if (path === '/matrix-cache') return send(200, 'application/json', '{"cached":true}', { 'cache-control': 'max-age=3600' })
     if (path === '/matrix-download') return send(200, 'application/octet-stream', Buffer.alloc(4096, 51), { 'content-disposition': 'attachment; filename="matrix-download.bin"' })
@@ -1035,6 +1064,7 @@ export function startOrigin(port = 0) {
         port: server.address().port,
         requests,
         matrixReports,
+        streamReports,
         wsLog,
         close: () =>
           new Promise((done) => {

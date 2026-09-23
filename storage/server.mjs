@@ -446,8 +446,9 @@ function buildStatements() {
     countInstRequests: db.prepare('SELECT COUNT(*) AS c FROM requests WHERE inst = ?'),
     setBody: db.prepare(
       'UPDATE requests SET body_state = ?, body_size = ?, body_hash = ?, body_trunc = ? ' +
-        'WHERE inst = ? AND seq = ?'
+        "WHERE inst = ? AND seq = ? AND (body_state != 'stored' OR ? = 'stored')"
     ),
+    getBodyState: db.prepare('SELECT body_state FROM requests WHERE inst = ? AND seq = ?'),
     upsertBodyNew: db.prepare(
       'INSERT INTO bodies (hash, size, stored, trunc, blob, first_seen, last_ref, ref_count) ' +
         'VALUES (?, ?, 1, ?, ?, ?, ?, 1) ' +
@@ -3306,10 +3307,11 @@ const OPS = {
           norm(item.hash),
           item.trunc ? 1 : 0,
           inst,
-          item.seq
+          item.seq,
+          norm(item.state) || 'none'
         )
         if (Number(info.changes) > 0) updated += 1
-        else if (missing.length < 512) missing.push(item.seq)
+        else if (!S.getBodyState.get(inst, item.seq) && missing.length < 512) missing.push(item.seq)
         if (Number(info.changes) > 0) {
           if (item.hash) {
             db.prepare('INSERT INTO body_refs(workspace_id, profile_id, inst, seq, hash) VALUES (?, ?, ?, ?, ?) ON CONFLICT(workspace_id, profile_id, inst, seq) DO UPDATE SET hash = excluded.hash')

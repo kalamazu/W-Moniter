@@ -85,6 +85,8 @@ export interface RequestRecord {
    * 会以 mergeState='proxy-only' 的形式单独存在，不丢。
    */
   proxyFlowId?: string
+  /** 代理流收到内容服务完整 EOF 回执后才有；不经 CDP JSON/base64。 */
+  proxyContentRef?: { hash: string; size: number; chunks: number }
   /**
    * 代理给的网络时序。**CDP 给不了 DNS 和 TLS** —— 这两个字段就是为代理留的（§5.1）。
    * 复用连接上没有 dns/connect/tls，和真实浏览器语义一致；ttfb 是「握手完成到首字节」。

@@ -27,6 +27,8 @@ import type { ProbeChannel } from './probe'
 
 export interface BodyConfig {
   enabled: boolean
+  /** 大响应由本地代理的二进制流接管，避免 CDP 一次性缓冲。 */
+  proxyStreaming?: boolean
   /** 要拦的 CDP resourceType 集合。**空集 = 全部类型**（不带 resourceType 的 Response pattern） */
   resourceTypes: Set<string>
   /** 单条 body 采集上限，超过只记状态 */
@@ -541,7 +543,8 @@ export class BodyCapture {
       const bodyless = isBodyless(status)
       const streaming = looksStreaming(mimeType)
       // 正文大小不再决定是否采集：ContentStore 分块落盘，展示和保留才另设上限。
-      const tooLarge = false
+      const tooLarge = Boolean(this.config.proxyStreaming && declared !== null && declared > 1024 * 1024 &&
+        !this.rulesWantsBody() && !this.rulesHaveResponseRules())
 
       // 三种用途共用这一次管道往返：存 body、rewriteBody 要 body、
       // 改响应头要重发响应（也得有 body）
@@ -570,7 +573,10 @@ export class BodyCapture {
       // 先记账：被规则改写过的响应同样是页面真收到的响应，不该从库里消失
       if (this.capturesBodies()) {
         if (seq === undefined) this.stats.unmatched += 1
-        else this.accountResponse(seq, status, declared, mimeType, bytes, fetchFailure)
+        else if (tooLarge) {
+          this.stats.tooLarge += 1
+          this.onBody({ seq, bytes: null, state: 'too_large', size: declared ?? 0 })
+        } else this.accountResponse(seq, status, declared, mimeType, bytes, fetchFailure)
       }
 
       const text =

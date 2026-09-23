@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import { locateNode } from '../storage/locate-node'
 import { resolveRuntimeFile } from '../paths'
 import type { ProxyFlow } from '../../../proxy/correlate.mjs'
+import type { ContentEndpoint } from '../content/client'
 
 /**
  * 本地代理的客户端（P5）。
@@ -19,6 +20,7 @@ import type { ProxyFlow } from '../../../proxy/correlate.mjs'
  */
 
 export interface ProxyConfig {
+  contentEndpoint?: ContentEndpoint
   /** 0 = 让内核挑；实际端口从 start() 的返回值里拿 */
   port?: number
   /** CA 私钥落盘位置；复用同一把密钥，pin 的 SPKI 才跨重启不变 */
@@ -130,6 +132,7 @@ export class ProxyClient extends EventEmitter {
     })) as ProxyStartResult
     this.info = result
     await this.call('setConfig', {
+      ...(this.config.contentEndpoint ? { contentEndpoint: this.config.contentEndpoint } : {}),
       ...(this.config.bodyMaxBytes !== undefined ? { bodyMaxBytes: this.config.bodyMaxBytes } : {}),
       ...(this.config.rewriteMaxBytes !== undefined
         ? { rewriteMaxBytes: this.config.rewriteMaxBytes }
