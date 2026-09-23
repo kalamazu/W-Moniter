@@ -61,6 +61,7 @@ import type {
   WsFramePage,
   WsFrameQuery
 } from '../shared/types'
+import type { WorkspaceCreateInput, WorkspaceOverview, WorkspaceSummary } from '../shared/contracts/workspace'
 
 const api: ControllerApi = {
   getStatus: () => ipcRenderer.invoke('monitor:status'),
@@ -191,6 +192,25 @@ const api: ControllerApi = {
       error?: string
       profile: Profile
     }>,
+
+  getWorkspaces: () => ipcRenderer.invoke('monitor:workspaces') as Promise<WorkspaceOverview>,
+
+  onWorkspaces: (callback) => {
+    const listener = (_event: IpcRendererEvent, overview: WorkspaceOverview): void => callback(overview)
+    ipcRenderer.on('monitor:workspaces', listener)
+    return () => {
+      ipcRenderer.removeListener('monitor:workspaces', listener)
+    }
+  },
+
+  createWorkspace: (input: WorkspaceCreateInput) =>
+    ipcRenderer.invoke('monitor:workspace-create', input) as Promise<WorkspaceSummary>,
+
+  openWorkspace: (id: string) =>
+    ipcRenderer.invoke('monitor:workspace-open', id) as Promise<WorkspaceOverview>,
+
+  suspendWorkspace: (id: string) =>
+    ipcRenderer.invoke('monitor:workspace-suspend', id) as Promise<WorkspaceOverview>,
 
   /* ---- 自绘标题栏（frame: false）的窗口控制 ---- */
 

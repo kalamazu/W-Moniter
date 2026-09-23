@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ControllerStatus, DockState, PanelId, PanelLayout } from '../../shared/types'
+import type { WorkspaceOverview } from '../../shared/contracts/workspace'
 import { DetailPanel } from './components/DetailPanel'
 import { DomPanel } from './components/DomPanel'
 import { ConsolePanel } from './components/ConsolePanel'
@@ -17,6 +18,7 @@ import { PANELS, PaneGrid } from './components/PaneGrid'
 import { TitleBar } from './components/TitleBar'
 import { Waterfall } from './components/Waterfall'
 import { WsPanel } from './components/WsPanel'
+import { WorkspaceBar } from './components/WorkspaceBar'
 import { buildQuery, formatSize, type UiFilters } from './format'
 import { useRequests } from './hooks/useRequests'
 
@@ -72,6 +74,7 @@ function initialSelectNeedle(): string {
 
 export default function App(): React.JSX.Element {
   const [status, setStatus] = useState<ControllerStatus | null>(null)
+  const [workspaces, setWorkspaces] = useState<WorkspaceOverview | null>(null)
   const [filters, setFilters] = useState<UiFilters>(DEFAULT_FILTERS)
   const [selectedSeq, setSelectedSeq] = useState<number | null>(null)
   // 开局要自动选中的那条请求；选中一次就把针清掉，之后不再干扰用户
@@ -92,6 +95,7 @@ export default function App(): React.JSX.Element {
 
   useEffect(() => {
     const offStatus = window.monitor.onStatus(setStatus)
+    const offWorkspaces = window.monitor.onWorkspaces(setWorkspaces)
     const offDock = window.monitor.onDock(applyDock)
     const offRecords = window.monitor.onRequests((batch) => {
       if (batch.length === 0) return
@@ -103,21 +107,29 @@ export default function App(): React.JSX.Element {
       }, 400)
     })
     void window.monitor.getStatus().then(setStatus)
+    void window.monitor.getWorkspaces().then(setWorkspaces).catch((error: unknown) => {
+      console.error('读取工作区失败', error)
+    })
     return () => {
       offStatus()
+      offWorkspaces()
       offDock()
       offRecords()
       if (tickTimer.current !== null) window.clearTimeout(tickTimer.current)
     }
   }, [applyDock])
 
-  // 恢复上次摆好的布局。URL 显式指定面板时以 URL 为准（验收脚本按 ?tab= 截图）
+  // 工作区切换同时恢复它自己的布局。URL 显式指定面板时以 URL 为准（验收脚本按 ?tab= 截图）。
   useEffect(() => {
+    if (!workspaces) return
+    setSelectedSeq(null)
     if (urlPanel()) {
       setLayoutReady(true)
       return
     }
     let alive = true
+    // 读取新工作区期间，不能把旧工作区的 layout 自动写进新目录。
+    setLayoutReady(false)
     void window.monitor
       .uiSettings()
       .then((settings) => {
@@ -130,7 +142,7 @@ export default function App(): React.JSX.Element {
     return () => {
       alive = false
     }
-  }, [])
+  }, [workspaces?.activeWorkspaceId])
 
   // 布局一变就落盘。原来是 400ms 防抖 + 「关窗口补一次」，实测补不上：关窗口是
   // 直接拆渲染进程，React 的卸载清理根本不跑，防抖窗口里退出就真把那一下丢了。
@@ -280,6 +292,8 @@ export default function App(): React.JSX.Element {
         onToggleDock={toggleDock}
         onFlipDock={flipDock}
       />
+
+      <WorkspaceBar overview={workspaces} onChange={setWorkspaces} />
 
       {status?.error && <div className="banner banner-err">{status.error}</div>}
       {state === 'launching' && <div className="banner">正在启动内核…</div>}

@@ -20,6 +20,14 @@ import type {
 } from '../../shared/types'
 import type { Controller } from '../controller'
 
+/** 工作区动作不依赖“当前浏览器已经连上”，所以与 Controller 桥接单独保留。 */
+export interface WorkspaceControlApi {
+  list(): unknown
+  create(input: { name: string; profile?: Profile }): unknown
+  open(id: string): Promise<unknown>
+  suspend(id: string): Promise<unknown>
+}
+
 /**
  * 控制桥：把主进程里的 Controller 暴露给「控制服务」子进程（control/server.mjs）。
  *
@@ -39,6 +47,7 @@ function numOrUndefined(value: unknown): number | undefined {
 export class ControlBridge {
   private child: ChildProcess | null = null
   private api: Controller | null = null
+  private workspaceApi: WorkspaceControlApi | null = null
   private dataDir: string
   private root: string
   private port: number
@@ -63,8 +72,12 @@ export class ControlBridge {
     this.nodePath = options.nodePath
   }
 
-  attach(api: Controller): void {
+  attach(api: Controller | null): void {
     this.api = api
+  }
+
+  attachWorkspace(api: WorkspaceControlApi | null): void {
+    this.workspaceApi = api
   }
 
   start(): void {
@@ -125,6 +138,32 @@ export class ControlBridge {
   }
 
   private async dispatch(id: number, method: string, params: Record<string, unknown>): Promise<void> {
+    if (method === 'workspaces.list' || method === 'workspace.create' || method === 'workspace.open' || method === 'workspace.suspend') {
+      const workspace = this.workspaceApi
+      if (!workspace) return this.reply({ id, error: '工作区服务还没起来' })
+      try {
+        let result: unknown
+        switch (method) {
+          case 'workspaces.list':
+            result = workspace.list()
+            break
+          case 'workspace.create':
+            result = workspace.create({
+              name: String(params.name ?? ''),
+              ...(params.profile === 'H' || params.profile === 'L' ? { profile: params.profile } : {})
+            })
+            break
+          case 'workspace.open':
+            result = await workspace.open(String(params.id ?? ''))
+            break
+          default:
+            result = await workspace.suspend(String(params.id ?? ''))
+        }
+        return this.reply({ id, result: result ?? null })
+      } catch (error) {
+        return this.reply({ id, error: error instanceof Error ? error.message : String(error) })
+      }
+    }
     const api = this.api
     if (!api) return this.reply({ id, error: '控制器还没起来' })
     try {

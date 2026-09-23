@@ -9,6 +9,7 @@ import { resolveRuntimeFile, resolveRuntimeRoot } from './paths'
 import { locateNode } from './storage/locate-node'
 import { DEFAULT_WINDOW_MS } from '../../proxy/correlate.mjs'
 import { emptyRuleSet, readRuleSet, writeRuleSet } from './rules/store'
+import { WorkspaceService } from './workspace/service'
 import type {
   ConsoleEntry,
   ControllerStatus,
@@ -30,6 +31,11 @@ import type {
   UiSettings,
   WsFrameQuery
 } from '../shared/types'
+import type {
+  WorkspaceCreateInput,
+  WorkspaceOverview,
+  WorkspaceSummary
+} from '../shared/contracts/workspace'
 
 /** 存储编辑的入参（就是 Controller.editStorage 那一个） */
 type SiteStorageEdit = Parameters<Controller['editStorage']>[0]
@@ -135,12 +141,249 @@ const PROXY_REWRITE_MB = envInt('MONITOR_PROXY_REWRITE_MB', 32)
 const PROXY_WINDOW_MS = envInt('MONITOR_PROXY_WINDOW_MS', DEFAULT_WINDOW_MS)
 /** 上游 TLS 校验。本地自签 origin 的验收要关掉 */
 const PROXY_UPSTREAM_VERIFY = process.env['MONITOR_PROXY_UPSTREAM_VERIFY'] !== '0'
+/** 每个工作区都会持有 Chromium、CDP、存储和可选代理；默认先保守限制为 4 个。 */
+const MAX_ACTIVE_WORKSPACES = Math.max(1, envInt('MONITOR_MAX_ACTIVE_WORKSPACES', 4))
 
 let controller: Controller | null = null
+/** 所有真实运行中的工作区；`controller` 只是其中当前被 UI/Agent 聚焦的一个。 */
+const workspaceControllers = new Map<string, Controller>()
 let controlBridge: ControlBridge | null = null
 let controlPort: number | null = null
 let controlWindow: BrowserWindow | null = null
 let dock: WindowDock | null = null
+let workspaceService: WorkspaceService | null = null
+let activeWorkspace: WorkspaceSummary | null = null
+
+function currentWorkspacePaths(): {
+  profileDir: string
+  dbPath: string
+  downloadDir: string
+  rulesPath: string
+  uiSettingsPath: string
+} {
+  if (!workspaceService || !activeWorkspace) throw new Error('当前没有活动工作区')
+  return workspaceService.pathsFor(activeWorkspace.id)
+}
+
+/** 旧 Controller 的配置保持不变；变化的只有由工作区决定的状态目录和采集 Profile。 */
+function createControllerForWorkspace(workspace: WorkspaceSummary): Controller {
+  if (!workspaceService) throw new Error('WorkspaceService 尚未初始化')
+  const paths = workspaceService.pathsFor(workspace.id)
+  mkdirSync(paths.downloadDir, { recursive: true })
+  return new Controller({
+    userDataDir: paths.profileDir,
+    startUrl: START_URL,
+    profile: workspace.profile,
+    headless: HEADLESS,
+    dbPath: paths.dbPath,
+    downloadDir: paths.downloadDir,
+    captureBodies: CAPTURE_BODIES,
+    bodyMaxBytes: BODY_MAX_BYTES,
+    bodyStoreMaxBytes: BODY_STORE_BYTES,
+    bodyStoreMaxCount: BODY_STORE_COUNT,
+    bodyTypes: BODY_TYPES,
+    bodyTimeoutMs: BODY_TIMEOUT_MS,
+    captureScripts: CAPTURE_SCRIPTS,
+    scriptMaxBytes: SCRIPT_MAX_KB * 1024,
+    scriptMaxCount: SCRIPT_MAX_COUNT,
+    scriptTimeoutMs: SCRIPT_TIMEOUT_MS,
+    scriptConcurrency: SCRIPT_CONCURRENCY,
+    proxy: PROXY,
+    proxyRewriteMaxBytes: PROXY_REWRITE_MB * 1024 * 1024,
+    proxyMergeWindowMs: PROXY_WINDOW_MS,
+    proxyUpstreamRejectUnauthorized: PROXY_UPSTREAM_VERIFY,
+    ...(PROXY_KEY ? { proxyKeyFile: PROXY_KEY } : {})
+  })
+}
+
+function bindController(next: Controller, workspaceId: string): void {
+  next.on('records', (batch: RequestRecord[]) => {
+    if (controller !== next) return
+    if (controlWindow && !controlWindow.isDestroyed()) {
+      controlWindow.webContents.send('monitor:records', batch)
+    }
+  })
+
+  next.on('status', (status: ControllerStatus) => {
+    if (status.state === 'error' && workspaceControllers.get(workspaceId) === next) {
+      workspaceService?.markError(workspaceId, status.error ?? '浏览器运行失败')
+      publishWorkspaces()
+    }
+    if (controller !== next) return
+    if (controlWindow && !controlWindow.isDestroyed()) {
+      controlWindow.webContents.send('monitor:status', withDock(status))
+    }
+  })
+
+  next.on('log', (line: string) => console.log(line))
+  next.on('console', (entry: ConsoleEntry) => {
+    if (controller !== next) return
+    if (controlWindow && !controlWindow.isDestroyed()) {
+      controlWindow.webContents.send('monitor:console', entry)
+    }
+  })
+}
+
+function publishWorkspaces(): void {
+  if (!workspaceService || !controlWindow || controlWindow.isDestroyed()) return
+  controlWindow.webContents.send('monitor:workspaces', workspaceService.overview())
+}
+
+function runningWorkspaceCount(): number {
+  let count = 0
+  for (const candidate of workspaceControllers.values()) {
+    const state = candidate.getStatus().state
+    if (state === 'connected' || state === 'connecting' || state === 'launching') count += 1
+  }
+  return count
+}
+
+/** 切工作台焦点不改变任何后台浏览器的运行状态。 */
+function focusWorkspace(workspace: WorkspaceSummary, next: Controller | null): void {
+  activeWorkspace = workspace
+  controller = next
+  const paths = currentWorkspacePaths()
+  rebuildDock(paths.profileDir, paths.uiSettingsPath)
+  controlBridge?.attach(next)
+  if (next && controlWindow && !controlWindow.isDestroyed()) {
+    controlWindow.webContents.send('monitor:status', withDock(next.getStatus()))
+    void dock?.restore()
+  }
+  publishWorkspaces()
+}
+
+function createWorkspace(input: WorkspaceCreateInput): WorkspaceSummary {
+  if (!workspaceService) throw new Error('WorkspaceService 尚未初始化')
+  const workspace = workspaceService.create(input)
+  publishWorkspaces()
+  return workspace
+}
+
+function rebuildDock(profileDir: string, settingsPath: string): void {
+  if (!controlWindow) return
+  dock?.dispose()
+  dock = new WindowDock({
+    win: controlWindow,
+    scriptPath: DOCK_SCRIPT,
+    profileDir,
+    settingsPath,
+    log: (line: string) => console.log(line)
+  })
+  dock.onState((state: DockState) => {
+    const status = controller?.getStatus()
+    if (status) status.dock = state
+    if (controlWindow && !controlWindow.isDestroyed()) {
+      controlWindow.webContents.send('monitor:dock', state)
+    }
+  })
+}
+
+/**
+ * 打开工作区会保留其它工作区的 Chromium。切换 UI 焦点不是停止后台工作区；只有
+ * suspend 才会关闭指定工作区的浏览器与 CDP。每个运行实例始终绑定自己的 profile。
+ */
+async function openWorkspace(id: string): Promise<WorkspaceOverview> {
+  if (!workspaceService) throw new Error('WorkspaceService 尚未初始化')
+  if (activeWorkspace?.id === id && controller?.getStatus().state === 'connected') {
+    return workspaceService.overview()
+  }
+
+  const intended = workspaceService.get(id)
+  if (intended.state === 'archived') throw new Error('已归档工作区不能直接打开')
+  const existing = workspaceControllers.get(id)
+  if (existing) {
+    const state = existing.getStatus().state
+    if (state === 'connected' || state === 'connecting' || state === 'launching') {
+      focusWorkspace(workspaceService.select(id), existing)
+      return workspaceService.overview()
+    }
+    try {
+      await existing.shutdown()
+    } finally {
+      workspaceControllers.delete(id)
+      if (controller === existing) controller = null
+    }
+  }
+
+  if (runningWorkspaceCount() >= MAX_ACTIVE_WORKSPACES) {
+    throw new Error(`同时运行的工作区已达上限（${MAX_ACTIVE_WORKSPACES}）；请先休眠一个工作区`)
+  }
+
+  const target = workspaceService.beginOpen(id)
+  const next = createControllerForWorkspace(target)
+  workspaceControllers.set(target.id, next)
+  bindController(next, target.id)
+  focusWorkspace(target, next)
+  const paths = workspaceService.pathsFor(target.id)
+  next.setRuleSet(readRuleSet(paths.rulesPath))
+
+  try {
+    await next.start()
+    if (next.getStatus().state === 'error') {
+      workspaceService.markError(target.id, next.getStatus().error ?? '浏览器启动失败')
+    } else {
+      workspaceService.markRunning(target.id)
+      activeWorkspace = workspaceService.get(target.id)
+      publishWorkspaces()
+      void dock?.restore()
+    }
+  } catch (error) {
+    workspaceService.markError(target.id, error instanceof Error ? error.message : String(error))
+    throw error
+  }
+  return workspaceService.overview()
+}
+
+async function suspendWorkspace(id: string): Promise<WorkspaceOverview> {
+  if (!workspaceService) throw new Error('WorkspaceService 尚未初始化')
+  const running = workspaceControllers.get(id)
+  if (running) await running.shutdown()
+  workspaceControllers.delete(id)
+  if (controller === running) {
+    controller = null
+    controlBridge?.attach(null)
+  }
+  workspaceService.markSuspended(id)
+  if (activeWorkspace?.id === id) activeWorkspace = workspaceService.get(id)
+  publishWorkspaces()
+  return workspaceService.overview()
+}
+
+async function shutdownAllWorkspaces(): Promise<Record<string, unknown>> {
+  const summaries: Record<string, unknown> = {}
+  const running = [...workspaceControllers.entries()]
+  workspaceControllers.clear()
+  controller = null
+  controlBridge?.attach(null)
+  for (const [workspaceId, instance] of running) {
+    try {
+      await instance.shutdown()
+      summaries[workspaceId] = instance.summary()
+    } catch (error) {
+      summaries[workspaceId] = { error: error instanceof Error ? error.message : String(error) }
+    }
+    try {
+      workspaceService?.markSuspended(workspaceId)
+    } catch {
+      /* 应用关闭时不因一条历史坏记录阻塞其它工作区收尾 */
+    }
+  }
+  return summaries
+}
+
+function stopAllWorkspaces(): void {
+  for (const [workspaceId, instance] of workspaceControllers) {
+    instance.stop()
+    try {
+      workspaceService?.markSuspended(workspaceId)
+    } catch {
+      /* 同上：收尾尽力而为 */
+    }
+  }
+  workspaceControllers.clear()
+  controller = null
+  controlBridge?.attach(null)
+}
 
 /**
  * 把吸附状态合进控制器状态。
@@ -497,8 +740,39 @@ function wireIpc(): void {
       profile: 'L' as Profile
     }
     // 换 Profile = 换了一个浏览器进程/窗口，旧句柄必然失效 —— 重新抓一次贴上去
-    if (result.ok) void dock?.resnap()
+    if (result.ok) {
+      if (activeWorkspace) activeWorkspace = workspaceService?.setProfile(activeWorkspace.id, result.profile) ?? activeWorkspace
+      void dock?.resnap()
+    }
     return result
+  })
+
+  /* ---- Core 0.1：持久工作区 ---- */
+
+  ipcMain.handle('monitor:workspaces', (): WorkspaceOverview => {
+    if (!workspaceService) throw new Error('工作区服务还没准备好')
+    return workspaceService.overview()
+  })
+
+  ipcMain.handle('monitor:workspace-create', (_event, input: WorkspaceCreateInput): WorkspaceSummary => {
+    if (!workspaceService) throw new Error('工作区服务还没准备好')
+    if (!input || typeof input !== 'object' || typeof input.name !== 'string') {
+      throw new Error('工作区参数格式不对：需要 name')
+    }
+    return createWorkspace({
+      name: input.name,
+      ...(input.profile === 'H' || input.profile === 'L' ? { profile: input.profile } : {})
+    })
+  })
+
+  ipcMain.handle('monitor:workspace-open', async (_event, id: string): Promise<WorkspaceOverview> => {
+    if (typeof id !== 'string' || !id) throw new Error('缺少工作区 ID')
+    return openWorkspace(id)
+  })
+
+  ipcMain.handle('monitor:workspace-suspend', async (_event, id: string): Promise<WorkspaceOverview> => {
+    if (typeof id !== 'string' || !id) throw new Error('缺少工作区 ID')
+    return suspendWorkspace(id)
   })
 
   ipcMain.handle('monitor:save-rules', (_event, set: RuleSet) => {
@@ -507,9 +781,9 @@ function wireIpc(): void {
     }
     const stats = controller?.setRuleSet(set)
     try {
-      writeRuleSet(RULES_PATH, set)
+      writeRuleSet(currentWorkspacePaths().rulesPath, set)
     } catch (err) {
-      return { ok: false, error: `写入 ${RULES_PATH} 失败：${(err as Error).message}` }
+      return { ok: false, error: `写入工作区规则失败：${(err as Error).message}` }
     }
     // 其它窗口/面板要能看到最新规则
     for (const win of BrowserWindow.getAllWindows()) {
@@ -519,7 +793,7 @@ function wireIpc(): void {
   })
 
   ipcMain.handle('monitor:open-data-dir', async (): Promise<void> => {
-    await shell.openPath(dirname(DB_PATH))
+    await shell.openPath(dirname(currentWorkspacePaths().dbPath))
   })
 
   /* ---- 自绘标题栏（frame: false）的窗口控制 ---- */
@@ -570,20 +844,23 @@ function wireIpc(): void {
       }
   )
 
-  /* ---- 界面偏好（吸附 + 工作区布局）。和吸附共用一个文件，读改写都走 settings.ts ---- */
+  /* ---- 界面偏好（吸附 + 工作区布局）。每个工作区各有一份。 ---- */
 
-  ipcMain.handle('monitor:ui-settings', (): UiSettings => readUiSettings(SETTINGS_PATH))
+  ipcMain.handle('monitor:ui-settings', (): UiSettings =>
+    readUiSettings(currentWorkspacePaths().uiSettingsPath)
+  )
 
   ipcMain.handle(
     'monitor:set-ui-settings',
     (_event, patch: Partial<UiSettings>): UiSettings => {
-      const current = readUiSettings(SETTINGS_PATH)
+      const settingsPath = currentWorkspacePaths().uiSettingsPath
+      const current = readUiSettings(settingsPath)
       const next: UiSettings = {
         // 逐字段修：布局是渲染层摆出来的，坏值不能落盘把下次启动也带坏
         dock: patch?.dock ? { enabled: patch.dock.enabled === true, side: asSide(patch.dock.side) } : current.dock,
         layout: patch?.layout ? asLayout(patch.layout) : current.layout
       }
-      writeUiSettings(SETTINGS_PATH, next)
+      writeUiSettings(settingsPath, next)
       return next
     }
   )
@@ -594,79 +871,21 @@ app.whenReady().then(async () => {
   const controlWin = createControlWindow()
   controlWindow = controlWin
 
-  controller = new Controller({
-    // 独立 profile，绝不碰用户真实的浏览器数据
-    userDataDir: PROFILE_DIR,
-    startUrl: START_URL,
-    profile: PROFILE,
-    headless: HEADLESS,
-    dbPath: DB_PATH,
-    downloadDir: DOWNLOAD_DIR,
-    captureBodies: CAPTURE_BODIES,
-    bodyMaxBytes: BODY_MAX_BYTES,
-    bodyStoreMaxBytes: BODY_STORE_BYTES,
-    bodyStoreMaxCount: BODY_STORE_COUNT,
-    bodyTypes: BODY_TYPES,
-    bodyTimeoutMs: BODY_TIMEOUT_MS,
-    captureScripts: CAPTURE_SCRIPTS,
-    scriptMaxBytes: SCRIPT_MAX_KB * 1024,
-    scriptMaxCount: SCRIPT_MAX_COUNT,
-    scriptTimeoutMs: SCRIPT_TIMEOUT_MS,
-    scriptConcurrency: SCRIPT_CONCURRENCY,
-    // P5：本地代理 + 三源关联
-    proxy: PROXY,
-    proxyRewriteMaxBytes: PROXY_REWRITE_MB * 1024 * 1024,
-    proxyMergeWindowMs: PROXY_WINDOW_MS,
-    proxyUpstreamRejectUnauthorized: PROXY_UPSTREAM_VERIFY,
-    ...(PROXY_KEY ? { proxyKeyFile: PROXY_KEY } : {})
+  workspaceService = new WorkspaceService({
+    dataDir: DATA_DIR,
+    // 默认工作区保留升级前目录，不移动既有浏览器资料和 monitor.db。
+    legacy: {
+      profileDir: PROFILE_DIR,
+      dbPath: DB_PATH,
+      downloadDir: DOWNLOAD_DIR,
+      rulesPath: RULES_PATH,
+      uiSettingsPath: SETTINGS_PATH
+    },
+    defaultProfile: PROFILE
   })
-
-  controller.on('records', (batch: RequestRecord[]) => {
-    if (controlWindow && !controlWindow.isDestroyed()) {
-      controlWindow.webContents.send('monitor:records', batch)
-    }
-  })
-
-  controller.on('status', (status: ControllerStatus) => {
-    if (controlWindow && !controlWindow.isDestroyed()) {
-      controlWindow.webContents.send('monitor:status', withDock(status))
-    }
-  })
-
-  controller.on('log', (line: string) => {
-    console.log(line)
-  })
-
-  // 控制台面板要实时看到页面里的 console 输出，攒批没意义（量小、人要看时序）
-  controller.on('console', (entry: ConsoleEntry) => {
-    if (controlWindow && !controlWindow.isDestroyed()) {
-      controlWindow.webContents.send('monitor:console', entry)
-    }
-  })
-
-  // 窗口吸附：控制窗口一动，浏览器就跟着动（不是嵌入，只改位置尺寸 —— 见 window/dock.ts）
-  dock = new WindowDock({
-    win: controlWin,
-    scriptPath: DOCK_SCRIPT,
-    profileDir: PROFILE_DIR,
-    settingsPath: SETTINGS_PATH,
-    log: (line: string) => console.log(line)
-  })
-  dock.onState((state: DockState) => {
-    // 先更新 status 上的那份（HTTP API / MCP 读的就是它），再推给面板
-    const status = controller?.getStatus()
-    if (status) status.dock = state
-    if (controlWindow && !controlWindow.isDestroyed()) {
-      controlWindow.webContents.send('monitor:dock', state)
-    }
-  })
-
-  controller.setRuleSet(readRuleSet(RULES_PATH))
-  await controller.start()
-
-  // 浏览器起来了才谈得上吸附。放在 start 之后、异步跑：冷启动的 find 要几秒（要编译助手），
-  // 不该把它挂在启动路径上。
-  void dock.restore()
+  workspaceService.initialize()
+  activeWorkspace = workspaceService.active()
+  await openWorkspace(activeWorkspace.id)
 
   // AI 友好面：把控制服务拉起来，并把它的地址写进状态（面板与 agent 都读得到）
   if (CONTROL_API) {
@@ -684,6 +903,16 @@ app.whenReady().then(async () => {
       // agent 读的 /status 也要能看到吸附状态（和面板走同一份 withDock）
       controlBridge.decorateStatus = (status: ControllerStatus): ControllerStatus =>
         withDock(status) ?? status
+      controlBridge.attachWorkspace({
+        list: () => workspaceService?.overview() ?? { activeWorkspaceId: '', workspaces: [] },
+        create: (input) => {
+          if (!workspaceService) throw new Error('工作区服务还没准备好')
+          return createWorkspace(input)
+        },
+        open: (id) => openWorkspace(id),
+        suspend: (id) => suspendWorkspace(id)
+      })
+      if (!controller) throw new Error('活动工作区没有可用的浏览器控制器')
       controlBridge.attach(controller)
       controlBridge.start()
     } catch (error) {
@@ -719,8 +948,8 @@ app.whenReady().then(async () => {
     void (async () => {
       await controlBridge?.stop()
       controlBridge = null
-      await controller?.shutdown()
-      console.log('MONITOR_SUMMARY ' + JSON.stringify(controller?.summary() ?? {}))
+      const summaries = await shutdownAllWorkspaces()
+      console.log('MONITOR_SUMMARY ' + JSON.stringify({ workspaces: summaries }))
       app.quit()
     })()
   }
@@ -737,7 +966,7 @@ app.whenReady().then(async () => {
 
 app.on('window-all-closed', () => {
   void controlBridge?.stop()
-  controller?.stop()
+  stopAllWorkspaces()
   dock?.dispose()
   dock = null
   app.quit()
@@ -745,7 +974,7 @@ app.on('window-all-closed', () => {
 
 app.on('before-quit', () => {
   void controlBridge?.stop()
-  controller?.stop()
+  stopAllWorkspaces()
   dock?.dispose()
   dock = null
 })

@@ -79,6 +79,105 @@ body {
   -webkit-app-region: no-drag;
 }
 
+/* ---------- Core 0.1 工作区切换 ---------- */
+
+.workspace-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 42px;
+  padding: 6px 14px;
+  flex: none;
+  background: #10151b;
+  border-bottom: 1px solid var(--line);
+}
+
+.workspace-label {
+  color: var(--muted);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.workspace-list {
+  display: flex;
+  min-width: 0;
+  gap: 5px;
+  overflow-x: auto;
+}
+
+.workspace-item,
+.workspace-new,
+.workspace-suspend,
+.workspace-profile {
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: var(--panel);
+  color: var(--muted);
+  font: inherit;
+}
+
+.workspace-item {
+  display: grid;
+  grid-template-columns: auto auto;
+  gap: 6px;
+  align-items: baseline;
+  padding: 4px 8px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.workspace-item small {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.workspace-item:hover:not(:disabled),
+.workspace-item.is-active {
+  border-color: #396fc0;
+  background: #172844;
+  color: #e0ebff;
+}
+
+.workspace-item:disabled,
+.workspace-new:disabled,
+.workspace-suspend:disabled,
+.workspace-profile:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+
+.workspace-profile {
+  margin-left: auto;
+  padding: 4px 6px;
+  font-size: 11px;
+}
+
+.workspace-new,
+.workspace-suspend {
+  padding: 4px 8px;
+  cursor: pointer;
+  font-size: 11px;
+}
+
+.workspace-new:hover:not(:disabled) {
+  border-color: #396fc0;
+  color: #e0ebff;
+}
+
+.workspace-suspend:hover:not(:disabled) {
+  border-color: #a46b29;
+  color: #ffd7a7;
+}
+
+.workspace-error {
+  max-width: 300px;
+  overflow: hidden;
+  color: var(--err);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .tb-mark {
   display: grid;
   place-items: center;

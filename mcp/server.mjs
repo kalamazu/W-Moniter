@@ -442,6 +442,49 @@ const TOOLS = [
     run: () => request('GET', '/sessions')
   },
   {
+    name: 'monitor_workspaces',
+    description:
+      '列出所有持久工作区及其活动焦点、生命周期状态和 Profile。运行中的后台工作区不会因为 UI 焦点切换而停止。先调用它确定要操作的 workspaceId。',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+    run: () => request('GET', '/workspaces')
+  },
+  {
+    name: 'monitor_workspace_create',
+    description: '创建一个持久工作区。它拥有独立浏览器资料、SQLite、下载、规则和界面偏好；创建本身不会启动浏览器。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        name: { type: 'string', description: '1–80 个字符的工作区名称' },
+        profile: { type: 'string', enum: ['L', 'H'], description: '浏览器采集 Profile，默认 L' }
+      },
+      required: ['name'],
+      additionalProperties: false
+    },
+    run: ({ name, profile }) => request('POST', '/workspaces', { body: { name, profile } })
+  },
+  {
+    name: 'monitor_workspace_open',
+    description: '打开或聚焦一个工作区。已运行的工作区只切换焦点，不重启其浏览器；未运行的工作区会启动自己的受管 Chromium。',
+    inputSchema: {
+      type: 'object',
+      properties: { id: { type: 'string', description: '来自 monitor_workspaces 的 workspaceId' } },
+      required: ['id'],
+      additionalProperties: false
+    },
+    run: ({ id }) => request('POST', `/workspaces/${encodeURIComponent(id)}/open`)
+  },
+  {
+    name: 'monitor_workspace_suspend',
+    description: '停止指定工作区的受管浏览器并保留其资料和历史；不会影响其它运行中的工作区。',
+    inputSchema: {
+      type: 'object',
+      properties: { id: { type: 'string', description: '来自 monitor_workspaces 的 workspaceId' } },
+      required: ['id'],
+      additionalProperties: false
+    },
+    run: ({ id }) => request('POST', `/workspaces/${encodeURIComponent(id)}/suspend`)
+  },
+  {
     name: 'monitor_switch_profile',
     description:
       '切 Profile（L ↔ H）。注意：这是**收工重启**，不是热切 —— 启动参数、domain 白名单、采集侧 Debugger 通道都钉在浏览器生命周期里。',

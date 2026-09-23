@@ -1,3 +1,16 @@
+import type {
+  WorkspaceCreateInput,
+  WorkspaceOverview,
+  WorkspaceSummary
+} from './contracts/workspace'
+
+export type {
+  WorkspaceCreateInput,
+  WorkspaceLifecycleState,
+  WorkspaceOverview,
+  WorkspaceSummary
+} from './contracts/workspace'
+
 export type Profile = 'L' | 'H'
 
 /**
@@ -814,6 +827,15 @@ export interface ControllerApi {
   getSessions(): Promise<SessionOverview | null>
   /** 切 Profile 重启：收工 → 换 Profile → 重新起来（库里多一条实例） */
   switchProfile(profile: Profile): Promise<{ ok: boolean; error?: string; profile: Profile }>
+
+  /* ---- Core 0.1：持久工作区 ---- */
+  getWorkspaces(): Promise<WorkspaceOverview>
+  onWorkspaces(cb: (overview: WorkspaceOverview) => void): () => void
+  createWorkspace(input: WorkspaceCreateInput): Promise<WorkspaceSummary>
+  /** 打开会关闭当前受管浏览器，并以目标工作区的独立资料目录重新启动。 */
+  openWorkspace(id: string): Promise<WorkspaceOverview>
+  /** 停止指定工作区的受管浏览器，但保留其资料与历史。 */
+  suspendWorkspace(id: string): Promise<WorkspaceOverview>
 
   /* ---- 自绘标题栏（frame: false）的窗口控制 ---- */
   /** 当前是否最大化。打开时用它对齐真实状态（窗口可能被系统或用户改过） */
