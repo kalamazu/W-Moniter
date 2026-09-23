@@ -520,6 +520,67 @@ self.addEventListener('fetch', (event) => {
 })
 `
 
+const CAPTURE_MATRIX_PAGE = `<!doctype html><meta charset="utf-8"><title>capture matrix</title>
+<script>
+(async () => {
+  const result = { page: true }
+  const attempt = async (key, work) => { try { result[key] = await work() } catch (error) { result[key] = { error: String(error) } } }
+  await attempt('binary', async () => {
+    const bytes = await (await fetch('/matrix-binary')).arrayBuffer()
+    const hash = [...new Uint8Array(await crypto.subtle.digest('SHA-256', bytes))].map((x) => x.toString(16).padStart(2, '0')).join('')
+    return { bytes: bytes.byteLength, hash }
+  })
+  if (!new URLSearchParams(location.search).has('skipUpload')) await attempt('upload', async () => {
+    const bytes = new Uint8Array(2 * 1024 * 1024).fill(71)
+    return await (await fetch('/matrix-upload', { method: 'POST', body: bytes })).json()
+  })
+  await attempt('stream', async () => {
+    const response = await fetch('/matrix-stream')
+    const reader = response.body.getReader()
+    let bytes = 0
+    for (;;) { const part = await reader.read(); if (part.done) break; bytes += part.value.byteLength }
+    return { bytes }
+  })
+  await attempt('truncated', async () => { await (await fetch('/matrix-truncate')).arrayBuffer(); return { complete: true } })
+  await attempt('aborted', async () => {
+    const controller = new AbortController()
+    const pending = fetch('/matrix-slow', { signal: controller.signal }).then((response) => response.arrayBuffer())
+    setTimeout(() => controller.abort(), 250)
+    await pending
+    return { complete: true }
+  })
+  await attempt('cache', async () => {
+    const cache = await caches.open('matrix-v1')
+    await cache.add('/matrix-cache')
+    return { stored: !!(await cache.match('/matrix-cache')) }
+  })
+  await attempt('serviceWorker', async () => {
+    await navigator.serviceWorker.register('/sw.js', { scope: '/' })
+    await navigator.serviceWorker.ready
+    return { ready: true, status: (await fetch('/api/through-sw')).status }
+  })
+  await attempt('sse', () => new Promise((resolve, reject) => {
+    const stream = new EventSource('/events')
+    const timer = setTimeout(() => { stream.close(); reject(new Error('sse timeout')) }, 8000)
+    stream.onmessage = (event) => { clearTimeout(timer); stream.close(); resolve(event.data) }
+    stream.onerror = () => { clearTimeout(timer); stream.close(); reject(new Error('sse error')) }
+  }))
+  await attempt('ws', () => new Promise((resolve, reject) => {
+    const ws = new WebSocket('ws://' + location.host + '/ws-probe')
+    const timer = setTimeout(() => { ws.close(); reject(new Error('ws timeout')) }, 8000)
+    ws.onopen = () => ws.send('matrix-message')
+    ws.onmessage = (event) => { if (String(event.data).includes('echo:matrix-message')) { clearTimeout(timer); ws.close(); resolve(String(event.data)) } }
+    ws.onerror = () => { clearTimeout(timer); reject(new Error('ws error')) }
+  }))
+  await attempt('download', async () => {
+    const link = document.createElement('a'); link.href = '/matrix-download'; link.download = 'matrix-download.bin'
+    document.body.append(link); link.click(); link.remove()
+    return { clicked: true }
+  })
+  await fetch('/matrix-report', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(result) })
+})()
+</script>`
+
 /** 服务端 → 客户端不加掩码（RFC6455 对方向的规定）。长度按 7 / 16 / 64 位分档 */
 function encodeTextFrame(text) {
   const payload = Buffer.from(text, 'utf8')
@@ -676,6 +737,7 @@ main()
 `
 export function startOrigin(port = 0) {
   const requests = []
+  const matrixReports = []
   const openStreams = new Set()
   /** WS 双向真值日志：handshake / in（页面发出）/ out（服务端发出）/ close */
   const wsLog = []
@@ -689,6 +751,7 @@ export function startOrigin(port = 0) {
       path,
       status: 0,
       bytes: 0,
+      receivedBytes: 0,
       at: Date.now(),
       query: url.search,
       // 规则改写请求头的证据：改动后的头会带在真值日志里
@@ -699,15 +762,19 @@ export function startOrigin(port = 0) {
     requests.push(entry)
 
     let bodyBytes = 0
+    const bodyDigest = path === '/matrix-upload' ? createHash('sha256') : null
     // 顺手留一份请求体文本（只给 /api/json-echo 用）—— 契约回归要看得见「请求体多了个字段」
     let bodyText = ''
     req.on('data', (c) => {
       bodyBytes += c.length
+      entry.receivedBytes = bodyBytes
+      bodyDigest?.update(c)
       if (bodyText.length < 65536) bodyText += c.toString('utf8')
     })
     res.on('finish', () => {
       entry.status = res.statusCode
       entry.bytes = bodyBytes
+      entry.finishedAt = Date.now()
     })
 
     const send = (status, type, payload, extraHeaders = {}) => {
@@ -722,6 +789,35 @@ export function startOrigin(port = 0) {
     }
 
     if (path === '/') return send(200, 'text/html; charset=utf-8', PAGE)
+    if (path === '/capture-matrix.html') return send(200, 'text/html; charset=utf-8', CAPTURE_MATRIX_PAGE)
+    if (path === '/matrix-binary') return send(200, 'application/octet-stream', Buffer.alloc(2 * 1024 * 1024, 37))
+    if (path === '/matrix-cache') return send(200, 'application/json', '{"cached":true}', { 'cache-control': 'max-age=3600' })
+    if (path === '/matrix-download') return send(200, 'application/octet-stream', Buffer.alloc(4096, 51), { 'content-disposition': 'attachment; filename="matrix-download.bin"' })
+    if (path === '/matrix-stream') {
+      res.writeHead(200, { 'content-type': 'application/octet-stream', 'cache-control': 'no-store' })
+      for (let n = 0; n < 3; n += 1) res.write(Buffer.alloc(256 * 1024, n + 1))
+      return res.end()
+    }
+    if (path === '/matrix-truncate') {
+      res.writeHead(200, { 'content-type': 'application/octet-stream', 'content-length': '65536', 'cache-control': 'no-store' })
+      res.write(Buffer.alloc(1024, 4))
+      return setTimeout(() => res.destroy(), 50)
+    }
+    if (path === '/matrix-slow') {
+      res.writeHead(200, { 'content-type': 'application/octet-stream', 'cache-control': 'no-store' })
+      res.write(Buffer.alloc(1024, 5))
+      return setTimeout(() => { if (!res.destroyed) res.end(Buffer.alloc(1024, 6)) }, 3000)
+    }
+    if (path === '/matrix-upload' || path === '/matrix-report') {
+      await new Promise((resolve) => req.readableEnded ? resolve() : req.once('end', resolve))
+      if (path === '/matrix-upload') {
+        const hash = bodyDigest.digest('hex')
+        entry.bodyHash = hash
+        return send(200, 'application/json', JSON.stringify({ bytes: bodyBytes, hash }))
+      }
+      try { matrixReports.push(JSON.parse(bodyText)) } catch { matrixReports.push({ error: 'invalid_report' }) }
+      return send(200, 'application/json', '{"ok":true}')
+    }
     if (path === '/rules-probe.html') return send(200, 'text/html; charset=utf-8', RULES_PROBE_PAGE)
     if (path === '/input-probe.html') return send(200, 'text/html; charset=utf-8', INPUT_PROBE_PAGE)
     if (path === '/dom-probe.html') return send(200, 'text/html; charset=utf-8', DOM_PROBE_PAGE)
@@ -938,6 +1034,7 @@ export function startOrigin(port = 0) {
       resolve({
         port: server.address().port,
         requests,
+        matrixReports,
         wsLog,
         close: () =>
           new Promise((done) => {

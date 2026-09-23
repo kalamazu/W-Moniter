@@ -44,6 +44,7 @@ export type BodyState =
   | 'error'
   | 'timeout'
   | 'unmatched'
+  | 'incomplete'
 
 export interface CapturedBody {
   seq: number
@@ -534,7 +535,8 @@ export class BodyCapture {
       }
 
       const status = p.responseStatusCode ?? 0
-      const declared = contentLength(p.responseHeaders)
+      // CDP 返回的是解码后的正文；存在 content-encoding 时不可直接和线上的长度比较。
+      const declared = headerValue(p.responseHeaders, 'content-encoding') ? null : contentLength(p.responseHeaders)
       const mimeType = headerValue(p.responseHeaders, 'content-type')
       const bodyless = isBodyless(status)
       const streaming = looksStreaming(mimeType)
@@ -616,6 +618,12 @@ export class BodyCapture {
     if (!bytes || bytes.byteLength === 0) {
       this.stats.empty += 1
       this.onBody({ seq, bytes: null, state: 'empty', size: 0 })
+      return
+    }
+
+    if (declared !== null && bytes.byteLength < declared) {
+      this.stats.errors += 1
+      this.onBody({ seq, bytes: null, state: 'incomplete', size: bytes.byteLength, declaredSize: declared })
       return
     }
 

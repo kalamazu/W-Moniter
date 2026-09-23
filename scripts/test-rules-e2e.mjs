@@ -233,7 +233,8 @@ async function main() {
     assert.equal(count('/app1.js'), 0, '探针页不该请求 /app1.js'))
 
   console.log('\n== 引擎统计（summary.rules）==')
-  const stats = summary?.rules ?? null
+  const activeSummary = summary?.workspaces?.default ?? summary
+  const stats = activeSummary?.rules ?? null
   await check('summary 里带上了规则统计', () => assert.ok(stats, '没有 summary.rules'))
   if (stats) {
     await check('坏规则 0 条', () => assert.equal(stats.invalid.length, 0, JSON.stringify(stats.invalid)))
@@ -255,11 +256,11 @@ async function main() {
     await check('§6.2 匹配开销 < 50µs', () =>
       assert.ok(stats.avgMatchUs < 50, `实际 ${stats.avgMatchUs.toFixed(2)}µs`))
     await check('注入脚本挂上了', () =>
-      assert.ok((summary.injections?.installed ?? 0) >= 1, JSON.stringify(summary.injections)))
+      assert.ok((activeSummary.injections?.installed ?? 0) >= 1, JSON.stringify(activeSummary.injections)))
   }
 
   console.log('\n== 采集没有被规则破坏 ==')
-  await check('请求照常入库', () => assert.ok((summary?.requestCount ?? 0) >= 8, `requestCount=${summary?.requestCount}`))
+  await check('请求照常入库', () => assert.ok((activeSummary?.requestCount ?? 0) >= 8, `requestCount=${activeSummary?.requestCount}`))
 
   /* ---------------------- 关掉 body 采集时，响应规则也必须生效 ---------------------- */
   // 曾经是坏的：Fetch.enable 的 pattern 只按**请求阶段**的规则反推，
