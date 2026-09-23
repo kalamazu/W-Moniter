@@ -35,7 +35,9 @@ export function WorkspaceBar({ overview, onChange }: Props): React.JSX.Element |
     setBusy(true)
     setError(null)
     try {
-      onChange(await window.monitor.openWorkspace(id))
+      const result = await window.monitor.openWorkspace(id)
+      if (!result.output) throw new Error(result.task.error?.message ?? '打开工作区没有返回结果')
+      onChange(result.output)
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason))
     } finally {
@@ -49,8 +51,11 @@ export function WorkspaceBar({ overview, onChange }: Props): React.JSX.Element |
     setBusy(true)
     setError(null)
     try {
-      const workspace = await window.monitor.createWorkspace({ name, profile })
-      onChange(await window.monitor.openWorkspace(workspace.id))
+      const created = await window.monitor.createWorkspace({ name, profile })
+      if (!created.output) throw new Error(created.task.error?.message ?? '创建工作区没有返回结果')
+      const opened = await window.monitor.openWorkspace(created.output.id)
+      if (!opened.output) throw new Error(opened.task.error?.message ?? '打开工作区没有返回结果')
+      onChange(opened.output)
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason))
     } finally {
@@ -63,7 +68,9 @@ export function WorkspaceBar({ overview, onChange }: Props): React.JSX.Element |
     setBusy(true)
     setError(null)
     try {
-      onChange(await window.monitor.suspendWorkspace(active.id))
+      const result = await window.monitor.suspendWorkspace(active.id)
+      if (!result.output) throw new Error(result.task.error?.message ?? '休眠工作区没有返回结果')
+      onChange(result.output)
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason))
     } finally {
@@ -111,4 +118,3 @@ export function WorkspaceBar({ overview, onChange }: Props): React.JSX.Element |
     </section>
   )
 }
-

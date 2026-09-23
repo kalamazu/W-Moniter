@@ -18,14 +18,14 @@ import type {
   SiteDataType,
   WsFrameQuery
 } from '../../shared/types'
+import type { ActionCatalog, ActionRequest, ActionResult, TaskSnapshot } from '../../shared/contracts/action'
 import type { Controller } from '../controller'
 
 /** 工作区动作不依赖“当前浏览器已经连上”，所以与 Controller 桥接单独保留。 */
 export interface WorkspaceControlApi {
-  list(): unknown
-  create(input: { name: string; profile?: Profile }): unknown
-  open(id: string): Promise<unknown>
-  suspend(id: string): Promise<unknown>
+  execute(request: ActionRequest): Promise<ActionResult>
+  catalog(): ActionCatalog
+  cancel(taskId: string): TaskSnapshot
 }
 
 /**
@@ -138,28 +138,41 @@ export class ControlBridge {
   }
 
   private async dispatch(id: number, method: string, params: Record<string, unknown>): Promise<void> {
-    if (method === 'workspaces.list' || method === 'workspace.create' || method === 'workspace.open' || method === 'workspace.suspend') {
+    if (method === 'workspaces.list' || method === 'workspace.create' || method === 'workspace.open' || method === 'workspace.suspend' || method === 'actions.catalog' || method === 'action.execute' || method === 'task.cancel') {
       const workspace = this.workspaceApi
       if (!workspace) return this.reply({ id, error: '工作区服务还没起来' })
       try {
-        let result: unknown
+        if (method === 'actions.catalog') return this.reply({ id, result: workspace.catalog() })
+        if (method === 'task.cancel') return this.reply({ id, result: workspace.cancel(String(params.taskId ?? '')) })
+        if (method === 'action.execute') return this.reply({ id, result: await workspace.execute(params.request as ActionRequest) })
+        let request: ActionRequest
         switch (method) {
           case 'workspaces.list':
-            result = workspace.list()
+            request = { action: 'workspaces.list', input: {}, target: { kind: 'workspace-collection' } }
             break
           case 'workspace.create':
-            result = workspace.create({
-              name: String(params.name ?? ''),
-              ...(params.profile === 'H' || params.profile === 'L' ? { profile: params.profile } : {})
-            })
+            request = {
+              action: 'workspace.create',
+              input: { name: String(params.name ?? ''), ...(params.profile === 'H' || params.profile === 'L' ? { profile: params.profile } : {}) },
+              target: (params.target as ActionRequest['target']) ?? { kind: 'workspace-collection' },
+              ...(typeof params.idempotencyKey === 'string' ? { idempotencyKey: params.idempotencyKey } : {})
+            }
             break
           case 'workspace.open':
-            result = await workspace.open(String(params.id ?? ''))
+            request = {
+              action: 'workspace.open', input: {},
+              target: (params.target as ActionRequest['target']) ?? { kind: 'workspace', workspaceId: String(params.id ?? '') },
+              ...(typeof params.idempotencyKey === 'string' ? { idempotencyKey: params.idempotencyKey } : {})
+            }
             break
           default:
-            result = await workspace.suspend(String(params.id ?? ''))
+            request = {
+              action: 'workspace.suspend', input: {},
+              target: (params.target as ActionRequest['target']) ?? { kind: 'workspace', workspaceId: String(params.id ?? '') },
+              ...(typeof params.idempotencyKey === 'string' ? { idempotencyKey: params.idempotencyKey } : {})
+            }
         }
-        return this.reply({ id, result: result ?? null })
+        return this.reply({ id, result: await workspace.execute(request) })
       } catch (error) {
         return this.reply({ id, error: error instanceof Error ? error.message : String(error) })
       }

@@ -449,18 +449,52 @@ const TOOLS = [
     run: () => request('GET', '/workspaces')
   },
   {
+    name: 'monitor_action_catalog',
+    description: '读取当前可执行动作目录及其 TargetRef 要求。写动作必须明确目标，不能依赖 UI 当前焦点。',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+    run: () => request('GET', '/actions/catalog')
+  },
+  {
+    name: 'monitor_action_execute',
+    description: '执行统一动作协议。用于已在目录中注册的动作；mutation 必须给 target，重试时复用 idempotencyKey。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        action: { type: 'string' },
+        input: { type: 'object' },
+        target: { type: 'object', description: 'TargetRef，例如 { kind: "workspace", workspaceId }' },
+        idempotencyKey: { type: 'string' }
+      },
+      required: ['action', 'input'],
+      additionalProperties: false
+    },
+    run: (body) => request('POST', '/actions/execute', { body })
+  },
+  {
+    name: 'monitor_task_cancel',
+    description: '请求取消尚未完成的统一动作任务；取消只承诺本机停止，远端效果不确定时任务会标记 unknown。',
+    inputSchema: {
+      type: 'object',
+      properties: { taskId: { type: 'string' } },
+      required: ['taskId'],
+      additionalProperties: false
+    },
+    run: ({ taskId }) => request('POST', `/tasks/${encodeURIComponent(taskId)}/cancel`)
+  },
+  {
     name: 'monitor_workspace_create',
     description: '创建一个持久工作区。它拥有独立浏览器资料、SQLite、下载、规则和界面偏好；创建本身不会启动浏览器。',
     inputSchema: {
       type: 'object',
       properties: {
         name: { type: 'string', description: '1–80 个字符的工作区名称' },
-        profile: { type: 'string', enum: ['L', 'H'], description: '浏览器采集 Profile，默认 L' }
+        profile: { type: 'string', enum: ['L', 'H'], description: '浏览器采集 Profile，默认 L' },
+        idempotencyKey: { type: 'string', description: '可选幂等键；重试同一创建动作时必须复用' }
       },
       required: ['name'],
       additionalProperties: false
     },
-    run: ({ name, profile }) => request('POST', '/workspaces', { body: { name, profile } })
+    run: ({ name, profile, idempotencyKey }) => request('POST', '/workspaces', { body: { name, profile, idempotencyKey } })
   },
   {
     name: 'monitor_workspace_open',

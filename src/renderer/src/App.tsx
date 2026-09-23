@@ -107,7 +107,9 @@ export default function App(): React.JSX.Element {
       }, 400)
     })
     void window.monitor.getStatus().then(setStatus)
-    void window.monitor.getWorkspaces().then(setWorkspaces).catch((error: unknown) => {
+    void window.monitor.getWorkspaces().then((result) => {
+      if (result.output) setWorkspaces(result.output)
+    }).catch((error: unknown) => {
       console.error('读取工作区失败', error)
     })
     return () => {

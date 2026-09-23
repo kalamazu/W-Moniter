@@ -61,6 +61,7 @@ import type {
   WsFramePage,
   WsFrameQuery
 } from '../shared/types'
+import type { ActionRequest } from '../shared/contracts/action'
 import type { WorkspaceCreateInput, WorkspaceOverview, WorkspaceSummary } from '../shared/contracts/workspace'
 
 const api: ControllerApi = {
@@ -193,7 +194,7 @@ const api: ControllerApi = {
       profile: Profile
     }>,
 
-  getWorkspaces: () => ipcRenderer.invoke('monitor:workspaces') as Promise<WorkspaceOverview>,
+  getWorkspaces: () => ipcRenderer.invoke('monitor:workspaces'),
 
   onWorkspaces: (callback) => {
     const listener = (_event: IpcRendererEvent, overview: WorkspaceOverview): void => callback(overview)
@@ -203,14 +204,20 @@ const api: ControllerApi = {
     }
   },
 
-  createWorkspace: (input: WorkspaceCreateInput) =>
-    ipcRenderer.invoke('monitor:workspace-create', input) as Promise<WorkspaceSummary>,
+  createWorkspace: (input: WorkspaceCreateInput, idempotencyKey?: string) =>
+    ipcRenderer.invoke('monitor:workspace-create', input, idempotencyKey),
 
-  openWorkspace: (id: string) =>
-    ipcRenderer.invoke('monitor:workspace-open', id) as Promise<WorkspaceOverview>,
+  openWorkspace: (id: string, idempotencyKey?: string) =>
+    ipcRenderer.invoke('monitor:workspace-open', id, idempotencyKey),
 
-  suspendWorkspace: (id: string) =>
-    ipcRenderer.invoke('monitor:workspace-suspend', id) as Promise<WorkspaceOverview>,
+  suspendWorkspace: (id: string, idempotencyKey?: string) =>
+    ipcRenderer.invoke('monitor:workspace-suspend', id, idempotencyKey),
+
+  executeAction: (request: ActionRequest) => ipcRenderer.invoke('monitor:action-execute', request),
+
+  getActionCatalog: () => ipcRenderer.invoke('monitor:action-catalog'),
+
+  cancelTask: (taskId: string) => ipcRenderer.invoke('monitor:task-cancel', taskId),
 
   /* ---- 自绘标题栏（frame: false）的窗口控制 ---- */
 

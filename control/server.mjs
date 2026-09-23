@@ -200,6 +200,7 @@ route('GET', '/console', () => call('console.list', {}))
 route('GET', '/instances', () => call('instances', {}, 120000))
 route('GET', '/sessions', () => call('sessions', {}, 120000))
 route('GET', '/workspaces', () => call('workspaces.list', {}))
+route('GET', '/actions/catalog', () => call('actions.catalog', {}))
 route('GET', '/dom/tree', (_req, { query }) =>
   call('dom.tree', { nodeId: query.has('nodeId') ? num(query.get('nodeId'), 0) : undefined, depth: query.has('depth') ? num(query.get('depth'), 1) : undefined }, 120000)
 )
@@ -226,7 +227,11 @@ route('POST', '/dom/highlight', async (_req, { body }) => call('dom.highlight', 
 route('POST', '/rules', async (_req, { body }) => call('rules.save', { set: body }, 120000), { mutating: true })
 route('POST', '/sessions/profile', async (_req, { body }) => call('sessions.switchProfile', { profile: body?.profile === 'H' ? 'H' : 'L' }, 180000), { mutating: true })
 route('POST', '/workspaces', async (_req, { body }) =>
-  call('workspace.create', { name: String(body?.name ?? ''), profile: body?.profile === 'H' ? 'H' : 'L' }),
+  call('workspace.create', {
+    name: String(body?.name ?? ''), profile: body?.profile === 'H' ? 'H' : 'L',
+    ...(body?.target ? { target: body.target } : {}),
+    ...(typeof body?.idempotencyKey === 'string' ? { idempotencyKey: body.idempotencyKey } : {})
+  }),
   { mutating: true }
 )
 route('POST', '/workspaces/:id/open', async (_req, { params }) =>
@@ -237,6 +242,8 @@ route('POST', '/workspaces/:id/suspend', async (_req, { params }) =>
   call('workspace.suspend', { id: params.id }, 180000),
   { mutating: true }
 )
+route('POST', '/actions/execute', async (_req, { body }) => call('action.execute', { request: body ?? {} }, 180000), { mutating: true })
+route('POST', '/tasks/:id/cancel', async (_req, { params }) => call('task.cancel', { taskId: params.id }), { mutating: true })
 route('POST', '/clear', async () => call('clear', {}), { mutating: true })
 route('POST', '/console/clear', async () => call('console.clear', {}), { mutating: true })
 

@@ -10,6 +10,7 @@ import { locateNode } from './storage/locate-node'
 import { DEFAULT_WINDOW_MS } from '../../proxy/correlate.mjs'
 import { emptyRuleSet, readRuleSet, writeRuleSet } from './rules/store'
 import { WorkspaceService } from './workspace/service'
+import { WorkspaceActionRegistry } from './actions/registry'
 import type {
   ConsoleEntry,
   ControllerStatus,
@@ -36,6 +37,7 @@ import type {
   WorkspaceOverview,
   WorkspaceSummary
 } from '../shared/contracts/workspace'
+import type { ActionRequest, ActionResult, TaskSnapshot } from '../shared/contracts/action'
 
 /** 存储编辑的入参（就是 Controller.editStorage 那一个） */
 type SiteStorageEdit = Parameters<Controller['editStorage']>[0]
@@ -152,6 +154,7 @@ let controlPort: number | null = null
 let controlWindow: BrowserWindow | null = null
 let dock: WindowDock | null = null
 let workspaceService: WorkspaceService | null = null
+let workspaceActions: WorkspaceActionRegistry | null = null
 let activeWorkspace: WorkspaceSummary | null = null
 
 function currentWorkspacePaths(): {
@@ -749,30 +752,48 @@ function wireIpc(): void {
 
   /* ---- Core 0.1：持久工作区 ---- */
 
-  ipcMain.handle('monitor:workspaces', (): WorkspaceOverview => {
-    if (!workspaceService) throw new Error('工作区服务还没准备好')
-    return workspaceService.overview()
-  })
+  const executeWorkspaceAction = async (request: ActionRequest): Promise<ActionResult> => {
+    if (!workspaceActions) throw new Error('工作区动作服务还没准备好')
+    return workspaceActions.execute(request)
+  }
 
-  ipcMain.handle('monitor:workspace-create', (_event, input: WorkspaceCreateInput): WorkspaceSummary => {
-    if (!workspaceService) throw new Error('工作区服务还没准备好')
+  ipcMain.handle('monitor:workspaces', (): Promise<ActionResult> =>
+    executeWorkspaceAction({ action: 'workspaces.list', input: {}, target: { kind: 'workspace-collection' } })
+  )
+
+  ipcMain.handle('monitor:workspace-create', (_event, input: WorkspaceCreateInput, idempotencyKey?: string): Promise<ActionResult> => {
     if (!input || typeof input !== 'object' || typeof input.name !== 'string') {
       throw new Error('工作区参数格式不对：需要 name')
     }
-    return createWorkspace({
-      name: input.name,
-      ...(input.profile === 'H' || input.profile === 'L' ? { profile: input.profile } : {})
+    return executeWorkspaceAction({
+      action: 'workspace.create',
+      input: { name: input.name, ...(input.profile === 'H' || input.profile === 'L' ? { profile: input.profile } : {}) },
+      target: { kind: 'workspace-collection' },
+      ...(typeof idempotencyKey === 'string' ? { idempotencyKey } : {})
     })
   })
 
-  ipcMain.handle('monitor:workspace-open', async (_event, id: string): Promise<WorkspaceOverview> => {
+  ipcMain.handle('monitor:workspace-open', (_event, id: string, idempotencyKey?: string): Promise<ActionResult> => {
     if (typeof id !== 'string' || !id) throw new Error('缺少工作区 ID')
-    return openWorkspace(id)
+    return executeWorkspaceAction({
+      action: 'workspace.open', input: {}, target: { kind: 'workspace', workspaceId: id },
+      ...(typeof idempotencyKey === 'string' ? { idempotencyKey } : {})
+    })
   })
 
-  ipcMain.handle('monitor:workspace-suspend', async (_event, id: string): Promise<WorkspaceOverview> => {
+  ipcMain.handle('monitor:workspace-suspend', (_event, id: string, idempotencyKey?: string): Promise<ActionResult> => {
     if (typeof id !== 'string' || !id) throw new Error('缺少工作区 ID')
-    return suspendWorkspace(id)
+    return executeWorkspaceAction({
+      action: 'workspace.suspend', input: {}, target: { kind: 'workspace', workspaceId: id },
+      ...(typeof idempotencyKey === 'string' ? { idempotencyKey } : {})
+    })
+  })
+
+  ipcMain.handle('monitor:action-execute', (_event, request: ActionRequest): Promise<ActionResult> => executeWorkspaceAction(request))
+  ipcMain.handle('monitor:action-catalog', () => workspaceActions?.catalog() ?? { actions: [] })
+  ipcMain.handle('monitor:task-cancel', (_event, taskId: string): TaskSnapshot => {
+    if (!workspaceActions) throw new Error('工作区动作服务还没准备好')
+    return workspaceActions.cancel(taskId)
   })
 
   ipcMain.handle('monitor:save-rules', (_event, set: RuleSet) => {
@@ -884,6 +905,11 @@ app.whenReady().then(async () => {
     defaultProfile: PROFILE
   })
   workspaceService.initialize()
+  workspaceActions = new WorkspaceActionRegistry(workspaceService, {
+    create: createWorkspace,
+    open: openWorkspace,
+    suspend: suspendWorkspace
+  })
   activeWorkspace = workspaceService.active()
   await openWorkspace(activeWorkspace.id)
 
@@ -904,13 +930,15 @@ app.whenReady().then(async () => {
       controlBridge.decorateStatus = (status: ControllerStatus): ControllerStatus =>
         withDock(status) ?? status
       controlBridge.attachWorkspace({
-        list: () => workspaceService?.overview() ?? { activeWorkspaceId: '', workspaces: [] },
-        create: (input) => {
-          if (!workspaceService) throw new Error('工作区服务还没准备好')
-          return createWorkspace(input)
+        execute: async (request) => {
+          if (!workspaceActions) throw new Error('工作区动作服务还没准备好')
+          return workspaceActions.execute(request)
         },
-        open: (id) => openWorkspace(id),
-        suspend: (id) => suspendWorkspace(id)
+        catalog: () => workspaceActions?.catalog() ?? { actions: [] },
+        cancel: (taskId) => {
+          if (!workspaceActions) throw new Error('工作区动作服务还没准备好')
+          return workspaceActions.cancel(taskId)
+        }
       })
       if (!controller) throw new Error('活动工作区没有可用的浏览器控制器')
       controlBridge.attach(controller)

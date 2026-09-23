@@ -19,6 +19,7 @@
     "test:dom": "node scripts/test-dom.mjs",
     "test:sessions": "node scripts/test-sessions.mjs",
     "test:workspaces": "node scripts/test-workspaces.mjs",
+    "test:actions": "node scripts/test-actions.mjs",
     "test:dock": "node scripts/test-dock.mjs",
     "test:layout": "node scripts/test-layout.mjs",
     "test:analytics": "node scripts/test-analytics.mjs",

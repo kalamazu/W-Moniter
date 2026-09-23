@@ -3,6 +3,12 @@ import type {
   WorkspaceOverview,
   WorkspaceSummary
 } from './contracts/workspace'
+import type {
+  ActionCatalog,
+  ActionRequest,
+  ActionResult,
+  TaskSnapshot
+} from './contracts/action'
 
 export type {
   WorkspaceCreateInput,
@@ -10,6 +16,16 @@ export type {
   WorkspaceOverview,
   WorkspaceSummary
 } from './contracts/workspace'
+export type {
+  ActionCatalog,
+  ActionDescriptor,
+  ActionRequest,
+  ActionResult,
+  IdentityRef,
+  TargetRef,
+  TaskSnapshot,
+  TaskState
+} from './contracts/action'
 
 export type Profile = 'L' | 'H'
 
@@ -829,13 +845,16 @@ export interface ControllerApi {
   switchProfile(profile: Profile): Promise<{ ok: boolean; error?: string; profile: Profile }>
 
   /* ---- Core 0.1：持久工作区 ---- */
-  getWorkspaces(): Promise<WorkspaceOverview>
+  getWorkspaces(): Promise<ActionResult<WorkspaceOverview>>
   onWorkspaces(cb: (overview: WorkspaceOverview) => void): () => void
-  createWorkspace(input: WorkspaceCreateInput): Promise<WorkspaceSummary>
-  /** 打开会关闭当前受管浏览器，并以目标工作区的独立资料目录重新启动。 */
-  openWorkspace(id: string): Promise<WorkspaceOverview>
+  createWorkspace(input: WorkspaceCreateInput, idempotencyKey?: string): Promise<ActionResult<WorkspaceSummary>>
+  /** 打开会聚焦或启动目标工作区；不会停止其它运行中的受管浏览器。 */
+  openWorkspace(id: string, idempotencyKey?: string): Promise<ActionResult<WorkspaceOverview>>
   /** 停止指定工作区的受管浏览器，但保留其资料与历史。 */
-  suspendWorkspace(id: string): Promise<WorkspaceOverview>
+  suspendWorkspace(id: string, idempotencyKey?: string): Promise<ActionResult<WorkspaceOverview>>
+  executeAction(request: ActionRequest): Promise<ActionResult>
+  getActionCatalog(): Promise<ActionCatalog>
+  cancelTask(taskId: string): Promise<TaskSnapshot>
 
   /* ---- 自绘标题栏（frame: false）的窗口控制 ---- */
   /** 当前是否最大化。打开时用它对齐真实状态（窗口可能被系统或用户改过） */
