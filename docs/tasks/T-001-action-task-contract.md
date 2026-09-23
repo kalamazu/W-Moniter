@@ -1,11 +1,11 @@
 # T-001：统一身份、动作与任务契约
 
-状态：可认领  
+状态：已通过
 蓝图映射：M0 §3.1、§3.2  
 优先级：P0  
-认领：未认领  
-基线 commit：认领时填写  
-验收：实现完成后创建 `A-001-action-task-contract.md`
+认领：Codex · 2026-09-23
+基线 commit：`207d584 docs: add task and acceptance workflow`
+验收：[A-001](../acceptance/A-001-action-task-contract.md)
 
 ## 背景与目标
 
@@ -35,3 +35,11 @@
 - 控制面目前是手写路由；生成 catalog 的构建接线可能影响打包，需先写 ADR 或技术验证记录。
 - 完成后必须更新《实施进度与待办》、任务看板与 A-001 证据。
 
+## 完成记录
+
+- 实现 commit：`318e797 feat: add target-aware action task contracts`。
+- 实现：`src/shared/contracts/action.ts` 定义身份、目标、动作、任务和结果契约；`src/main/actions/*` 实现注册表、目标校验、幂等、取消和 unknown 效果语义。
+- 接线：UI/IPC、HTTP、MCP 均通过统一动作服务；兼容的工作区路由仍可使用，但返回统一 `ActionResult` 外壳。
+- 验证：`npm run typecheck`、`npm run build`、`npm run test:workspaces`（7/7）、`npm run test:actions`（5/5）、`npm run test:control`（33/33）。
+- 已知限制：任务账本目前在主进程内存中，重启后不保留；持久化任务事件属于后续 scoped schema 任务。
+- 回滚：`git revert 318e797`。

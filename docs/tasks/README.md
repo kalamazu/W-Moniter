@@ -9,7 +9,7 @@
 | ID | 状态 | 主题 | 蓝图映射 | 认领者 | 验收 |
 | --- | --- | --- | --- | --- | --- |
 | [T-000](T-000-workspace-core.md) | 已通过 | 工作区 Core：隔离、并发、焦点、休眠 | M0 / M2 | 已完成 | [A-000](../acceptance/A-000-workspace-core.md) |
-| [T-001](T-001-action-task-contract.md) | 可认领 | 统一身份、动作与任务契约 | M0 §3.1 | 未认领 | 完成后创建 A-001 |
+| [T-001](T-001-action-task-contract.md) | 已通过 | 统一身份、动作与任务契约 | M0 §3.1 / §3.2 | Codex | [A-001](../acceptance/A-001-action-task-contract.md) |
 
 ## 生命周期与规则
 
@@ -22,4 +22,3 @@
 5. 小修复可挂在父任务的 checklist 中；涉及数据模型、跨进程协议、用户流程或验收门槛时必须单列任务卡。
 
 新任务从 [任务模板](TEMPLATE.md) 创建。验收任务放在 `docs/acceptance/`，与实现任务分离。
-
