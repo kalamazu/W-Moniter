@@ -244,6 +244,7 @@ try {
 
   console.log('\n== 干预：写规则并验证生效 ==')
   const saved = await call('monitor_rules_set', {
+    workspaceId: 'default',
     rules: {
       version: 1,
       rules: [
@@ -262,13 +263,13 @@ try {
     }
   })
   check('monitor_rules_set：规则写进去了（没有非法项）', () => {
-    assert((saved?.invalid ?? []).length === 0, `invalid=${JSON.stringify(saved?.invalid)}`)
+    assert(saved?.task?.state === 'succeeded' && (saved?.output?.invalid ?? []).length === 0, `invalid=${JSON.stringify(saved)}`)
   })
 
-  const readBack = await call('monitor_rules_get', {})
+  const readBack = await call('monitor_rules_get', { workspaceId: 'default' })
   check('monitor_rules_get：读回来就是刚写的那条', () => {
-    const rule = (readBack?.rules ?? []).find((item) => item.id === 'drill-block-xhr')
-    assert(rule, `规则集合里没有它：${(readBack?.rules ?? []).map((r) => r.id).join(',')}`)
+    const rule = (readBack?.output?.rules ?? []).find((item) => item.id === 'drill-block-xhr')
+    assert(rule, `规则集合里没有它：${(readBack?.output?.rules ?? []).map((r) => r.id).join(',')}`)
     assert(rule.action?.kind === 'block', `action=${JSON.stringify(rule.action)}`)
   })
 
@@ -333,9 +334,9 @@ try {
   })
 
   // 规则先清掉，免得切 Profile 之后还带着（规则是落盘文件，跨会话存续）
-  const cleared = await call('monitor_rules_set', { rules: { version: 1, rules: [], fixtures: {}, injections: [] } })
+  const cleared = await call('monitor_rules_set', { workspaceId: 'default', rules: { version: 1, rules: [], fixtures: {}, injections: [] } })
   check('monitor_rules_set：能清空规则（写进去的能拿掉）', () => {
-    assert((cleared?.invalid ?? []).length === 0, `invalid=${JSON.stringify(cleared?.invalid)}`)
+    assert(cleared?.task?.state === 'succeeded' && (cleared?.output?.invalid ?? []).length === 0, `invalid=${JSON.stringify(cleared)}`)
   })
 
   /* ------------------------------------------------ 5. 切 Profile */

@@ -200,7 +200,14 @@ route('GET', '/console', () => call('console.list', {}))
 route('GET', '/instances', () => call('instances', {}, 120000))
 route('GET', '/sessions', () => call('sessions', {}, 120000))
 route('GET', '/workspaces', () => call('workspaces.list', {}))
+route('GET', '/workspaces/content-stats', () => call('action.execute', { request: { action: 'workspaces.contentStats', input: {}, target: { kind: 'workspace-collection' } } }))
+route('GET', '/workspaces/:id/rules', (_req, { params }) => call('action.execute', { request: { action: 'rules.get', input: {}, target: { kind: 'workspace', workspaceId: params.id } } }))
+route('GET', '/workspaces/:id/capture/summary', (_req, { params }) => call('action.execute', { request: { action: 'capture.summary', input: {}, target: { kind: 'workspace', workspaceId: params.id } } }))
+route('GET', '/workspaces/:id/requests/:seq/body-evidence', (_req, { params }) => call('action.execute', { request: { action: 'capture.evidence', input: { seq: Number(params.seq) }, target: { kind: 'workspace', workspaceId: params.id } } }))
+route('GET', '/workspaces/:id/content/:hash/verify', (_req, { params }) => call('action.execute', { request: { action: 'content.verify', input: { hash: params.hash }, target: { kind: 'workspace', workspaceId: params.id } } }))
+route('GET', '/workspaces/:id/content/:hash/range', (_req, { params, query }) => call('action.execute', { request: { action: 'content.readRange', input: { hash: params.hash, start: Number(query.get('start') ?? 0), end: Number(query.get('end')) }, target: { kind: 'workspace', workspaceId: params.id } } }))
 route('GET', '/actions/catalog', () => call('actions.catalog', {}))
+route('GET', '/tasks/diagnostics', () => call('tasks.diagnostics', {}))
 route('GET', '/dom/tree', (_req, { query }) =>
   call('dom.tree', { nodeId: query.has('nodeId') ? num(query.get('nodeId'), 0) : undefined, depth: query.has('depth') ? num(query.get('depth'), 1) : undefined }, 120000)
 )
@@ -224,7 +231,7 @@ route('POST', '/evaluate', async (_req, { body }) => call('evaluate', { expressi
 route('POST', '/probe', async (_req, { body }) => call('probe.run', { options: body?.options ?? {} }, 180000), { mutating: true })
 route('POST', '/input', async (_req, { body }) => call('input.run', { action: body ?? {} }, 120000), { mutating: true })
 route('POST', '/dom/highlight', async (_req, { body }) => call('dom.highlight', { nodeId: num(body?.nodeId, 0), on: body?.on !== false }, 120000), { mutating: true })
-route('POST', '/rules', async (_req, { body }) => call('rules.save', { set: body }, 120000), { mutating: true })
+route('POST', '/rules', async (_req, { body }) => call('action.execute', { request: { action: 'rules.save', input: { set: body?.set }, ...(body?.workspaceId ? { target: { kind: 'workspace', workspaceId: body.workspaceId } } : {}), ...(body?.idempotencyKey ? { idempotencyKey: body.idempotencyKey } : {}) } }, 120000), { mutating: true })
 route('POST', '/sessions/profile', async (_req, { body }) => call('sessions.switchProfile', { profile: body?.profile === 'H' ? 'H' : 'L' }, 180000), { mutating: true })
 route('POST', '/workspaces', async (_req, { body }) =>
   call('workspace.create', {
@@ -242,6 +249,8 @@ route('POST', '/workspaces/:id/suspend', async (_req, { params }) =>
   call('workspace.suspend', { id: params.id }, 180000),
   { mutating: true }
 )
+route('POST', '/workspaces/:id/rules', (_req, { params, body }) => call('action.execute', { request: { action: 'rules.save', input: { set: body?.set }, target: { kind: 'workspace', workspaceId: params.id, ...(Number.isSafeInteger(body?.expectedVersion) ? { expectedVersion: body.expectedVersion } : {}) }, ...(body?.idempotencyKey ? { idempotencyKey: body.idempotencyKey } : {}) } }), { mutating: true })
+route('POST', '/workspaces/:id/content/:hash/revoke', (_req, { params, body }) => call('action.execute', { request: { action: 'content.revoke', input: { hash: params.hash, reason: String(body?.reason ?? '') }, target: { kind: 'workspace', workspaceId: params.id }, ...(body?.idempotencyKey ? { idempotencyKey: body.idempotencyKey } : {}) } }), { mutating: true })
 route('POST', '/actions/execute', async (_req, { body }) => call('action.execute', { request: body ?? {} }, 180000), { mutating: true })
 route('POST', '/tasks/:id/cancel', async (_req, { params }) => call('task.cancel', { taskId: params.id }), { mutating: true })
 route('POST', '/clear', async () => call('clear', {}), { mutating: true })

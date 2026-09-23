@@ -18,7 +18,7 @@
 
 import { DatabaseSync } from 'node:sqlite'
 import { createHash } from 'node:crypto'
-import { mkdirSync, statSync, writeFileSync } from 'node:fs'
+import { mkdirSync, statSync, writeFileSync, readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 
 // node:sqlite 在 22.x 仍标记 experimental，会往 stderr 吐警告。
@@ -1523,12 +1523,25 @@ function endpointProfiles(args) {
  */
 function readBodyBytes(hash) {
   const row = db.prepare('SELECT size, stored, blob FROM bodies WHERE hash = ?').get(norm(hash))
-  if (!row || !row.stored || !row.blob) return null
-  const raw = row.blob
-  const bytes = Buffer.isBuffer(raw)
-    ? raw
-    : Buffer.from(raw.buffer, raw.byteOffset, raw.byteLength)
-  return { bytes, size: row.size }
+  if (row?.stored && row.blob) {
+    const raw = row.blob
+    const bytes = Buffer.isBuffer(raw) ? raw : Buffer.from(raw.buffer, raw.byteOffset, raw.byteLength)
+    return { bytes, size: row.size }
+  }
+  if (!config.contentDir || !/^[a-f0-9]{64}$/.test(hash)) return null
+  try {
+    const manifest = JSON.parse(readFileSync(join(config.contentDir, 'manifests', `${hash}.json`), 'utf8'))
+    if (manifest.hash !== hash || !Array.isArray(manifest.chunkHashes)) return null
+    const chunks = manifest.chunkHashes.map((chunkHash) => {
+      if (!/^[a-f0-9]{64}$/.test(chunkHash)) throw new Error('bad chunk hash')
+      const chunk = readFileSync(join(config.contentDir, 'chunks', chunkHash))
+      if (createHash('sha256').update(chunk).digest('hex') !== chunkHash) throw new Error('bad chunk')
+      return chunk
+    })
+    const bytes = Buffer.concat(chunks)
+    if (bytes.length !== manifest.size || createHash('sha256').update(bytes).digest('hex') !== hash) return null
+    return { bytes, size: bytes.length }
+  } catch { return null }
 }
 
 /**
@@ -3285,6 +3298,14 @@ const OPS = {
       result.b64 = Buffer.from(bytes).toString('base64')
     }
     return result
+  },
+  contentRefs(args) {
+    return db.prepare('SELECT inst, seq, COALESCE(body_size, 0) AS size FROM requests WHERE body_hash = ?').all(norm(args.hash))
+  },
+  markRetainedDeleted(args) {
+    const info = db.prepare("UPDATE requests SET body_state = 'retained_deleted' WHERE body_hash = ?").run(norm(args.hash))
+    db.prepare('UPDATE bodies SET stored = 0, blob = NULL WHERE hash = ?').run(norm(args.hash))
+    return { affected: Number(info.changes) }
   },
 
   queryRequests,

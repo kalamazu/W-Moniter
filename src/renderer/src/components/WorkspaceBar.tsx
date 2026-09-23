@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import type { WorkspaceOverview } from '../../../shared/contracts/workspace'
 
 interface Props {
@@ -26,6 +26,23 @@ export function WorkspaceBar({ overview, onChange }: Props): React.JSX.Element |
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [profile, setProfile] = useState<'L' | 'H'>('L')
+  const [statsTick, setStatsTick] = useState(0)
+  const [contentStats, setContentStats] = useState<Record<string, { objects: number; bytes: number; gaps: number; lastError?: string }>>({})
+
+  useEffect(() => {
+    if (!overview) return
+    let alive = true
+    const refresh = (): void => { void window.monitor.executeAction({ action: 'workspaces.contentStats', input: {}, target: { kind: 'workspace-collection' } }).then((result) => {
+      if (!alive || !Array.isArray(result.output)) return
+      const next: Record<string, { objects: number; bytes: number; gaps: number; lastError?: string }> = {}
+      for (const entry of result.output as Array<{ workspaceId: string; content: { objects: number; bytes: number }; capture: { gaps: number; lastError?: string } }>) {
+        next[entry.workspaceId] = { objects: entry.content.objects, bytes: entry.content.bytes, gaps: entry.capture.gaps, lastError: entry.capture.lastError }
+      }
+      setContentStats(next)
+    }).catch(() => undefined) }
+    refresh()
+    return () => { alive = false }
+  }, [overview?.activeWorkspaceId, overview?.workspaces.length, statsTick])
 
   if (!overview) return null
   const active = overview.workspaces.find((workspace) => workspace.id === overview.activeWorkspaceId) ?? null
@@ -93,9 +110,11 @@ export function WorkspaceBar({ overview, onChange }: Props): React.JSX.Element |
           >
             <span>{workspace.name}</span>
             <small>{workspace.profile} · {STATE_LABEL[workspace.state] ?? workspace.state}</small>
+            {contentStats[workspace.id] && <small title="已存正文对象 / 正文字节 / 采集缺口 / 最近错误">正文 {contentStats[workspace.id].objects} · {Math.round(contentStats[workspace.id].bytes / 1024)} KiB · 缺口 {contentStats[workspace.id].gaps}{contentStats[workspace.id].lastError ? ` · ${contentStats[workspace.id].lastError}` : ''}</small>}
           </button>
         ))}
       </div>
+      <button type="button" className="workspace-suspend" title="刷新各工作区正文与缺口统计" onClick={() => setStatsTick((value) => value + 1)}>刷新统计</button>
       <select
         className="workspace-profile"
         aria-label="新工作区采集 Profile"

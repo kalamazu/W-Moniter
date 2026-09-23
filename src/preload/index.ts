@@ -114,12 +114,8 @@ const api: ControllerApi = {
 
   getRules: () => ipcRenderer.invoke('monitor:rules') as Promise<RuleSet>,
 
-  saveRules: (rules: RuleSet) =>
-    ipcRenderer.invoke('monitor:save-rules', rules) as Promise<{
-      ok: boolean
-      error?: string
-      invalid?: Array<{ ruleId: string; ruleName: string; message: string }>
-    }>,
+  saveRules: (workspaceId: string, rules: RuleSet) =>
+    ipcRenderer.invoke('monitor:save-rules', workspaceId, rules),
 
   getRuleStats: () => ipcRenderer.invoke('monitor:rule-stats') as Promise<RuleStats | null>,
 

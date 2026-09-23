@@ -259,7 +259,7 @@ export default function App(): React.JSX.Element {
         case 'scripts':
           return <ScriptPanel liveTick={liveTick} />
         case 'rules':
-          return <RulePanel liveTick={liveTick} />
+          return <RulePanel liveTick={liveTick} workspaceId={workspaces?.activeWorkspaceId ?? null} />
         case 'console':
           return <ConsolePanel liveTick={liveTick} />
         case 'env':

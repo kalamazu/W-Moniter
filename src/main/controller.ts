@@ -4,6 +4,7 @@ import { mkdirSync, readdirSync, statSync, unlinkSync, writeFileSync } from 'nod
 import { randomUUID } from 'node:crypto'
 import { join } from 'node:path'
 import { ContentStore } from './content/store'
+import { CaptureEvidenceLedger, type CaptureEvidenceSummary } from './content/evidence'
 import { CdpClient } from './browser/cdp'
 import { Collector } from './browser/collector'
 import { launchBrowser } from './browser/launch'
@@ -223,6 +224,7 @@ export class Controller extends EventEmitter {
   private consoleSnapshot: ConsoleEntry[] = []
   private storage: StorageClient
   private readonly content: ContentStore
+  private readonly evidence: CaptureEvidenceLedger
   /** P5：本地代理 + 三源关联。代理没开时两者都是空的 */
   private proxy: ProxyClient | null = null
   /**
@@ -272,9 +274,11 @@ export class Controller extends EventEmitter {
     super()
     this.profile = options.profile
     this.content = new ContentStore(options.contentDir)
+    this.evidence = new CaptureEvidenceLedger(options.contentDir)
 
     const storageConfig: StorageConfig = {
       dbPath: options.dbPath,
+      contentDir: options.contentDir,
       storeBodies: options.captureBodies,
       bodyMaxBytes: options.bodyMaxBytes,
       bodyStoreMaxBytes: options.bodyStoreMaxBytes,
@@ -1148,14 +1152,23 @@ export class Controller extends EventEmitter {
     if (body.bytes && body.bytes.byteLength > 0) {
       void this.content.put(body.bytes).then((ref) => {
         this.storage.appendContentBody(body.seq, ref.hash, ref.size, false)
+        void this.evidence.record({ inst: this.storage.getInstId(), seq: body.seq, phase: 'content', state: 'stored', size: ref.size, hash: ref.hash })
+          .catch((error) => this.emit('log', `[evidence] 正文记录失败 seq=${body.seq}: ${String(error)}`))
       }).catch((error) => {
         this.storage.markBody(body.seq, 'content_error', body.bytes?.byteLength ?? 0)
         this.emit('log', `[content] 正文落盘失败 seq=${body.seq}: ${(error as Error).message}`)
+        void this.recordGap(body.seq, 'content_error', body.bytes?.byteLength ?? 0, 'content')
       })
       return
     }
     // 拿不到 body 的情况也必须留痕，否则「没有 body」和「没采到」分不清
     this.storage.markBody(body.seq, body.state, body.declaredSize ?? body.size ?? 0)
+    void this.recordGap(body.seq, body.state, body.declaredSize ?? body.size ?? 0, 'fetch')
+  }
+
+  private async recordGap(seq: number, state: string, size: number, phase: 'fetch' | 'content'): Promise<void> {
+    try { await this.evidence.record({ inst: this.storage.getInstId(), seq, phase, state, size }) }
+    catch (error) { this.emit('log', `[evidence] 缺口记录失败 seq=${seq}: ${String(error)}`) }
   }
 
   /**
@@ -1219,7 +1232,7 @@ export class Controller extends EventEmitter {
   async getBody(hash: string, withData: boolean): Promise<BodyPayload | null> {
     try {
       const fromDb = this.storage.isEnabled()
-        ? (await this.storage.call('getBody', { hash, withData: false })) as BodyPayload | null
+        ? (await this.storage.call('getBody', { hash, withData })) as BodyPayload | null
         : null
       const bytes = withData ? await this.content.get(hash) : null
       if (bytes) return { hash, size: bytes.byteLength, stored: true, trunc: false, b64: Buffer.from(bytes).toString('base64') }
@@ -1227,6 +1240,36 @@ export class Controller extends EventEmitter {
     } catch {
       return null
     }
+  }
+
+  async getBodyEvidence(seq: number): Promise<{ request: { inst: number; seq: number; state: string; size: number; hash: string | null } | null; events: Awaited<ReturnType<CaptureEvidenceLedger['entries']>>; classification: string }> {
+    const detail = await this.getDetail(seq)
+    const row = detail?.request
+    if (!row) return { request: null, events: [], classification: 'request_not_found' }
+    const state = String(row.body_state ?? 'none')
+    return {
+      request: { inst: Number(row.inst), seq: Number(row.seq), state, size: Number(row.body_size ?? 0), hash: row.body_hash ?? null },
+      events: await this.evidence.entries(Number(row.inst), Number(row.seq)),
+      classification: state === 'none' ? (this.options.captureBodies ? 'not_observed' : 'capture_disabled') : state
+    }
+  }
+
+  getCaptureEvidenceSummary(): Promise<CaptureEvidenceSummary> { return this.evidence.summary() }
+
+  async revokeContent(hash: string, reason: string): Promise<{ deleted: boolean; affected: number }> {
+    if (!reason.trim()) throw new Error('清理原因不能为空')
+    await this.storage.flushNow()
+    const integrity = await this.content.verify(hash)
+    if (!integrity.exists) throw new Error(`正文不存在：${hash}`)
+    if (!integrity.valid) throw new Error(`正文损坏，拒绝清理：${integrity.error}`)
+    const refs = (await this.storage.call('contentRefs', { hash })) as Array<{ inst: number; seq: number; size: number }>
+    await this.evidence.record({ inst: 0, seq: 0, phase: 'retention', state: 'retention_intent', size: 0, hash, reason })
+    const deleted = await this.content.revoke(hash)
+    const result = (await this.storage.call('markRetainedDeleted', { hash })) as { affected: number }
+    for (const ref of refs) {
+      await this.evidence.record({ inst: ref.inst, seq: ref.seq, phase: 'retention', state: 'retained_deleted', size: ref.size, hash, reason })
+    }
+    return { deleted, affected: result.affected }
   }
 
   async getStats(): Promise<Stats | null> {

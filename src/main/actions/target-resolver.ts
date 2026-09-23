@@ -11,7 +11,7 @@ export class WorkspaceTargetResolver {
       if (target.kind !== 'workspace-collection') throw new ActionError('创建工作区的目标必须是 workspace-collection', 'target_invalid')
       return
     }
-    if (descriptor.name === 'workspaces.list') {
+    if (descriptor.name === 'workspaces.list' || descriptor.name === 'workspaces.contentStats') {
       if (target.kind !== 'workspace-collection' && target.kind !== 'workspace') throw new ActionError('查询工作区只接受工作区范围目标', 'target_invalid')
       return
     }

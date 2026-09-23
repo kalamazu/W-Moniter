@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
-import { dirname } from 'node:path'
+import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs'
+import { basename, dirname } from 'node:path'
 import {
   ActionError,
   RemoteEffectUnknownError,
@@ -15,6 +15,16 @@ export interface TaskExecutionContext {
 }
 
 export type ActionHandler<I, O> = (input: I, context: TaskExecutionContext) => Promise<O> | O
+
+export interface TaskJournalDiagnostics {
+  journalExists: boolean
+  corrupt: boolean
+  corruptBackup?: string
+  recoveredUnknown: number
+  taskCount: number
+  lastWrittenAt?: number
+  error?: string
+}
 
 interface StoredTask {
   snapshot: TaskSnapshot
@@ -32,6 +42,7 @@ export class TaskService {
   private readonly tasks = new Map<string, StoredTask>()
   private readonly idempotency = new Map<string, string>()
   private readonly journalPath?: string
+  private readonly health: TaskJournalDiagnostics = { journalExists: false, corrupt: false, recoveredUnknown: 0, taskCount: 0 }
 
   constructor(options: { journalPath?: string } = {}) {
     this.journalPath = options.journalPath
@@ -71,6 +82,7 @@ export class TaskService {
     if (stored.controller.signal.aborted) return this.finishCanceled<O>(stored)
     snapshot.state = 'running'
     snapshot.startedAt = Date.now()
+    this.persist()
     try {
       const output = await handler(request.input, { task: copy(snapshot), signal: stored.controller.signal })
       if (stored.controller.signal.aborted) return this.finishCanceled<O>(stored)
@@ -118,6 +130,10 @@ export class TaskService {
     return stored ? copy(stored.snapshot) : null
   }
 
+  diagnostics(): TaskJournalDiagnostics {
+    return { ...this.health, taskCount: this.tasks.size }
+  }
+
   private finishCanceled<O>(stored: StoredTask): ActionResult<O> {
     stored.snapshot.state = 'canceled'
     stored.snapshot.finishedAt = Date.now()
@@ -129,22 +145,35 @@ export class TaskService {
 
   private restore(): void {
     if (!this.journalPath || !existsSync(this.journalPath)) return
+    this.health.journalExists = true
     try {
       const stored = JSON.parse(readFileSync(this.journalPath, 'utf8')) as Array<{ snapshot: TaskSnapshot; output: unknown | null }>
+      if (!Array.isArray(stored) || stored.some((entry) => !entry?.snapshot?.id || !entry.snapshot.action || !entry.snapshot.inputHash)) {
+        throw new Error('任务日志结构无效')
+      }
       for (const entry of stored) {
         const snapshot = copy(entry.snapshot)
         if (snapshot.state === 'queued' || snapshot.state === 'running') {
           snapshot.state = 'unknown'
           snapshot.finishedAt = Date.now()
           snapshot.error = { code: 'effect_unknown', message: '应用重启时任务尚未完成；远端效果未知' }
+          this.health.recoveredUnknown += 1
         }
         const task: StoredTask = { snapshot, inputHash: snapshot.inputHash, controller: new AbortController(), output: entry.output ?? null, completed: true }
         this.tasks.set(snapshot.id, task)
         if (snapshot.idempotencyKey) this.idempotency.set(`${snapshot.action}:${snapshot.idempotencyKey}`, snapshot.id)
       }
       this.persist()
-    } catch {
-      // 损坏日志不能阻止浏览器启动；下一次写入会用有效快照覆盖它。
+    } catch (error) {
+      this.health.corrupt = true
+      this.health.error = error instanceof Error ? error.message : String(error)
+      const backup = `${this.journalPath}.corrupt.${Date.now()}`
+      try {
+        renameSync(this.journalPath, backup)
+        this.health.corruptBackup = basename(backup)
+      } catch (backupError) {
+        this.health.error += `；备份失败：${String(backupError)}`
+      }
     }
   }
 
@@ -155,6 +184,9 @@ export class TaskService {
     const temporary = `${this.journalPath}.${process.pid}.tmp`
     writeFileSync(temporary, JSON.stringify(rows) + '\n', 'utf8')
     renameSync(temporary, this.journalPath)
+    this.health.journalExists = true
+    this.health.taskCount = rows.length
+    this.health.lastWrittenAt = statSync(this.journalPath).mtimeMs
   }
 }
 

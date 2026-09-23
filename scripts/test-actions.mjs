@@ -4,7 +4,7 @@
  * 任务服务的取消 / unknown 在构建产物上直接验，避免为测试给产品动作加隐藏后门。
  */
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -89,6 +89,7 @@ try {
     '--target', 'ES2022', '--module', 'NodeNext', '--moduleResolution', 'NodeNext',
     '--rootDir', join(ROOT, 'src'), '--outDir', taskBuildDir,
     join(ROOT, 'src', 'main', 'actions', 'task-service.ts'),
+    join(ROOT, 'src', 'main', 'content', 'evidence.ts'),
     join(ROOT, 'src', 'shared', 'contracts', 'action.ts')
   ], { cwd: ROOT, stdio: 'pipe' })
   const { TaskService } = await import(pathToFileURL(join(taskBuildDir, 'main', 'actions', 'task-service.js')).href)
@@ -117,6 +118,73 @@ try {
   const replay = await restarted.execute({ action: 'test.persist', input: { n: 1 }, idempotencyKey: 'persist-key' }, async () => { throw new Error('不应重复执行') })
   check('任务账本重启后保留幂等结果', () => {
     assert(first.task.id === replay.task.id && replay.task.state === 'succeeded', '重启后没有复用持久任务')
+  })
+  const pendingJournal = join(taskBuildDir, 'running.json')
+  const runningTasks = new TaskService({ journalPath: pendingJournal })
+  let runningRelease = () => {}
+  let started = false
+  const inFlight = runningTasks.execute({ action: 'test.running', input: {}, idempotencyKey: 'running-key' }, async () => {
+    started = true
+    await new Promise((resolve) => { runningRelease = resolve })
+    return { ok: true }
+  })
+  while (!started) await sleep(1)
+  const recovered = new TaskService({ journalPath: pendingJournal })
+  const uncertain = await recovered.execute({ action: 'test.running', input: {}, idempotencyKey: 'running-key' }, async () => { throw new Error('不得重放') })
+  check('运行中任务落盘且重启后恢复为 unknown，不重复执行', () => {
+    assert(uncertain.task.state === 'unknown', `恢复状态错误：${uncertain.task.state}`)
+    assert(recovered.diagnostics().recoveredUnknown === 1, '恢复诊断未计数')
+  })
+  runningRelease()
+  await inFlight
+  const corruptPath = join(taskBuildDir, 'corrupt.json')
+  writeFileSync(corruptPath, '{partial')
+  const corrupt = new TaskService({ journalPath: corruptPath })
+  check('损坏任务日志隔离备份，服务仍可启动并给出诊断', () => {
+    const diagnostic = corrupt.diagnostics()
+    assert(diagnostic.corrupt && diagnostic.corruptBackup, '未报告损坏备份')
+    assert(existsSync(join(taskBuildDir, diagnostic.corruptBackup)), '损坏日志备份不存在')
+  })
+  const { CaptureEvidenceLedger } = await import(pathToFileURL(join(taskBuildDir, 'main', 'content', 'evidence.js')).href)
+  const ledger = new CaptureEvidenceLedger(join(taskBuildDir, 'capture-evidence-test'))
+  await ledger.record({ inst: 1, seq: 17, phase: 'fetch', state: 'timeout', size: 1024 })
+  const gapSummary = await ledger.summary()
+  const gapEntries = await ledger.entries(1, 17)
+  check('采集失败按原因汇总并可按请求追溯', () => {
+    assert(gapSummary.gaps === 1 && gapSummary.byReason.timeout === 1, '缺口原因统计错误')
+    assert(gapEntries.length === 1 && gapEntries[0].phase === 'fetch' && gapEntries[0].size === 1024, '请求证据不完整')
+  })
+  const evidencePath = join(taskBuildDir, 'capture-evidence-test', 'capture-evidence.jsonl')
+  writeFileSync(evidencePath, readFileSync(evidencePath, 'utf8').replace('timeout', 'tampered'))
+  const tampered = await ledger.summary()
+  check('篡改后的证据链不再报告可信', () => {
+    assert(!tampered.chainValid && tampered.lastError === 'evidence_chain_invalid', '证据篡改未被识别')
+  })
+  const uiDiagnostics = await app.evaluate("window.monitor.executeAction({action:'tasks.diagnostics',input:{}})")
+  const httpDiagnostics = await control('/tasks/diagnostics')
+  const mcpDiagnostics = await mcp.callJson('monitor_task_diagnostics', {})
+  check('任务诊断可从 UI、HTTP、MCP 读取', () => {
+    for (const result of [uiDiagnostics, httpDiagnostics, mcpDiagnostics]) {
+      assert(result.task?.state === 'succeeded' && typeof result.output?.taskCount === 'number', '任务诊断结构不正确')
+    }
+  })
+  const secondId = ui.output.id
+  const targetedRule = { version: 1, rules: [{ id: 'target-test', name: 'target-test', enabled: false, priority: 1, match: { urlPattern: '*example.com*' }, stage: 'request', action: { kind: 'block' } }], fixtures: {}, injections: [] }
+  const saveRule = { action: 'rules.save', target: { kind: 'workspace', workspaceId: secondId }, input: { set: targetedRule }, idempotencyKey: 'targeted-rules-test' }
+  const savedUi = await app.evaluate(`window.monitor.executeAction(${JSON.stringify(saveRule)})`)
+  const savedHttp = await control('/actions/execute', { method: 'POST', body: JSON.stringify(saveRule) })
+  const savedMcp = await mcp.callJson('monitor_rules_set', { workspaceId: secondId, rules: targetedRule, idempotencyKey: 'targeted-rules-test' })
+  const ownRules = await app.evaluate(`window.monitor.executeAction({action:'rules.get',target:{kind:'workspace',workspaceId:${JSON.stringify(secondId)}},input:{}})`)
+  const defaultRules = await control('/workspaces/default/rules')
+  check('规则写入显式目标且三入口幂等，未污染活动工作区', () => {
+    assert(savedUi.task.state === 'succeeded' && savedUi.task.id === savedHttp.task.id && savedUi.task.id === savedMcp.task.id, '规则三入口任务不一致')
+    assert(ownRules.output.rules.some((rule) => rule.id === 'target-test'), '目标工作区规则未保存')
+    assert(!defaultRules.output.rules.some((rule) => rule.id === 'target-test'), '活动工作区规则被串写')
+  })
+  const rulesMissing = await app.evaluate(`window.monitor.executeAction({action:'rules.save',input:{set:${JSON.stringify(targetedRule)}}}).then(() => null, (error) => String(error))`)
+  const rulesStale = await app.evaluate(`window.monitor.executeAction({action:'rules.save',target:{kind:'workspace',workspaceId:${JSON.stringify(secondId)},expectedVersion:0},input:{set:${JSON.stringify(targetedRule)}}}).then(() => null, (error) => String(error))`)
+  check('规则保存拒绝缺失或过期工作区目标', () => {
+    assert(/TargetRef/.test(rulesMissing ?? '') && /过期/.test(rulesStale ?? ''), '规则目标守卫未生效')
   })
   rmSync(taskBuildDir, { recursive: true, force: true })
 } catch (error) {

@@ -11,6 +11,7 @@ import { DEFAULT_WINDOW_MS } from '../../proxy/correlate.mjs'
 import { emptyRuleSet, readRuleSet, writeRuleSet } from './rules/store'
 import { WorkspaceService } from './workspace/service'
 import { WorkspaceActionRegistry } from './actions/registry'
+import { CaptureEvidenceLedger } from './content/evidence'
 import type {
   ConsoleEntry,
   ControllerStatus,
@@ -262,6 +263,26 @@ function createWorkspace(input: WorkspaceCreateInput): WorkspaceSummary {
   const workspace = workspaceService.create(input)
   publishWorkspaces()
   return workspace
+}
+
+function getWorkspaceRules(id: string): RuleSet {
+  if (!workspaceService) throw new Error('工作区服务还没准备好')
+  const running = workspaceControllers.get(id)
+  return running?.getRuleSet() ?? readRuleSet(workspaceService.pathsFor(id).rulesPath)
+}
+
+function saveWorkspaceRules(id: string, set: RuleSet): { ok: boolean; invalid: unknown[] } {
+  if (!workspaceService) throw new Error('工作区服务还没准备好')
+  if (!set || typeof set !== 'object' || !Array.isArray(set.rules)) throw new Error('规则集格式不对：需要 { rules: [...] }')
+  const paths = workspaceService.pathsFor(id)
+  writeRuleSet(paths.rulesPath, set)
+  const stats = workspaceControllers.get(id)?.setRuleSet(set)
+  if (activeWorkspace?.id === id) {
+    for (const win of BrowserWindow.getAllWindows()) {
+      if (!win.isDestroyed()) win.webContents.send('monitor:rules', set)
+    }
+  }
+  return { ok: true, invalid: stats?.invalid ?? [] }
 }
 
 function rebuildDock(profileDir: string, settingsPath: string): void {
@@ -798,22 +819,9 @@ function wireIpc(): void {
     return workspaceActions.cancel(taskId)
   })
 
-  ipcMain.handle('monitor:save-rules', (_event, set: RuleSet) => {
-    if (!set || typeof set !== 'object' || !Array.isArray(set.rules)) {
-      return { ok: false, error: '规则集格式不对：需要 { rules: [...] }' }
-    }
-    const stats = controller?.setRuleSet(set)
-    try {
-      writeRuleSet(currentWorkspacePaths().rulesPath, set)
-    } catch (err) {
-      return { ok: false, error: `写入工作区规则失败：${(err as Error).message}` }
-    }
-    // 其它窗口/面板要能看到最新规则
-    for (const win of BrowserWindow.getAllWindows()) {
-      if (!win.isDestroyed()) win.webContents.send('monitor:rules', set)
-    }
-    return { ok: true, invalid: stats?.invalid ?? [] }
-  })
+  ipcMain.handle('monitor:save-rules', (_event, workspaceId: string, set: RuleSet): Promise<ActionResult> =>
+    executeWorkspaceAction({ action: 'rules.save', input: { set }, target: { kind: 'workspace', workspaceId } })
+  )
 
   ipcMain.handle('monitor:open-data-dir', async (): Promise<void> => {
     await shell.openPath(dirname(currentWorkspacePaths().dbPath))
@@ -911,7 +919,20 @@ app.whenReady().then(async () => {
   workspaceActions = new WorkspaceActionRegistry(workspaceService, {
     create: createWorkspace,
     open: openWorkspace,
-    suspend: suspendWorkspace
+    suspend: suspendWorkspace,
+    getRules: getWorkspaceRules,
+    saveRules: saveWorkspaceRules,
+    getEvidence: (id, seq) => {
+      const instance = workspaceControllers.get(id)
+      if (instance) return instance.getBodyEvidence(seq)
+      const ledger = new CaptureEvidenceLedger(workspaceService!.pathsFor(id).contentDir)
+      return ledger.entriesBySeq(seq).then((events) => ({ request: null, events, classification: events.length ? 'offline_evidence_only' : 'request_not_found' }))
+    },
+    revokeContent: (id, hash, reason) => {
+      const instance = workspaceControllers.get(id)
+      if (!instance) throw new Error('目标工作区未运行，清理前需打开工作区以对账 SQLite 引用')
+      return instance.revokeContent(hash, reason)
+    }
   }, { journalPath: join(DATA_DIR, 'tasks', 'journal.json') })
   activeWorkspace = workspaceService.active()
   await openWorkspace(activeWorkspace.id)

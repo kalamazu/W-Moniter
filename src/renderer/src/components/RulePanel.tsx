@@ -90,7 +90,7 @@ function textToHeaders(text: string): Record<string, string> {
   return out
 }
 
-export function RulePanel({ liveTick }: { liveTick: number }): React.JSX.Element {
+export function RulePanel({ liveTick, workspaceId }: { liveTick: number; workspaceId: string | null }): React.JSX.Element {
   const [set, setSet] = useState<RuleSet>(EMPTY)
   const [stats, setStats] = useState<RuleStats | null>(null)
   const [loaded, setLoaded] = useState(false)
@@ -100,8 +100,11 @@ export function RulePanel({ liveTick }: { liveTick: number }): React.JSX.Element
 
   useEffect(() => {
     let alive = true
-    void window.monitor.getRules().then((rules) => {
+    if (!workspaceId) return
+    setLoaded(false)
+    void window.monitor.executeAction({ action: 'rules.get', input: {}, target: { kind: 'workspace', workspaceId } }).then((result) => {
       if (!alive) return
+      const rules = result.output as RuleSet | null
       setSet(rules ?? EMPTY)
       setSelectedId((rules?.rules[0]?.id ?? null) as string | null)
       setLoaded(true)
@@ -114,7 +117,7 @@ export function RulePanel({ liveTick }: { liveTick: number }): React.JSX.Element
       alive = false
       off()
     }
-  }, [])
+  }, [workspaceId])
 
   useEffect(() => {
     const timer = setTimeout(
@@ -147,15 +150,17 @@ export function RulePanel({ liveTick }: { liveTick: number }): React.JSX.Element
   )
 
   const save = useCallback(async () => {
-    const result = await window.monitor.saveRules(set)
-    if (result.ok) {
+    if (!workspaceId) return
+    const action = await window.monitor.executeAction({ action: 'rules.save', input: { set }, target: { kind: 'workspace', workspaceId } })
+    const result = action.output as { ok: boolean; invalid?: unknown[] } | null
+    if (result?.ok) {
       const problems = result.invalid ?? []
       setNote(problems.length ? `已保存；${problems.length} 条规则被丢弃` : '已保存并生效')
       setDirty(false)
     } else {
-      setNote(`保存失败：${result.error ?? '未知错误'}`)
+      setNote(`保存失败：${action.task.error?.message ?? '未知错误'}`)
     }
-  }, [set])
+  }, [set, workspaceId])
 
   if (!loaded) return <div className="stats empty">正在读取规则…</div>
 
@@ -199,7 +204,9 @@ export function RulePanel({ liveTick }: { liveTick: number }): React.JSX.Element
           className="btn"
           disabled={!dirty}
           onClick={() => {
-            void window.monitor.getRules().then((rules) => {
+            if (!workspaceId) return
+            void window.monitor.executeAction({ action: 'rules.get', input: {}, target: { kind: 'workspace', workspaceId } }).then((result) => {
+              const rules = result.output as RuleSet | null
               setSet(rules ?? EMPTY)
               setDirty(false)
               setNote('已放弃未保存的改动')

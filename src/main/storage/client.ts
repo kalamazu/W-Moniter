@@ -46,6 +46,7 @@ const CALL_TIMEOUT_MS = 20_000
 
 export interface StorageConfig {
   dbPath: string
+  contentDir?: string
   storeBodies: boolean
   bodyMaxBytes: number
   bodyStoreMaxBytes: number

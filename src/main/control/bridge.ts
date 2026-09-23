@@ -138,7 +138,7 @@ export class ControlBridge {
   }
 
   private async dispatch(id: number, method: string, params: Record<string, unknown>): Promise<void> {
-    if (method === 'workspaces.list' || method === 'workspace.create' || method === 'workspace.open' || method === 'workspace.suspend' || method === 'actions.catalog' || method === 'action.execute' || method === 'task.cancel') {
+    if (method === 'workspaces.list' || method === 'workspace.create' || method === 'workspace.open' || method === 'workspace.suspend' || method === 'tasks.diagnostics' || method === 'actions.catalog' || method === 'action.execute' || method === 'task.cancel') {
       const workspace = this.workspaceApi
       if (!workspace) return this.reply({ id, error: '工作区服务还没起来' })
       try {
@@ -149,6 +149,9 @@ export class ControlBridge {
         switch (method) {
           case 'workspaces.list':
             request = { action: 'workspaces.list', input: {}, target: { kind: 'workspace-collection' } }
+            break
+          case 'tasks.diagnostics':
+            request = { action: 'tasks.diagnostics', input: {} }
             break
           case 'workspace.create':
             request = {

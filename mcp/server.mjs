@@ -360,9 +360,9 @@ const TOOLS = [
   },
   {
     name: 'monitor_rules_get',
-    description: '读当前规则集（规则 + fixtures + 注入脚本）。',
-    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
-    run: () => request('GET', '/rules')
+    description: '按明确工作区 ID 读取规则集（规则 + fixtures + 注入脚本）。',
+    inputSchema: { type: 'object', properties: { workspaceId: { type: 'string' } }, required: ['workspaceId'], additionalProperties: false },
+    run: ({ workspaceId }) => request('GET', `/workspaces/${encodeURIComponent(workspaceId)}/rules`)
   },
   {
     name: 'monitor_rules_set',
@@ -370,11 +370,16 @@ const TOOLS = [
       '整体写入规则集（覆盖式）。动作：block/redirect/delay/rewriteHeaders/rewriteBody/fulfill/mock。写坏了不会生效，会返回 invalid 说明原因。',
     inputSchema: {
       type: 'object',
-      properties: { rules: { type: 'object', description: '完整的 RuleSet：{ rules, fixtures, injections }' } },
-      required: ['rules'],
+      properties: {
+        workspaceId: { type: 'string', description: '明确目标工作区' },
+        rules: { type: 'object', description: '完整的 RuleSet：{ rules, fixtures, injections }' },
+        expectedVersion: { type: 'number', description: '可选工作区版本守卫' },
+        idempotencyKey: { type: 'string', description: '重试时复用的幂等键' }
+      },
+      required: ['workspaceId', 'rules'],
       additionalProperties: false
     },
-    run: ({ rules }) => request('POST', '/rules', { body: rules })
+    run: ({ workspaceId, rules, expectedVersion, idempotencyKey }) => request('POST', `/workspaces/${encodeURIComponent(workspaceId)}/rules`, { body: { set: rules, expectedVersion, idempotencyKey } })
   },
   {
     name: 'monitor_rules_stats',
@@ -453,6 +458,36 @@ const TOOLS = [
     description: '读取当前可执行动作目录及其 TargetRef 要求。写动作必须明确目标，不能依赖 UI 当前焦点。',
     inputSchema: { type: 'object', properties: {}, additionalProperties: false },
     run: () => request('GET', '/actions/catalog')
+  },
+  {
+    name: 'monitor_task_diagnostics',
+    description: '读取任务日志状态、重启恢复数量与损坏诊断。',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+    run: () => request('GET', '/tasks/diagnostics')
+  },
+  {
+    name: 'monitor_workspace_content_stats',
+    description: '按工作区读取内容对象、字节与采集缺口统计。',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+    run: () => request('GET', '/workspaces/content-stats')
+  },
+  {
+    name: 'monitor_capture_evidence',
+    description: '按明确工作区 ID 和请求 seq 读取正文采集或缺口证据。',
+    inputSchema: { type: 'object', properties: { workspaceId: { type: 'string' }, seq: { type: 'number' } }, required: ['workspaceId', 'seq'], additionalProperties: false },
+    run: ({ workspaceId, seq }) => request('GET', `/workspaces/${encodeURIComponent(workspaceId)}/requests/${Number(seq)}/body-evidence`)
+  },
+  {
+    name: 'monitor_content_verify',
+    description: '在指定工作区校验正文 hash、manifest 和所有内容块。',
+    inputSchema: { type: 'object', properties: { workspaceId: { type: 'string' }, hash: { type: 'string' } }, required: ['workspaceId', 'hash'], additionalProperties: false },
+    run: ({ workspaceId, hash }) => request('GET', `/workspaces/${encodeURIComponent(workspaceId)}/content/${encodeURIComponent(hash)}/verify`)
+  },
+  {
+    name: 'monitor_content_range',
+    description: '在指定工作区按字节范围读取正文；end 不包含在内，单次最多 1MiB。',
+    inputSchema: { type: 'object', properties: { workspaceId: { type: 'string' }, hash: { type: 'string' }, start: { type: 'number' }, end: { type: 'number' } }, required: ['workspaceId', 'hash', 'start', 'end'], additionalProperties: false },
+    run: ({ workspaceId, hash, start, end }) => request('GET', `/workspaces/${encodeURIComponent(workspaceId)}/content/${encodeURIComponent(hash)}/range`, { query: { start, end } })
   },
   {
     name: 'monitor_action_execute',

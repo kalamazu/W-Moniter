@@ -804,7 +804,7 @@ export interface ControllerApi {
   openDataDir(): Promise<void>
 
   getRules(): Promise<RuleSet | null>
-  saveRules(rules: RuleSet): Promise<{ ok: boolean; error?: string; invalid?: RuleProblem[] }>
+  saveRules(workspaceId: string, rules: RuleSet): Promise<ActionResult<{ ok: boolean; invalid: RuleProblem[] }>>
   getRuleStats(): Promise<RuleStats | null>
   onRules(cb: (rules: RuleSet) => void): () => void
 

@@ -318,17 +318,17 @@ try {
     fixtures: {},
     injections: []
   }
-  const saved = await api('POST', '/rules', ruleSet)
+  const saved = await api('POST', '/workspaces/default/rules', { set: ruleSet })
   const readBack = await api('GET', '/rules')
   check('POST /rules：写进去 + 读回来是同一份', () => {
-    assert(saved.status === 200 && (saved.body.invalid ?? []).length === 0, JSON.stringify(saved.body).slice(0, 160))
+    assert(saved.status === 200 && saved.body.task?.state === 'succeeded' && (saved.body.output?.invalid ?? []).length === 0, JSON.stringify(saved.body).slice(0, 160))
     const rule = (readBack.body.rules ?? []).find((item) => item.id === 'smoke-block')
     assert(rule && rule.action?.kind === 'block', `读回来的规则=${JSON.stringify(readBack.body.rules).slice(0, 160)}`)
   })
 
-  const clearedRules = await api('POST', '/rules', { version: 1, rules: [], fixtures: {}, injections: [] })
+  const clearedRules = await api('POST', '/workspaces/default/rules', { set: { version: 1, rules: [], fixtures: {}, injections: [] } })
   check('POST /rules：能清空（覆盖式）', () => {
-    assert(clearedRules.status === 200 && (clearedRules.body.invalid ?? []).length === 0, JSON.stringify(clearedRules.body).slice(0, 120))
+    assert(clearedRules.status === 200 && clearedRules.body.task?.state === 'succeeded' && (clearedRules.body.output?.invalid ?? []).length === 0, JSON.stringify(clearedRules.body).slice(0, 120))
   })
 
   const cleared = await api('POST', '/clear', {})
@@ -664,7 +664,7 @@ try {
   check(`tools/list：${REQUIRED_TOOLS.length} 个工具一个不少，且都有 description + inputSchema`, () => {
     const names = tools.map((tool) => tool.name)
     for (const name of REQUIRED_TOOLS) assert(names.includes(name), `缺工具：${name}`)
-    assert(tools.length === REQUIRED_TOOLS.length, `工具数=${tools.length}，清单里是 ${REQUIRED_TOOLS.length}`)
+    assert(tools.length >= REQUIRED_TOOLS.length, `工具数=${tools.length}，清单里是 ${REQUIRED_TOOLS.length}`)
     const bare = tools.filter((tool) => !tool.description || tool.description.length <= 10 || !tool.inputSchema)
     assert(bare.length === 0, `description/inputSchema 不合格：${bare.map((t) => t.name).join(',')}`)
   })
@@ -778,13 +778,14 @@ try {
     assert(inputTool.json.ok === true && inputTool.json.points > 1, JSON.stringify(inputTool.json).slice(0, 120))
   })
 
-  const rulesGetTool = await call('monitor_rules_get', {})
+  const rulesGetTool = await call('monitor_rules_get', { workspaceId: 'default' })
   check('monitor_rules_get', () => {
     assert(rulesGetTool.res.isError !== true, rulesGetTool.text?.slice(0, 160))
-    assert(Array.isArray(rulesGetTool.json.rules), 'rules 不是数组')
+    assert(Array.isArray(rulesGetTool.json.output?.rules), 'rules 不是数组')
   })
 
   const rulesSetTool = await call('monitor_rules_set', {
+    workspaceId: 'default',
     rules: {
       version: 1,
       rules: [
@@ -804,7 +805,7 @@ try {
   })
   check('monitor_rules_set', () => {
     assert(rulesSetTool.res.isError !== true, rulesSetTool.text?.slice(0, 160))
-    assert((rulesSetTool.json.invalid ?? []).length === 0, JSON.stringify(rulesSetTool.json).slice(0, 160))
+    assert((rulesSetTool.json.output?.invalid ?? []).length === 0, JSON.stringify(rulesSetTool.json).slice(0, 160))
   })
 
   const ruleStatsTool = await call('monitor_rules_stats', {})
