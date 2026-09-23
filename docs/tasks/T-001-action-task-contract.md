@@ -37,9 +37,9 @@
 
 ## 完成记录
 
-- 实现 commit：`318e797 feat: add target-aware action task contracts`。
-- 实现：`src/shared/contracts/action.ts` 定义身份、目标、动作、任务和结果契约；`src/main/actions/*` 实现注册表、目标校验、幂等、取消和 unknown 效果语义。
+- 实现 commits：`318e797 feat: add target-aware action task contracts`、`5d58cc7 refactor: separate action policy and target resolution`。
+- 实现：`src/shared/contracts/action.ts` 定义身份、目标、动作、任务和结果契约；`src/main/actions/*` 的 ActionRegistry、ActionPolicy、WorkspaceTargetResolver 与 TaskService 分别承担注册、策略、目标校验、幂等、取消和 unknown 效果语义。
 - 接线：UI/IPC、HTTP、MCP 均通过统一动作服务；兼容的工作区路由仍可使用，但返回统一 `ActionResult` 外壳。
 - 验证：`npm run typecheck`、`npm run build`、`npm run test:workspaces`（7/7）、`npm run test:actions`（5/5）、`npm run test:control`（33/33）。
 - 已知限制：任务账本目前在主进程内存中，重启后不保留；持久化任务事件属于后续 scoped schema 任务。
-- 回滚：`git revert 318e797`。
+- 回滚：先执行 `git revert 5d58cc7`，再执行 `git revert 318e797`。

@@ -2,7 +2,7 @@
 
 状态：通过
 对应实现任务：[T-001](../tasks/T-001-action-task-contract.md)
-实现 commit：`318e797 feat: add target-aware action task contracts`
+实现 commits：`318e797 feat: add target-aware action task contracts`、`5d58cc7 refactor: separate action policy and target resolution`
 验收范围：协议、三入口一致性、目标保护、幂等、取消与 unknown 语义，以及既有控制面回归。
 
 ## 验收判据与证据
@@ -20,4 +20,4 @@
 
 验收通过 M0 的最小动作/任务执行语义。当前已注册的垂直切片仅是工作区动作；重放、Cookie/站点存储、浏览器 Tab 等动作会按相同协议逐项迁入。任务账本暂存主进程内存，不能把它当作重启后的审计记录或长任务恢复能力。
 
-回退实现使用 `git revert 318e797`；此验收与记录文档可单独用其文档提交回退。
+回退实现按逆序执行 `git revert 5d58cc7`、`git revert 318e797`；此验收与记录文档可单独用其文档提交回退。
