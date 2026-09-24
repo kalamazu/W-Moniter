@@ -2,12 +2,37 @@
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { createServer, request as httpRequest } from 'node:http'
+import { connect as netConnect } from 'node:net'
 import { launchApp, makeChecker, sleep } from './app-harness.mjs'
 import { startOrigin } from './test-origin.mjs'
 
 const { check, assert, report } = makeChecker()
 const dataDir = mkdtempSync(join(tmpdir(), 'monitor-core-centers-'))
 const origin = await startOrigin(0)
+let proxyHits = 0
+const upstreamProxy = createServer((req, res) => {
+  proxyHits += 1
+  const target = new URL(req.url)
+  const outgoing = httpRequest({ hostname: target.hostname, port: Number(target.port || 80), method: req.method, path: target.pathname + target.search, headers: req.headers }, (incoming) => {
+    res.writeHead(incoming.statusCode ?? 502, incoming.headers); incoming.pipe(res)
+  })
+  outgoing.on('error', (error) => { res.writeHead(502); res.end(error.message) })
+  req.pipe(outgoing)
+})
+upstreamProxy.on('connect', (req, socket, head) => {
+  proxyHits += 1
+  const [host, rawPort] = req.url.split(':')
+  const upstream = netConnect(Number(rawPort || 443), host, () => {
+    socket.write('HTTP/1.1 200 Connection Established\r\n\r\n')
+    if (head.length) upstream.write(head)
+    upstream.pipe(socket); socket.pipe(upstream)
+  })
+  socket.on('error', () => upstream.destroy())
+  upstream.on('error', () => socket.destroy())
+})
+await new Promise((resolve) => upstreamProxy.listen(0, '127.0.0.1', resolve))
+const upstreamPort = upstreamProxy.address().port
 let app = null
 
 const action = async (name, input = {}) => app.evaluate(`(async () => {
@@ -75,10 +100,22 @@ try {
     assert(readback.local === 'before', `localStorage 未恢复：${readback.local}`)
     assert(readback.cookie.includes('acceptance-cookie=one'), `Cookie 未恢复：${readback.cookie}`)
   })
+
+  const routed = await action('environment.save', { name: 'real-http-connect', dnsMode: 'proxy', upstreams: [{ id: 'upstream', kind: 'http-connect', host: '127.0.0.1', port: upstreamPort }], routes: [{ match: '*', upstreamId: 'upstream', required: true }] })
+  await action('environment.apply', { version: routed.output.version })
+  await app.evaluate(`window.monitor.suspendWorkspace('default')`)
+  await app.evaluate(`window.monitor.openWorkspace('default')`)
+  await app.waitConnected(1)
+  await app.evaluate(`window.monitor.evaluate("fetch('/proxy-proof?nonce=${Date.now()}').then(r => r.text()).then(() => 'ok')")`)
+  await sleep(500)
+  check('T-023 应用版本在重启后编译为 PAC，真实流量经过 HTTP CONNECT 上游', () => {
+    assert(proxyHits > 0, '上游代理没有看到浏览器流量')
+  })
 } catch (error) {
   check('21–24 综合验收流程', () => { throw error })
 } finally {
   if (app) await app.close()
+  await new Promise((resolve) => upstreamProxy.close(resolve))
   await origin.close()
   rmSync(dataDir, { recursive: true, force: true })
 }

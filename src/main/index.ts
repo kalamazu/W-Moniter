@@ -237,6 +237,12 @@ function applyEnvironmentArgs(config: EnvironmentConfig, pacPath: string, args: 
     return `${item.kind === 'socks5' ? 'SOCKS5' : 'PROXY'} ${item.host}:${item.port}`
   }
   if (config.upstreams.every((item) => item.kind === 'direct')) return false
+  if (config.routes.length === 1 && config.routes[0].match.trim() === '*') {
+    const upstream = upstreams.get(config.routes[0].upstreamId)!
+    const scheme = upstream.kind === 'socks5' ? 'socks5' : 'http'
+    args.push(`--proxy-server=${scheme}://${upstream.host}:${upstream.port}`, '--proxy-bypass-list=')
+    return true
+  }
   const expressions = config.routes.map((route) => {
     const match = route.match.trim()
     let condition = 'false'
