@@ -17,7 +17,7 @@ import { ActionPolicy } from './policy'
 import { TaskService, type TaskJournalDiagnostics } from './task-service'
 import { WorkspaceTargetResolver } from './target-resolver'
 
-type WorkspaceAction = 'workspaces.list' | 'workspace.create' | 'workspace.open' | 'workspace.suspend' | 'workspace.history' | 'workspace.cockpit' | 'workspace.checkpointCreate' | 'workspace.checkpointList' | 'workspace.checkpointRestore' | 'tasks.diagnostics' | 'rules.get' | 'rules.save' | 'content.verify' | 'content.readRange' | 'content.inspect' | 'content.pin' | 'content.unpin' | 'content.policySet' | 'content.gc' | 'content.revoke' | 'capture.evidence' | 'capture.summary' | 'workspaces.contentStats' | 'environment.get' | 'environment.save' | 'environment.apply' | 'environment.rollback' | 'environment.diagnose' | 'site.stateExport' | 'site.stateRestore' | 'browser.tree' | 'browser.tabCreate' | 'tab.command' | 'browser.timeline' | 'browser.dialog' | 'replay.list' | 'replay.createFromRequest' | 'replay.save' | 'replay.run' | 'tests.list' | 'tests.save' | 'tests.run' | 'auth.summary' | 'auth.verifyFixture' | 'extensions.summary' | 'extensions.setDesired'
+type WorkspaceAction = 'workspaces.list' | 'workspace.create' | 'workspace.open' | 'workspace.suspend' | 'workspace.history' | 'workspace.cockpit' | 'workspace.checkpointCreate' | 'workspace.checkpointList' | 'workspace.checkpointRestore' | 'tasks.diagnostics' | 'rules.get' | 'rules.save' | 'content.verify' | 'content.readRange' | 'content.inspect' | 'content.pin' | 'content.unpin' | 'content.policySet' | 'content.gc' | 'content.revoke' | 'capture.evidence' | 'capture.summary' | 'workspaces.contentStats' | 'environment.get' | 'environment.save' | 'environment.apply' | 'environment.rollback' | 'environment.diagnose' | 'site.stateExport' | 'site.stateRestore' | 'browser.tree' | 'browser.tabCreate' | 'tab.command' | 'browser.timeline' | 'browser.dialog' | 'replay.list' | 'replay.import' | 'replay.createFromRequest' | 'replay.save' | 'replay.run' | 'tests.list' | 'tests.save' | 'tests.run' | 'auth.summary' | 'auth.verifyFixture' | 'extensions.summary' | 'extensions.setDesired'
 
 export interface WorkspaceActionRuntime {
   create(input: WorkspaceCreateInput): WorkspaceSummary
@@ -79,6 +79,7 @@ const DESCRIPTORS: Record<WorkspaceAction, ActionDescriptor> = {
   'browser.timeline': { name: 'browser.timeline', kind: 'query', target: 'required', description: '读取浏览器控制动作证据时间线' },
   'browser.dialog': { name: 'browser.dialog', kind: 'mutation', target: 'required', description: '处理指定工作区当前 JavaScript 对话框' },
   'replay.list': { name: 'replay.list', kind: 'query', target: 'required', description: '读取版本化请求模板与运行历史' },
+  'replay.import': { name: 'replay.import', kind: 'mutation', target: 'required', description: '不执行 shell，安全解析 cURL 或 HAR 为模板' },
   'replay.createFromRequest': { name: 'replay.createFromRequest', kind: 'mutation', target: 'required', description: '从不可变历史请求派生重放模板' },
   'replay.save': { name: 'replay.save', kind: 'mutation', target: 'required', description: '保存请求模板新版本' },
   'replay.run': { name: 'replay.run', kind: 'mutation', target: 'required', description: '以浏览器或独立 HTTP 模式单次重放' },
@@ -281,6 +282,7 @@ export class WorkspaceActionRegistry {
         case 'browser.timeline': return this.runtime.browserTimeline(workspaceIdOf(request.target), (input as { limit?: number }).limit)
         case 'browser.dialog': return this.runtime.browserDialog(workspaceIdOf(request.target), Boolean((input as { accept?: boolean }).accept), (input as { promptText?: string }).promptText)
         case 'replay.list': return this.replay(workspaceIdOf(request.target)).list()
+        case 'replay.import': { const payload = input as { format: 'curl' | 'har'; source: string }; return this.replay(workspaceIdOf(request.target)).import(payload.format, payload.source) }
         case 'replay.createFromRequest': {
           const id = workspaceIdOf(request.target); const detail = await this.runtime.getRequest(id, Number((input as { seq: number }).seq)) as { request?: { seq?: number; method: string; url: string; req_headers?: string | null; req_body?: string | null; status?: number | null } } | null
           if (!detail?.request) throw new Error('历史请求不存在')

@@ -25,6 +25,10 @@ try {
 
   await app.evaluate(`window.monitor.evaluate(${JSON.stringify(`fetch('${base}/api/json-echo?seed=source',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({user:'source',n:1})}).then(r=>r.json())`)})`); await sleep(800)
   const rows = await app.evaluate(`window.monitor.queryRequests(${JSON.stringify({ urlPattern: '/api/json-echo?seed=source' })},20,0,'time_desc')`); const seq = rows.rows[0]?.seq; assert(seq, '找不到源请求')
+  const curlImport = await action('replay.import', { format: 'curl', source: `curl '${base}/api/json-echo?from=curl' -H 'content-type: application/json' -d '{"user":"curl"}'` })
+  const harImport = await action('replay.import', { format: 'har', source: JSON.stringify({ log: { entries: [{ request: { method: 'POST', url: `${base}/api/json-echo?from=har`, headers: [{ name: 'content-type', value: 'application/json' }], postData: { mimeType: 'application/json', text: '{"user":"har"}' } } }] } }) })
+  const unsafeImport = await action('replay.import', { format: 'curl', source: `curl '${base}/api/json-echo' --data-binary @secret.txt` })
+  check('T-026 cURL/HAR 仅解析成模板并拒绝隐式本地文件读取', () => { assert(curlImport.output?.[0]?.url.includes('from=curl'), 'cURL 未导入'); assert(harImport.output?.[0]?.url.includes('from=har'), 'HAR 未导入'); assert(unsafeImport.task.state === 'failed' && unsafeImport.task.error.message.includes('@file'), 'cURL @file 未拒绝') })
   const derived = await action('replay.createFromRequest', { seq, name: 'echo replay' }); const template = derived.output
   const saved = await action('replay.save', { ...template, url: `${base}/api/json-echo?replayed=1`, headers: [...template.headers, { name: 'x-repeat', value: 'a' }, { name: 'x-repeat', value: 'b' }], body: { kind: 'text', value: JSON.stringify({ user: 'replayed', n: 7, extra: true }), contentType: 'application/json' } })
   const independent = await action('replay.run', { templateId: saved.output.id, version: saved.output.version, mode: 'independent', confirmWrite: true }); const browser = await action('replay.run', { templateId: saved.output.id, version: saved.output.version, mode: 'browser', confirmWrite: true })
