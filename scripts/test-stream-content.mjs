@@ -35,6 +35,7 @@ try {
       const req = http.request({ hostname: endpoint.host, port: endpoint.port, path: '/object', method: 'PUT',
         headers: { authorization: `Bearer ${endpoint.token}`, 'x-expected-bytes': String(declared) } }, res => {
         const parts = []
+        res.on('error', reject)
         res.on('data', part => parts.push(part))
         res.on('end', () => resolve({ status: res.statusCode, body: Buffer.concat(parts).toString('utf8') }))
       })
@@ -79,13 +80,15 @@ try {
     console.log(`  ✓ slow writer backpressure observed (${elapsedMs} ms)`)
   }
 
-  const wrong = await upload(1024, false, 2048)
-  assert.equal(wrong.result.status, 400)
-  console.log('  ✓ incomplete declared length rejected')
-  await upload(1024 * 1024, true).catch(() => {})
-  await new Promise(resolve => setTimeout(resolve, 250))
-  assert.equal(readdirSync(join(temp, 'manifests')).length, 1)
-  console.log('  ✓ aborted upload has no manifest')
+  if (process.env['STREAM_TEST_LARGE_ONLY'] !== '1') {
+    const wrong = await upload(1024, false, 2048)
+    assert.equal(wrong.result.status, 400)
+    console.log('  ✓ incomplete declared length rejected')
+    await upload(1024 * 1024, true).catch(() => {})
+    await new Promise(resolve => setTimeout(resolve, 250))
+    assert.equal(readdirSync(join(temp, 'manifests')).length, 1)
+    console.log('  ✓ aborted upload has no manifest')
+  }
 } finally {
   child.stdin.end()
   await Promise.race([once(child, 'exit'), new Promise(resolve => setTimeout(() => { child.kill(); resolve() }, 3000))])

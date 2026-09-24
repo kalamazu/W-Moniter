@@ -29,10 +29,10 @@
 | [T-018](T-018-download-artifact-capture.md) | 已通过 | 下载文件采集与证据化 | M1 §4 / M4 | Codex | [A-018](../acceptance/A-018-download-artifact-capture.md) |
 | [T-019](T-019-cache-service-worker-coverage.md) | 已通过 | 缓存与 Service Worker 响应覆盖 | M1 §4.2 | Codex | [A-019](../acceptance/A-019-cache-service-worker-coverage.md) |
 | [T-020](T-020-workspace-checkpoint-restore.md) | 已通过 | 工作区检查点与冷恢复 | M2 §5 | Codex | [A-020](../acceptance/A-020-workspace-checkpoint-restore.md) |
-| [T-021](T-021-content-governance-evidence-workbench.md) | 开发中 | 内容治理与统一证据工作台 | M1 收口 | Codex | 待创建 |
-| [T-022](T-022-workspace-cockpit-state-history.md) | 开发中 | 工作区驾驶舱与浏览器状态历史 | M2 收口 | Codex | 待创建 |
-| [T-023](T-023-environment-proxy-center.md) | 开发中 | 代理与环境配置中心 | M3 | Codex | 待创建 |
-| [T-024](T-024-site-storage-control-center.md) | 开发中 | Cookie 与站点存储控制中心 | M4 | Codex | 待创建 |
+| [T-021](T-021-content-governance-evidence-workbench.md) | 已通过 | 内容治理与统一证据工作台 | M1 收口 | Codex | [A-021](../acceptance/A-021-content-governance-evidence-workbench.md) |
+| [T-022](T-022-workspace-cockpit-state-history.md) | 已通过 | 工作区驾驶舱与浏览器状态历史 | M2 收口 | Codex | [A-022](../acceptance/A-022-workspace-cockpit-state-history.md) |
+| [T-023](T-023-environment-proxy-center.md) | 已通过 | 代理与环境配置中心 | M3 | Codex | [A-023](../acceptance/A-023-environment-proxy-center.md) |
+| [T-024](T-024-site-storage-control-center.md) | 已通过 | Cookie 与站点存储控制中心 | M4 | Codex | [A-024](../acceptance/A-024-site-storage-control-center.md) |
 | [T-025](T-025-browser-control-center.md) | 可认领 | 浏览器完全控制中心 | M4 | 未认领 | 待创建 |
 | [T-026](T-026-request-replay-workbench.md) | 可认领 | 请求模板与单次重放工作台 | M5 | 未认领 | 待创建 |
 | [T-027](T-027-batch-testing-script-runner.md) | 可认领 | 批量测试、断言与脚本运行器 | M6 | 未认领 | 待创建 |
@@ -43,6 +43,8 @@
 2026-09-24 已完成 T-006～T-015 独立验收；T-014 经 `6905516` 返工和真实启停复验后也已通过。T-010 通过的是“缺口真值矩阵”，不代表 M1 全量采集门槛已达成。
 
 2026-09-24 T-016～T-020 已实现并复验：前四项收口上传、实时流、下载和缓存/SW 正文链路，T-020 建立 suspended 独立工作区的可校验检查点与冷恢复。
+
+2026-09-25 T-021～T-024 已实现并复验：内容治理与证据查看、工作区驾驶舱/事件历史、版本化代理环境、Cookie/站点存储工作台均进入统一 Action。通用状态包对 IDB/Cache/SW 只承诺结构清单，不伪称可无损重建，边界见 ADR-0010。
 
 下一批 T-021～T-030 采用较大的纵向任务粒度以加速工程：每张卡同时包含领域服务、持久化、UI、Agent 动作和验收，不再把同一能力按技术层拆成多张小卡。建议依次推进 T-021/022 基础收口，T-023～025 控制面，T-026/027 执行与测试，再进入 T-028～030 资料、工作流和智能能力；依赖满足时允许并行认领。
 
