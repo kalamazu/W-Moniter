@@ -406,12 +406,15 @@ try {
     assert(done.id > begin.id, `completed(${done.id}) 排在 begin(${begin.id}) 之前`)
   })
 
-  await check(`下载的文件真的落到了磁盘（${downloadPath}）`, async () => {
-    await waitFor('下载文件落盘', async () => (existsSync(downloadPath) ? true : null), 15000, 200)
-    assert(existsSync(downloadPath), `文件不存在：${downloadPath}`)
-    const text = readFileSync(downloadPath, 'utf8')
-    assert(text.includes('monitor-download-payload'), `文件内容不对：${text.slice(0, 60)}`)
-    assert(statSync(downloadPath).size > 0, '文件是空的')
+  await check('下载正文归档到 ContentStore 后清理工作目录原文件', async () => {
+    const done = (await downloadEvents()).find((row) => row.detail?.event === 'completed')
+    const hash = done?.detail?.artifact?.hash
+    const manifestPath = join(DATA_DIR, 'content', 'manifests', `${hash}.json`)
+    assert(existsSync(manifestPath), `artifact manifest 不存在：${hash}`)
+    const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'))
+    const bytes = Buffer.concat(manifest.chunkHashes.map((chunk) => readFileSync(join(DATA_DIR, 'content', 'chunks', chunk))))
+    assert(bytes.toString('utf8').includes('monitor-download-payload'), 'ContentStore 中下载正文不对')
+    assert(!existsSync(downloadPath), `归档后仍残留原始下载文件：${downloadPath}`)
   })
   /* ------------------------------------------------------------ 接口画像 */
 

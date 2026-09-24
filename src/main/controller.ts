@@ -1215,6 +1215,7 @@ export class Controller extends EventEmitter {
       const path = join(this.options.downloadDir, name)
       const ref = await this.contentClient?.putFile(path)
       if (!ref) throw new Error('内容服务未启动')
+      unlinkSync(path)
       this.storage.appendEvent({ ...item, url: item.url ?? meta?.url, detail: {
         ...(item.detail as Record<string, unknown>), artifact: ref, filename: name, captureState: 'stored'
       } })
