@@ -24,6 +24,7 @@ export class WorkflowService {
 
   async resume(runId: string, leaseToken: string, execute: Execute, waitRequest: WaitRequest, signal?: AbortSignal, acknowledgeUnknown = false): Promise<WorkflowRun> {
     const run = this.getRun(runId); this.assertLease(run, leaseToken)
+    if (run.state === 'succeeded' || run.state === 'canceled') throw new Error(`终态运行不能恢复：${run.state}`)
     if (run.nodes.some((node) => node.state === 'unknown') && !acknowledgeUnknown) throw new Error('存在 unknown 节点，必须人工确认后才能继续')
     if (acknowledgeUnknown) for (const node of run.nodes) if (node.state === 'unknown') { node.state = 'pending'; node.error = undefined; node.startedAt = undefined; node.finishedAt = undefined }
     run.state = 'running'; event(run, 'run.resumed'); this.update(run); return this.drive(run, this.get(run.workflowId, run.workflowVersion), leaseToken, execute, waitRequest, signal)
@@ -31,8 +32,11 @@ export class WorkflowService {
 
   command(runId: string, command: 'pause' | 'cancel' | 'takeover', leaseToken?: string): WorkflowRun {
     const run = this.getRun(runId)
-    if (command === 'takeover') { run.lease += 1; run.leaseToken = randomUUID(); run.owner = 'human'; run.state = 'paused'; for (const node of run.nodes) if (node.state === 'running') { node.state = 'unknown'; node.error = '接管发生时节点仍在执行，远端效果未知' }; this.signals.get(run.id)?.abort(); event(run, 'lease.takeover', undefined, '旧执行者已失效；在飞节点标记 unknown'); this.update(run); return run }
-    this.assertLease(run, leaseToken ?? ''); run.state = command === 'pause' ? 'paused' : 'canceled'; this.signals.get(run.id)?.abort(); event(run, `run.${command}`); this.update(run); return run
+    if (run.state === 'succeeded' || run.state === 'canceled') throw new Error(`终态运行不能执行 ${command}：${run.state}`)
+    if (command !== 'takeover') this.assertLease(run, leaseToken ?? '')
+    run.lease += 1; run.leaseToken = randomUUID(); if (command === 'takeover') run.owner = 'human'; run.state = command === 'cancel' ? 'canceled' : 'paused'
+    for (const node of run.nodes) if (node.state === 'running') { node.state = 'unknown'; node.error = `${command} 发生时节点仍在执行，远端效果未知` }
+    this.signals.get(run.id)?.abort(); event(run, command === 'takeover' ? 'lease.takeover' : `run.${command}`, undefined, '旧执行者已失效；在飞节点标记 unknown'); this.update(run); return run
   }
 
   private async drive(run: WorkflowRun, definition: WorkflowDefinition, leaseToken: string, execute: Execute, waitRequest: WaitRequest, outerSignal?: AbortSignal): Promise<WorkflowRun> {
