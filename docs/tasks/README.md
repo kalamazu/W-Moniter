@@ -29,10 +29,10 @@
 | [T-018](T-018-download-artifact-capture.md) | 已通过 | 下载文件采集与证据化 | M1 §4 / M4 | Codex | [A-018](../acceptance/A-018-download-artifact-capture.md) |
 | [T-019](T-019-cache-service-worker-coverage.md) | 已通过 | 缓存与 Service Worker 响应覆盖 | M1 §4.2 | Codex | [A-019](../acceptance/A-019-cache-service-worker-coverage.md) |
 | [T-020](T-020-workspace-checkpoint-restore.md) | 已通过 | 工作区检查点与冷恢复 | M2 §5 | Codex | [A-020](../acceptance/A-020-workspace-checkpoint-restore.md) |
-| [T-021](T-021-content-governance-evidence-workbench.md) | 可认领 | 内容治理与统一证据工作台 | M1 收口 | 未认领 | 待创建 |
-| [T-022](T-022-workspace-cockpit-state-history.md) | 可认领 | 工作区驾驶舱与浏览器状态历史 | M2 收口 | 未认领 | 待创建 |
-| [T-023](T-023-environment-proxy-center.md) | 可认领 | 代理与环境配置中心 | M3 | 未认领 | 待创建 |
-| [T-024](T-024-site-storage-control-center.md) | 可认领 | Cookie 与站点存储控制中心 | M4 | 未认领 | 待创建 |
+| [T-021](T-021-content-governance-evidence-workbench.md) | 开发中 | 内容治理与统一证据工作台 | M1 收口 | Codex | 待创建 |
+| [T-022](T-022-workspace-cockpit-state-history.md) | 开发中 | 工作区驾驶舱与浏览器状态历史 | M2 收口 | Codex | 待创建 |
+| [T-023](T-023-environment-proxy-center.md) | 开发中 | 代理与环境配置中心 | M3 | Codex | 待创建 |
+| [T-024](T-024-site-storage-control-center.md) | 开发中 | Cookie 与站点存储控制中心 | M4 | Codex | 待创建 |
 | [T-025](T-025-browser-control-center.md) | 可认领 | 浏览器完全控制中心 | M4 | 未认领 | 待创建 |
 | [T-026](T-026-request-replay-workbench.md) | 可认领 | 请求模板与单次重放工作台 | M5 | 未认领 | 待创建 |
 | [T-027](T-027-batch-testing-script-runner.md) | 可认领 | 批量测试、断言与脚本运行器 | M6 | 未认领 | 待创建 |
