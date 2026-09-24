@@ -31,8 +31,8 @@
 
 ## 完成记录
 
-- 实现 commit：`d77dd1a`、`5b5ff15`
+- 实现 commit：`d77dd1a`、`5b5ff15`、`a0c989d`
 - 修改文件：`src/shared/contracts/workflow.ts`、`src/main/workflow/service.ts`、`src/main/actions/registry.ts`、`WorkflowPanel.tsx`、`cli/monitor.mjs`
 - 测试命令与结果：`test:knowledge-workflow` 的 T-029 5/5；真实进程中断重启、接管 fencing、旧租约拒绝和跨工作区拒绝通过。
 - 已知限制：本地 V1 为单机工作流和 JSON DAG 编辑；复杂图形布线、暂停后事件流订阅和分布式多用户 lease 留待生产化。
-- 回滚：先 `git revert 5b5ff15`，再 `git revert d77dd1a`（后者与 T-028 共用接线）。
+- 回滚：依次 `git revert a0c989d 5b5ff15 d77dd1a`（最后一项与 T-028 共用接线）。
