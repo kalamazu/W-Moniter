@@ -8,7 +8,7 @@ import { ActionPolicy } from './policy'
 import { TaskService, type TaskJournalDiagnostics } from './task-service'
 import { WorkspaceTargetResolver } from './target-resolver'
 
-type WorkspaceAction = 'workspaces.list' | 'workspace.create' | 'workspace.open' | 'workspace.suspend' | 'tasks.diagnostics' | 'rules.get' | 'rules.save' | 'content.verify' | 'content.readRange' | 'content.revoke' | 'capture.evidence' | 'capture.summary' | 'workspaces.contentStats' | 'auth.summary' | 'auth.verifyFixture' | 'extensions.summary' | 'extensions.setDesired'
+type WorkspaceAction = 'workspaces.list' | 'workspace.create' | 'workspace.open' | 'workspace.suspend' | 'workspace.checkpointCreate' | 'workspace.checkpointList' | 'workspace.checkpointRestore' | 'tasks.diagnostics' | 'rules.get' | 'rules.save' | 'content.verify' | 'content.readRange' | 'content.revoke' | 'capture.evidence' | 'capture.summary' | 'workspaces.contentStats' | 'auth.summary' | 'auth.verifyFixture' | 'extensions.summary' | 'extensions.setDesired'
 
 export interface WorkspaceActionRuntime {
   create(input: WorkspaceCreateInput): WorkspaceSummary
@@ -29,6 +29,9 @@ const DESCRIPTORS: Record<WorkspaceAction, ActionDescriptor> = {
   'workspace.create': { name: 'workspace.create', kind: 'mutation', target: 'required', description: '创建持久工作区' },
   'workspace.open': { name: 'workspace.open', kind: 'mutation', target: 'required', description: '打开或聚焦工作区' },
   'workspace.suspend': { name: 'workspace.suspend', kind: 'mutation', target: 'required', description: '休眠指定工作区' },
+  'workspace.checkpointCreate': { name: 'workspace.checkpointCreate', kind: 'mutation', target: 'required', description: '为 suspended 工作区创建可校验检查点' },
+  'workspace.checkpointList': { name: 'workspace.checkpointList', kind: 'query', target: 'required', description: '列出工作区检查点' },
+  'workspace.checkpointRestore': { name: 'workspace.checkpointRestore', kind: 'mutation', target: 'required', description: '冷恢复检查点并保留恢复前备份' },
   'tasks.diagnostics': { name: 'tasks.diagnostics', kind: 'query', target: 'none', description: '任务日志恢复与损坏诊断' },
   'rules.get': { name: 'rules.get', kind: 'query', target: 'required', description: '读取指定工作区规则' },
   'rules.save': { name: 'rules.save', kind: 'mutation', target: 'required', description: '保存指定工作区规则' },
@@ -87,6 +90,16 @@ export class WorkspaceActionRegistry {
           return this.runtime.open((request.target as Extract<TargetRef, { kind: 'workspace' }>).workspaceId)
         case 'workspace.suspend':
           return this.runtime.suspend((request.target as Extract<TargetRef, { kind: 'workspace' }>).workspaceId)
+        case 'workspace.checkpointCreate': {
+          const id = (request.target as Extract<TargetRef, { kind: 'workspace' }>).workspaceId
+          return this.workspaces.createCheckpoint(id, (input as { label?: string }).label)
+        }
+        case 'workspace.checkpointList':
+          return this.workspaces.listCheckpoints((request.target as Extract<TargetRef, { kind: 'workspace' }>).workspaceId)
+        case 'workspace.checkpointRestore': {
+          const id = (request.target as Extract<TargetRef, { kind: 'workspace' }>).workspaceId
+          return this.workspaces.restoreCheckpoint(id, String((input as { checkpointId?: string }).checkpointId ?? ''))
+        }
         case 'rules.get':
           return this.runtime.getRules((request.target as Extract<TargetRef, { kind: 'workspace' }>).workspaceId)
         case 'rules.save':

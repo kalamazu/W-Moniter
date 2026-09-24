@@ -6,7 +6,7 @@
  * 工作区是否拥有独立的 profile / SQLite / 规则目录。这里不把“切 UI 标签”误当成
  * 隔离：切换必须关闭旧受管浏览器，再连接到新工作区的 Chromium。
  */
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { startOrigin } from './test-origin.mjs'
@@ -120,6 +120,38 @@ try {
     assert(current?.state === 'suspended', `休眠后的状态不对：${current?.state}`)
     assert(previous?.state === 'running', `默认工作区被错误停止：${previous?.state}`)
     assert(existsSync(join(dataDir, 'workspaces', created.id, 'monitor.db')), '休眠后数据库不应被删除')
+  })
+
+  const workspaceRoot = join(dataDir, 'workspaces', created.id)
+  mkdirSync(join(workspaceRoot, 'content'), { recursive: true })
+  writeFileSync(join(workspaceRoot, 'rules.json'), '{"marker":"before"}\n')
+  writeFileSync(join(workspaceRoot, 'content', 'checkpoint-sentinel'), 'immutable-evidence')
+  const target = { kind: 'workspace', workspaceId: created.id }
+  const checkpointAction = await app.evaluate(`window.monitor.executeAction(${JSON.stringify({
+    action: 'workspace.checkpointCreate', target, input: { label: 'acceptance' }
+  })})`)
+  const checkpoint = checkpointAction.output
+  writeFileSync(join(workspaceRoot, 'rules.json'), '{"marker":"after"}\n')
+  rmSync(join(workspaceRoot, 'content', 'checkpoint-sentinel'))
+  const restoredAction = await app.evaluate(`window.monitor.executeAction(${JSON.stringify({
+    action: 'workspace.checkpointRestore', target, input: { checkpointId: checkpoint.id }
+  })})`)
+  check('suspended 工作区可创建校验清单并冷恢复，恢复前状态留有备份', () => {
+    assert(checkpoint.files.some((file) => file.path === 'rules.json' && /^[a-f0-9]{64}$/.test(file.hash)), '检查点缺少逐文件 hash')
+    assert(restoredAction.task.state === 'succeeded' && restoredAction.output.restored, '检查点恢复失败')
+    assert(readFileSync(join(workspaceRoot, 'rules.json'), 'utf8').includes('before'), '规则文件没有恢复')
+    assert(readFileSync(join(workspaceRoot, 'content', 'checkpoint-sentinel'), 'utf8') === 'immutable-evidence', '内容证据没有恢复')
+    assert(existsSync(restoredAction.output.backup), '恢复前备份不存在')
+  })
+
+  const listedCheckpoints = await app.evaluate(`window.monitor.executeAction(${JSON.stringify({
+    action: 'workspace.checkpointList', target, input: {}
+  })})`)
+  const afterRestore = (await app.evaluate('window.monitor.getWorkspaces()')).output
+  check('检查点可由统一 Action API 枚举，恢复后登录与扩展状态明确标为待复验', () => {
+    assert(listedCheckpoints.output.some((item) => item.id === checkpoint.id), '统一动作未列出检查点')
+    const current = afterRestore.workspaces.find((workspace) => workspace.id === created.id)
+    assert(current?.state === 'suspended' && current.error?.includes('登录证据需重新验证'), '恢复后没有标出登录/扩展复验要求')
   })
 
   const resumedAction = await app.evaluate("window.monitor.openWorkspace('default')")

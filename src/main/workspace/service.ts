@@ -1,6 +1,6 @@
-import { randomUUID } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { createHash, randomUUID } from 'node:crypto'
+import { closeSync, cpSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, readSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { dirname, join, relative } from 'node:path'
 import type {
   WorkspaceCreateInput,
   WorkspaceLifecycleState,
@@ -22,6 +22,14 @@ export interface WorkspaceRuntimePaths {
   downloadDir: string
   rulesPath: string
   uiSettingsPath: string
+}
+
+export interface WorkspaceCheckpoint {
+  id: string
+  workspaceId: string
+  createdAt: number
+  label?: string
+  files: Array<{ path: string; size: number; hash: string }>
 }
 
 interface WorkspaceServiceOptions {
@@ -194,6 +202,93 @@ export class WorkspaceService {
     }
   }
 
+  createCheckpoint(id: string, label?: string): WorkspaceCheckpoint {
+    const workspace = this.get(id)
+    if (workspace.state !== 'suspended') throw new Error('只有 suspended 工作区可以创建一致性检查点')
+    if (workspace.legacy) throw new Error('默认兼容工作区尚不支持检查点；请使用独立工作区')
+    const checkpointId = `cp_${Date.now()}_${randomUUID()}`
+    const base = join(this.rootDir, '.checkpoints', id, checkpointId)
+    const stage = `${base}.staging`
+    const payload = join(stage, 'payload')
+    mkdirSync(payload, { recursive: true })
+    try {
+      this.copyRuntime(this.pathsFor(id), payload)
+      const manifest: WorkspaceCheckpoint = {
+        id: checkpointId, workspaceId: id, createdAt: Date.now(),
+        ...(label?.trim() ? { label: label.trim().slice(0, 120) } : {}),
+        files: inventory(payload)
+      }
+      writeFileSync(join(stage, 'manifest.json'), JSON.stringify(manifest, null, 2) + '\n', 'utf8')
+      mkdirSync(dirname(base), { recursive: true })
+      renameSync(stage, base)
+      return manifest
+    } catch (error) {
+      rmSync(stage, { recursive: true, force: true })
+      throw error
+    }
+  }
+
+  listCheckpoints(id: string): WorkspaceCheckpoint[] {
+    const root = join(this.rootDir, '.checkpoints', id)
+    if (!existsSync(root)) return []
+    return readdirSync(root, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory() && entry.name.startsWith('cp_'))
+      .map((entry) => JSON.parse(readFileSync(join(root, entry.name, 'manifest.json'), 'utf8')) as WorkspaceCheckpoint)
+      .sort((a, b) => b.createdAt - a.createdAt)
+  }
+
+  restoreCheckpoint(id: string, checkpointId: string): { restored: true; backup: string; manifest: WorkspaceCheckpoint } {
+    const workspace = this.get(id)
+    if (workspace.state !== 'suspended') throw new Error('恢复要求工作区保持 suspended，浏览器和存储写入器必须关闭')
+    if (workspace.legacy) throw new Error('默认兼容工作区尚不支持检查点恢复')
+    if (!/^cp_[A-Za-z0-9_-]+$/.test(checkpointId)) throw new Error('检查点 ID 无效')
+    const root = join(this.rootDir, '.checkpoints', id, checkpointId)
+    const payload = join(root, 'payload')
+    const manifest = JSON.parse(readFileSync(join(root, 'manifest.json'), 'utf8')) as WorkspaceCheckpoint
+    if (manifest.workspaceId !== id || manifest.id !== checkpointId) throw new Error('检查点归属不匹配')
+    const actual = inventory(payload)
+    if (JSON.stringify(actual) !== JSON.stringify(manifest.files)) throw new Error('检查点完整性校验失败，拒绝恢复')
+
+    const backup = join(this.rootDir, '.checkpoints', id, 'backups', `before-${Date.now()}-${randomUUID()}`)
+    mkdirSync(backup, { recursive: true })
+    const paths = this.pathsFor(id)
+    this.copyRuntime(paths, backup)
+    try {
+      this.replaceRuntime(paths, payload)
+    } catch (error) {
+      this.replaceRuntime(paths, backup)
+      throw new Error(`恢复失败，已回滚到恢复前备份：${(error as Error).message}`)
+    }
+    const mutable = this.findMutable(id)
+    mutable.updatedAt = Date.now()
+    mutable.version += 1
+    mutable.error = '检查点已恢复；登录证据需重新验证，扩展将在下次打开时复扫。'
+    this.persist()
+    return { restored: true, backup, manifest }
+  }
+
+  private copyRuntime(paths: WorkspaceRuntimePaths, destination: string): void {
+    const entries: Array<[string, string]> = [
+      [paths.profileDir, 'browser-profile'], [paths.dbPath, 'monitor.db'],
+      [paths.contentDir, 'content'], [paths.downloadDir, 'downloads'],
+      [paths.rulesPath, 'rules.json'], [paths.uiSettingsPath, 'ui-settings.json']
+    ]
+    for (const [source, name] of entries) if (existsSync(source)) cpSync(source, join(destination, name), { recursive: true })
+  }
+
+  private replaceRuntime(paths: WorkspaceRuntimePaths, source: string): void {
+    const entries: Array<[string, string]> = [
+      [paths.profileDir, 'browser-profile'], [paths.dbPath, 'monitor.db'],
+      [paths.contentDir, 'content'], [paths.downloadDir, 'downloads'],
+      [paths.rulesPath, 'rules.json'], [paths.uiSettingsPath, 'ui-settings.json']
+    ]
+    for (const [target, name] of entries) {
+      rmSync(target, { recursive: true, force: true })
+      const from = join(source, name)
+      if (existsSync(from)) { mkdirSync(dirname(target), { recursive: true }); cpSync(from, target, { recursive: true }) }
+    }
+  }
+
   private updateState(id: string, next: WorkspaceLifecycleState): WorkspaceSummary {
     const workspace = this.findMutable(id)
     this.transition(workspace, next)
@@ -261,4 +356,26 @@ export class WorkspaceService {
     if (!this.store) throw new Error('WorkspaceService 尚未初始化')
     return this.store
   }
+}
+
+function inventory(root: string): Array<{ path: string; size: number; hash: string }> {
+  const rows: Array<{ path: string; size: number; hash: string }> = []
+  const walk = (dir: string): void => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const path = join(dir, entry.name)
+      if (entry.isDirectory()) walk(path)
+      else if (entry.isFile()) rows.push({ path: relative(root, path).replaceAll('\\', '/'), size: statSync(path).size, hash: hashFile(path) })
+    }
+  }
+  if (existsSync(root)) walk(root)
+  return rows.sort((a, b) => a.path.localeCompare(b.path))
+}
+
+function hashFile(path: string): string {
+  const hash = createHash('sha256')
+  const fd = openSync(path, 'r')
+  const block = Buffer.allocUnsafe(1024 * 1024)
+  try { let size = 0; while ((size = readSync(fd, block, 0, block.length, null)) > 0) hash.update(block.subarray(0, size)) }
+  finally { closeSync(fd) }
+  return hash.digest('hex')
 }
