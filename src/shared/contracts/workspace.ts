@@ -41,3 +41,11 @@ export interface WorkspaceCreateInput {
   profile?: 'L' | 'H'
 }
 
+export interface WorkspaceEvent {
+  id: string
+  workspaceId: string
+  at: number
+  type: string
+  version: number
+  detail?: Record<string, unknown>
+}

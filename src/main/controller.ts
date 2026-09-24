@@ -1837,6 +1837,60 @@ export class Controller extends EventEmitter {
     }
   }
 
+  async exportSiteState(origins?: string[]): Promise<import('../shared/types').SiteStateBundle> {
+    if (!this.site) throw new Error('浏览器还没起来')
+    await this.scanSiteData({}).catch(() => undefined)
+    const overview = await this.getSiteOrigins({ limit: 500 })
+    const selected = new Set((origins?.length ? origins : overview?.rows.map((row) => row.origin) ?? []).map((value) => new URL(value).origin))
+    const details = []
+    for (const origin of selected) {
+      const detail = await this.getSiteDetail(origin)
+      if (!detail) continue
+      details.push({ origin, localStorage: detail.localStorage, sessionStorage: detail.sessionStorage, idb: detail.idb, caches: detail.caches, serviceWorkers: detail.serviceWorkers })
+    }
+    const jar = await this.site.listCookies()
+    const cookies = jar.filter((cookie) => selected.size === 0 || [...selected].some((origin) => cookie.domain.replace(/^\./, '') === new URL(origin).hostname || new URL(origin).hostname.endsWith('.' + cookie.domain.replace(/^\./, ''))))
+      .map((cookie) => ({ name: cookie.name, value: cookie.value, domain: cookie.domain, path: cookie.path, secure: cookie.secure, httpOnly: cookie.httpOnly,
+        ...(cookie.sameSite && ['Strict', 'Lax', 'None'].includes(cookie.sameSite) ? { sameSite: cookie.sameSite as 'Strict' | 'Lax' | 'None' } : {}),
+        ...(!cookie.session && cookie.expires ? { expires: cookie.expires } : {}) }))
+    return { schemaVersion: 1, exportedAt: Date.now(), origins: details, cookies }
+  }
+
+  async restoreSiteState(bundle: import('../shared/types').SiteStateBundle, options: { areas?: Array<'cookies' | 'localStorage' | 'sessionStorage'>; replace?: boolean } = {}): Promise<import('../shared/types').SiteStateRestoreReport> {
+    if (!this.site) throw new Error('浏览器还没起来')
+    if (bundle?.schemaVersion !== 1 || !Array.isArray(bundle.origins) || !Array.isArray(bundle.cookies)) throw new Error('站点状态包格式无效')
+    const areas = new Set(options.areas?.length ? options.areas : ['cookies', 'localStorage'])
+    const report: import('../shared/types').SiteStateRestoreReport = { ok: true, applied: { cookies: 0, localStorage: 0, sessionStorage: 0 }, verifiedOrigins: [], warnings: [] }
+    if (areas.has('cookies')) {
+      if (options.replace) for (const origin of bundle.origins) await this.deleteCookies({ host: new URL(origin.origin).hostname })
+      for (const cookie of bundle.cookies) {
+        const result = await this.setCookie(cookie)
+        if (!result.ok) throw new Error(result.error ?? `Cookie ${cookie.name} 写入失败`)
+        report.applied.cookies += 1
+      }
+    }
+    for (const origin of bundle.origins) {
+      const normalized = new URL(origin.origin).origin
+      for (const area of ['localStorage', 'sessionStorage'] as const) {
+        if (!areas.has(area)) continue
+        const storageArea = area === 'localStorage' ? 'local' : 'session'
+        if (options.replace) await this.editStorage({ origin: normalized, area: storageArea, action: 'clear' })
+        for (const row of origin[area]) {
+          const result = await this.editStorage({ origin: normalized, area: storageArea, action: 'set', key: row.key, value: row.value })
+          if (!result.ok) throw new Error(result.error ?? `${area} ${row.key} 写入失败`)
+          report.applied[area] += 1
+        }
+      }
+      if (origin.idb.length || origin.caches.length || origin.serviceWorkers.length) report.warnings.push(`${normalized}: IDB/Cache/SW 已导出清单，但浏览器协议不支持无损通用重建`)
+      await this.scanSiteData({ origin: normalized })
+      const actual = await this.getSiteDetail(normalized)
+      if (!actual) throw new Error(`${normalized} 写后读回失败`)
+      report.verifiedOrigins.push(normalized)
+      await this.storage.call('authRecord', { origin: normalized, state: 'stale', source: 'restore', detail: 'site state bundle restored' }).catch(() => undefined)
+    }
+    return report
+  }
+
   /* -------------------------------------------- 事件流 / WS / 分析 / 导出 */
 
   async queryEvents(query: EventQuery): Promise<EventPage | null> {

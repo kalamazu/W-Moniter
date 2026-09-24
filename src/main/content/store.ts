@@ -7,6 +7,7 @@ export interface ContentRef { hash: string; size: number; chunks: number }
 interface Manifest extends ContentRef { chunkHashes: string[] }
 export interface ContentIntegrity { hash: string; exists: boolean; valid: boolean; size?: number; chunks?: number; error?: string }
 export interface ContentStats { objects: number; bytes: number; chunks: number }
+export interface ContentObject extends ContentRef { valid: boolean; modifiedAt: number; error?: string }
 
 /**
  * 内容寻址的原始字节库。manifest 只在所有块原子落盘后写入；读取者看不见 staging。
@@ -90,6 +91,27 @@ export class ContentStore {
       } catch { /* 损坏对象由 verify 给出细节，不混进可用空间统计。 */ }
     }
     return result
+  }
+
+  /** 枚举 manifest，而不是从 SQLite 猜测正文；治理层据此做配额和完整性决策。 */
+  async catalog(): Promise<ContentObject[]> {
+    let names: string[]
+    try { names = await readdir(join(this.root, 'manifests')) } catch { return [] }
+    const rows: ContentObject[] = []
+    for (const name of names.sort()) {
+      if (!/^[a-f0-9]{64}\.json$/.test(name)) continue
+      const hash = name.slice(0, -5)
+      const integrity = await this.verify(hash)
+      rows.push({
+        hash,
+        size: integrity.size ?? 0,
+        chunks: integrity.chunks ?? 0,
+        valid: integrity.valid,
+        modifiedAt: (await stat(this.manifestPath(hash))).mtimeMs,
+        ...(integrity.error ? { error: integrity.error } : {})
+      })
+    }
+    return rows
   }
 
   /** 删除 manifest，并在同一写入锁内清理不再被任何 manifest 引用的块。 */

@@ -1804,6 +1804,28 @@ export interface SiteScanReport {
   cookies: { total: number; added: number; changed: number; removed: number }
 }
 
+export interface SiteStateBundle {
+  schemaVersion: 1
+  exportedAt: number
+  origins: Array<{
+    origin: string
+    localStorage: SiteStorageEntry[]
+    /** sessionStorage 只可恢复到当前页面上下文，不宣称是 origin 全局状态。 */
+    sessionStorage: SiteStorageEntry[]
+    idb: SiteIdbDatabase[]
+    caches: SiteCache[]
+    serviceWorkers: SiteServiceWorker[]
+  }>
+  cookies: CookieInput[]
+}
+
+export interface SiteStateRestoreReport {
+  ok: boolean
+  applied: { cookies: number; localStorage: number; sessionStorage: number }
+  verifiedOrigins: string[]
+  warnings: string[]
+}
+
 /** 写 cookie 的入参（对齐 Network.setCookie） */
 export interface CookieInput {
   name: string

@@ -1,6 +1,7 @@
 import { app, BrowserWindow, ipcMain, shell, type IpcMainInvokeEvent } from 'electron'
-import { existsSync, mkdirSync } from 'node:fs'
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { Controller } from './controller'
 import { ControlBridge } from './control/bridge'
 import { WindowDock } from './window/dock'
@@ -10,6 +11,7 @@ import { locateNode } from './storage/locate-node'
 import { DEFAULT_WINDOW_MS } from '../../proxy/correlate.mjs'
 import { emptyRuleSet, readRuleSet, writeRuleSet } from './rules/store'
 import { WorkspaceService } from './workspace/service'
+import { EnvironmentRepository, type EnvironmentConfig } from './environment/repository'
 import { WorkspaceActionRegistry } from './actions/registry'
 import { CaptureEvidenceLedger } from './content/evidence'
 import type {
@@ -181,13 +183,15 @@ function createControllerForWorkspace(workspace: WorkspaceSummary): Controller {
   const testExtensionDir = !app.isPackaged
     ? process.env[`MONITOR_TEST_EXTENSION_DIR_${workspace.profile}`] ?? process.env['MONITOR_TEST_EXTENSION_DIR']
     : undefined
+  const extraArgs: string[] = []
+  if (testExtensionDir) extraArgs.push(`--disable-extensions-except=${testExtensionDir}`, `--load-extension=${testExtensionDir}`)
+  const environment = workspaceEnvironment(workspace.id)
+  const applied = environment.state.appliedVersion === null ? null : environment.state.versions.find((item) => item.version === environment.state.appliedVersion) ?? null
+  const externalProxy = applied ? applyEnvironmentArgs(applied, environment.pacPath, extraArgs) : false
   return new Controller({
     workspaceId: workspace.id,
     profileId: 'primary',
-    ...(testExtensionDir ? { extraArgs: [
-      `--disable-extensions-except=${testExtensionDir}`,
-      `--load-extension=${testExtensionDir}`
-    ] } : {}),
+    ...(extraArgs.length ? { extraArgs } : {}),
     userDataDir: paths.profileDir,
     startUrl: START_URL,
     profile: workspace.profile,
@@ -207,12 +211,49 @@ function createControllerForWorkspace(workspace: WorkspaceSummary): Controller {
     scriptMaxCount: SCRIPT_MAX_COUNT,
     scriptTimeoutMs: SCRIPT_TIMEOUT_MS,
     scriptConcurrency: SCRIPT_CONCURRENCY,
-    proxy: PROXY,
+    proxy: externalProxy ? false : PROXY,
     proxyRewriteMaxBytes: PROXY_REWRITE_MB * 1024 * 1024,
     proxyMergeWindowMs: PROXY_WINDOW_MS,
     proxyUpstreamRejectUnauthorized: PROXY_UPSTREAM_VERIFY,
     ...(PROXY_KEY ? { proxyKeyFile: PROXY_KEY } : {})
   })
+}
+
+function workspaceEnvironment(id: string): { repository: EnvironmentRepository; state: ReturnType<EnvironmentRepository['get']>; pacPath: string } {
+  if (!workspaceService) throw new Error('工作区服务还没准备好')
+  const base = dirname(workspaceService.pathsFor(id).uiSettingsPath)
+  const repository = new EnvironmentRepository(join(base, 'environment.json'))
+  return { repository, state: repository.get(), pacPath: join(base, 'environment.pac') }
+}
+
+/** 把冻结版本编译成 Chromium PAC。配置中出现未解析 SecretRef 时 fail-closed。 */
+function applyEnvironmentArgs(config: EnvironmentConfig, pacPath: string, args: string[]): boolean {
+  if (config.upstreams.some((item) => item.secretRef)) throw new Error('网络环境含 SecretRef，但本机秘密解析器尚未提供该引用；拒绝启动以避免静默无认证或直连')
+  const upstreams = new Map(config.upstreams.map((item) => [item.id, item]))
+  const proxyOf = (id: string): string => {
+    const item = upstreams.get(id)
+    if (!item) throw new Error(`环境路由引用不存在的上游：${id}`)
+    if (item.kind === 'direct') return 'DIRECT'
+    return `${item.kind === 'socks5' ? 'SOCKS5' : 'PROXY'} ${item.host}:${item.port}`
+  }
+  if (config.upstreams.every((item) => item.kind === 'direct')) return false
+  const expressions = config.routes.map((route) => {
+    const match = route.match.trim()
+    let condition = 'false'
+    const cidr = /^(\d+\.\d+\.\d+\.\d+)\/(8|16|24|32)$/.exec(match)
+    if (cidr) {
+      const octets = Number(cidr[2]) / 8
+      const mask = [...Array(4)].map((_, index) => index < octets ? '255' : '0').join('.')
+      condition = `isInNet(host, ${JSON.stringify(cidr[1])}, ${JSON.stringify(mask)})`
+    } else if (match === '*') condition = 'true'
+    else condition = `shExpMatch(host, ${JSON.stringify(match)})`
+    return `  if (${condition}) return ${JSON.stringify(proxyOf(route.upstreamId))};`
+  })
+  const pac = `function FindProxyForURL(url, host) {\n${expressions.join('\n')}\n  return "DIRECT";\n}\n`
+  mkdirSync(dirname(pacPath), { recursive: true })
+  writeFileSync(pacPath, pac, 'utf8')
+  args.push(`--proxy-pac-url=${pathToFileURL(pacPath).toString()}`, '--proxy-bypass-list=')
+  return true
 }
 
 function bindController(next: Controller, workspaceId: string): void {
@@ -362,6 +403,8 @@ async function openWorkspace(id: string): Promise<WorkspaceOverview> {
       workspaceService.markError(target.id, next.getStatus().error ?? '浏览器启动失败')
     } else {
       workspaceService.markRunning(target.id)
+      const environment = workspaceEnvironment(target.id)
+      if (environment.state.appliedVersion !== null) environment.repository.markStarted(environment.state.appliedVersion)
       activeWorkspace = workspaceService.get(target.id)
       publishWorkspaces()
       void dock?.restore()
@@ -965,6 +1008,16 @@ app.whenReady().then(async () => {
       const instance = workspaceControllers.get(id)
       if (!instance) throw new Error('目标工作区未运行，无法记录扩展期望')
       return instance.setExtensionDesired(input)
+    },
+    exportSiteState: (id, origins) => {
+      const instance = workspaceControllers.get(id)
+      if (!instance) throw new Error('目标工作区未运行，无法导出站点状态')
+      return instance.exportSiteState(origins)
+    },
+    restoreSiteState: (id, bundle, options) => {
+      const instance = workspaceControllers.get(id)
+      if (!instance) throw new Error('目标工作区未运行，无法恢复站点状态')
+      return instance.restoreSiteState(bundle, options)
     }
   }, { journalPath: join(DATA_DIR, 'tasks', 'journal.json') })
   activeWorkspace = workspaceService.active()

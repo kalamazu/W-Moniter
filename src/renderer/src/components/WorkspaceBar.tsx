@@ -30,6 +30,27 @@ export function WorkspaceBar({ overview, onChange }: Props): React.JSX.Element |
   const [contentStats, setContentStats] = useState<Record<string, { objects: number; bytes: number; gaps: number; lastError?: string; recovered: number; recoveryFailed: number }>>({})
   const [authRows, setAuthRows] = useState<Array<{ origin: string; state: string; account_label: string | null; observed_at: number; source: string }>>([])
   const [extensions, setExtensions] = useState<{ scan: { observed_at: number; reason: string } | null; items: Array<{ extensionId: string; state: string; reasons: string[]; observed: { name: string; version: string | null } | null }> } | null>(null)
+  const [cockpit, setCockpit] = useState<{
+    history: Array<{ id: string; at: number; type: string; version: number }>
+    checkpoints: Array<{ id: string; createdAt: number; label?: string; files: unknown[] }>
+  } | null>(null)
+  const [governance, setGovernance] = useState<{ policy: { quotaBytes: number; graceMs: number }; pins: unknown[]; audit: unknown[] } | null>(null)
+
+  useEffect(() => {
+    const id = overview?.activeWorkspaceId
+    if (!id) { setCockpit(null); setGovernance(null); return }
+    let alive = true
+    const target = { kind: 'workspace' as const, workspaceId: id }
+    void Promise.all([
+      window.monitor.executeAction({ action: 'workspace.cockpit', input: {}, target }),
+      window.monitor.executeAction({ action: 'content.inspect', input: {}, target })
+    ]).then(([cockpitResult, governanceResult]) => {
+      if (!alive) return
+      if (cockpitResult.output) setCockpit(cockpitResult.output as typeof cockpit)
+      if (governanceResult.output) setGovernance(governanceResult.output as typeof governance)
+    }).catch(() => undefined)
+    return () => { alive = false }
+  }, [overview?.activeWorkspaceId, statsTick])
 
   useEffect(() => {
     const id = overview?.activeWorkspaceId
@@ -136,6 +157,31 @@ export function WorkspaceBar({ overview, onChange }: Props): React.JSX.Element |
     finally { setBusy(false) }
   }
 
+  const createCheckpoint = async (): Promise<void> => {
+    if (!active) return
+    const label = window.prompt('检查点标签（可留空）') ?? undefined
+    setBusy(true); setError(null)
+    try {
+      const result = await window.monitor.executeAction({ action: 'workspace.checkpointCreate', input: { label }, target: { kind: 'workspace', workspaceId: active.id } })
+      if (result.task.error) throw new Error(result.task.error.message)
+      setStatsTick((value) => value + 1)
+    } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)) }
+    finally { setBusy(false) }
+  }
+
+  const restoreCheckpoint = async (checkpointId: string): Promise<void> => {
+    if (!active || !window.confirm(`恢复检查点 ${checkpointId}？当前状态会先备份。`)) return
+    setBusy(true); setError(null)
+    try {
+      const result = await window.monitor.executeAction({ action: 'workspace.checkpointRestore', input: { checkpointId }, target: { kind: 'workspace', workspaceId: active.id } })
+      if (result.task.error) throw new Error(result.task.error.message)
+      const refreshed = await window.monitor.getWorkspaces()
+      if (refreshed.output) onChange(refreshed.output)
+      setStatsTick((value) => value + 1)
+    } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)) }
+    finally { setBusy(false) }
+  }
+
   return (
     <section className="workspace-bar" aria-label="工作区">
       <span className="workspace-label">工作区</span>
@@ -155,12 +201,13 @@ export function WorkspaceBar({ overview, onChange }: Props): React.JSX.Element |
         ))}
       </div>
       <button type="button" className="workspace-suspend" title="刷新各工作区正文与缺口统计" onClick={() => setStatsTick((value) => value + 1)}>刷新统计</button>
-      {active?.state === 'running' && <details className="workspace-evidence">
-        <summary title="登录、扩展和正文采集证据">证据</summary>
+      {active && <details className="workspace-evidence">
+        <summary title="身份、扩展、正文、检查点与状态历史">驾驶舱</summary>
         <div className="workspace-evidence-popover">
           <div className="workspace-auth" aria-label="正文采集摘要">
             <span>正文：</span>
             <small>{contentStats[active.id] ? `${contentStats[active.id].objects} 对象 · ${Math.round(contentStats[active.id].bytes / 1024)} KiB · 缺口 ${contentStats[active.id].gaps} · 恢复 ${contentStats[active.id].recovered}${contentStats[active.id].recoveryFailed ? ` · 恢复失败 ${contentStats[active.id].recoveryFailed}` : ''}` : '正在读取统计'}</small>
+            {governance ? <small>固定 {governance.pins.length} · 配额 {Math.round(governance.policy.quotaBytes / 1024 / 1024)} MiB · 审计 {governance.audit.length}</small> : null}
           </div>
           <div className="workspace-auth" aria-label="登录证据台账">
             <span>登录：</span>
@@ -175,6 +222,19 @@ export function WorkspaceBar({ overview, onChange }: Props): React.JSX.Element |
               title={`${item.extensionId} · ${item.reasons.join(', ') || '已观察'} · ${extensions.scan ? new Date(extensions.scan.observed_at).toLocaleString() : '未核对'}`}>
               {item.observed?.name ?? item.extensionId.slice(0, 8)} {item.observed?.version ?? ''} · {item.state === 'drift' ? '漂移' : item.state === 'unknown' ? '未知' : item.state === 'aligned' ? '一致' : '仅观察'}
             </small>) : <small title={extensions?.scan?.reason ?? '尚未扫描'}>未知（Profile 部分观察）</small>}
+          </div>
+          <div className="workspace-auth" aria-label="检查点">
+            <span>检查点：</span>
+            {active.state === 'suspended' && !active.legacy ? <button type="button" disabled={busy} onClick={() => void createCheckpoint()}>创建</button> : <small>需独立工作区处于休眠</small>}
+            {cockpit?.checkpoints.slice(0, 3).map((checkpoint) => <small key={checkpoint.id}>
+              {checkpoint.label ?? checkpoint.id} · {checkpoint.files.length} 文件
+              {active.state === 'suspended' ? <button type="button" disabled={busy} onClick={() => void restoreCheckpoint(checkpoint.id)}>恢复</button> : null}
+            </small>)}
+          </div>
+          <div className="workspace-auth" aria-label="状态历史">
+            <span>历史：</span>
+            {cockpit?.history.slice(0, 4).map((event) => <small key={event.id} title={new Date(event.at).toLocaleString()}>{event.type} · v{event.version}</small>)}
+            {!cockpit?.history.length ? <small>暂无事件</small> : null}
           </div>
         </div>
       </details>}

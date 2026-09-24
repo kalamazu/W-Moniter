@@ -20,6 +20,7 @@
     "test:dom": "node scripts/test-dom.mjs",
     "test:sessions": "node scripts/test-sessions.mjs",
     "test:workspaces": "node scripts/test-workspaces.mjs",
+    "test:core-centers": "node scripts/test-core-centers.mjs",
     "test:auth-ledger": "node scripts/test-auth-ledger.mjs",
     "test:extension-probe": "node scripts/probes/extension-management.mjs",
     "test:extensions": "node scripts/test-extensions.mjs",

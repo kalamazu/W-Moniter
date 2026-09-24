@@ -4,6 +4,7 @@ import type {
   CookieStats,
   SiteDetail,
   SiteOriginRow,
+  SiteStateBundle,
   SiteSnapshotDiff,
   SiteSnapshotSummary
 } from '../../../shared/types'
@@ -74,6 +75,7 @@ export function SitePanel({ liveTick = 0 }: { liveTick?: number }): React.JSX.El
   const [snapshots, setSnapshots] = useState<SiteSnapshotSummary[]>([])
   const [diff, setDiff] = useState<SiteSnapshotDiff | null>(null)
   const [expandedCache, setExpandedCache] = useState<string | null>(null)
+  const [bundleText, setBundleText] = useState('')
 
   // 轮询回调里要读它，但它的变化不该重建轮询（重建会打断正在进行的请求）
   const selectedRef = useRef<string | null>(null)
@@ -129,6 +131,40 @@ export function SitePanel({ liveTick = 0 }: { liveTick?: number }): React.JSX.El
     }
   }, [refresh])
 
+  const stateAction = useCallback(async (action: 'site.stateExport' | 'site.stateRestore', input: Record<string, unknown>): Promise<unknown> => {
+    const workspaces = await window.monitor.getWorkspaces()
+    const workspaceId = workspaces.output?.activeWorkspaceId
+    if (!workspaceId) throw new Error('没有活动工作区')
+    const result = await window.monitor.executeAction({ action, input, target: { kind: 'workspace', workspaceId } })
+    if (result.task.error) throw new Error(result.task.error.message)
+    return result.output
+  }, [])
+
+  const exportState = useCallback(async (): Promise<void> => {
+    setBusy('导出状态包'); setNote(null)
+    try {
+      const bundle = await stateAction('site.stateExport', { origins: selected ? [selected] : undefined })
+      const text = JSON.stringify(bundle, null, 2)
+      setBundleText(text)
+      await navigator.clipboard?.writeText(text).catch(() => undefined)
+      setNote(`状态包已生成（${text.length} 字符）并尝试复制到剪贴板`)
+    } catch (error) { setNote(`导出失败：${error instanceof Error ? error.message : String(error)}`) }
+    finally { setBusy('') }
+  }, [selected, stateAction])
+
+  const restoreState = useCallback(async (): Promise<void> => {
+    const text = window.prompt('粘贴站点状态包 JSON')
+    if (!text) return
+    setBusy('恢复状态包'); setNote(null)
+    try {
+      const bundle = JSON.parse(text) as SiteStateBundle
+      const result = await stateAction('site.stateRestore', { bundle, areas: ['cookies', 'localStorage', 'sessionStorage'], replace: false })
+      setNote(`恢复完成：${JSON.stringify(result)}`)
+      await refresh()
+    } catch (error) { setNote(`恢复失败：${error instanceof Error ? error.message : String(error)}`) }
+    finally { setBusy('') }
+  }, [refresh, stateAction])
+
   const filtered = useMemo(() => {
     const text = search.trim().toLowerCase()
     if (!text) return origins
@@ -173,11 +209,14 @@ export function SitePanel({ liveTick = 0 }: { liveTick?: number }): React.JSX.El
         >
           拍快照
         </button>
+        <button type="button" className="tab" disabled={busy !== ''} onClick={() => void exportState()}>导出状态包</button>
+        <button type="button" className="tab" disabled={busy !== ''} onClick={() => void restoreState()}>选择性恢复</button>
         <span className="sp-stat">
           cookie {stats ? `${formatCount(stats.total)} 条 / ${formatSize(stats.totalBytes)}` : '-'}
           {stats ? ` · 跨站 ${stats.crossSite} · 分区 ${stats.partitioned} · 域 ${stats.hosts}` : ''}
         </span>
       </div>
+      {bundleText ? <details className="sp-card"><summary>导出的状态包</summary><textarea className="rules-textarea" rows={10} readOnly value={bundleText} /></details> : null}
 
       {error ? <div className="sp-note sp-note-err">读取失败：{error}</div> : null}
       {note ? <div className="sp-note">{note}</div> : null}

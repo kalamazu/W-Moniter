@@ -89,11 +89,57 @@ export function EnvPanel({ liveTick }: EnvPanelProps): React.JSX.Element {
   const [speed, setSpeed] = useState('1')
   const [busyKind, setBusyKind] = useState<InputKind | null>(null)
   const [inputReport, setInputReport] = useState<InputReport | null>(null)
+  const [workspaceId, setWorkspaceId] = useState<string | null>(null)
+  const [network, setNetwork] = useState<{ activeVersion: number; appliedVersion: number | null; pendingRestart: boolean; versions: Array<Record<string, unknown>> } | null>(null)
+  const [networkText, setNetworkText] = useState('')
+  const [networkResult, setNetworkResult] = useState<string>('')
 
   useEffect(() => {
     void window.monitor.getCapabilities().then(setCapability)
     void window.monitor.getStatus().then(setStatus)
   }, [liveTick])
+
+  useEffect(() => {
+    void window.monitor.getWorkspaces().then(async (result) => {
+      const id = result.output?.activeWorkspaceId
+      if (!id) return
+      setWorkspaceId(id)
+      const state = await window.monitor.executeAction({ action: 'environment.get', input: {}, target: { kind: 'workspace', workspaceId: id } })
+      if (!state.output) return
+      const value = state.output as typeof network
+      setNetwork(value)
+      const active = value?.versions.find((item) => item['version'] === value.activeVersion)
+      if (active) {
+        const { version: _version, createdAt: _createdAt, ...editable } = active
+        setNetworkText(JSON.stringify(editable, null, 2))
+      }
+    }).catch(() => undefined)
+  }, [liveTick])
+
+  const saveNetwork = useCallback(async (): Promise<void> => {
+    if (!workspaceId) return
+    try {
+      const input = JSON.parse(networkText) as Record<string, unknown>
+      const result = await window.monitor.executeAction({ action: 'environment.save', input, target: { kind: 'workspace', workspaceId } })
+      if (result.task.error) throw new Error(result.task.error.message)
+      const version = (result.output as { version: number }).version
+      const refreshed = await window.monitor.executeAction({ action: 'environment.get', input: {}, target: { kind: 'workspace', workspaceId } })
+      if (refreshed.output) setNetwork(refreshed.output as typeof network)
+      setNetworkResult(`已保存 v${version}；应用后重启浏览器生效`)
+    } catch (error) { setNetworkResult(error instanceof Error ? error.message : String(error)) }
+  }, [networkText, workspaceId])
+
+  const applyNetwork = useCallback(async (): Promise<void> => {
+    if (!workspaceId || !network) return
+    const result = await window.monitor.executeAction({ action: 'environment.apply', input: { version: network.activeVersion }, target: { kind: 'workspace', workspaceId } })
+    setNetworkResult(result.task.error?.message ?? '配置已冻结，待重启浏览器生效')
+  }, [network, workspaceId])
+
+  const diagnoseNetwork = useCallback(async (): Promise<void> => {
+    if (!workspaceId) return
+    const result = await window.monitor.executeAction({ action: 'environment.diagnose', input: {}, target: { kind: 'workspace', workspaceId } })
+    setNetworkResult(result.task.error?.message ?? JSON.stringify(result.output))
+  }, [workspaceId])
 
   const runProbe = useCallback(async (): Promise<void> => {
     setProbing(true)
@@ -160,6 +206,17 @@ export function EnvPanel({ liveTick }: EnvPanelProps): React.JSX.Element {
 
   return (
     <div className="env-panel">
+      <section className="group probe-block">
+        <h4>网络环境中心 <span className="spacer" />{network ? `v${network.activeVersion}${network.pendingRestart ? ' · 待重启' : ''}` : '读取中'}</h4>
+        <div className="rules-note">配置按工作区版本化；认证只能写 secret:// 引用。必经代理失败时不会自动回退直连。</div>
+        <textarea className="rules-textarea" rows={10} value={networkText} onChange={(event) => setNetworkText(event.target.value)} spellCheck={false} />
+        <div className="rules-actions">
+          <button type="button" className="btn" onClick={() => void saveNetwork()}>保存新版本</button>
+          <button type="button" className="btn" onClick={() => void diagnoseNetwork()}>DNS / TCP 诊断</button>
+          <button type="button" className="btn btn-primary" onClick={() => void applyNetwork()}>应用当前版本</button>
+        </div>
+        {networkResult ? <div className="mono small break">{networkResult}</div> : null}
+      </section>
       <div className="env-cards">
         <div className="card">
           <div className="card-label">Profile</div>

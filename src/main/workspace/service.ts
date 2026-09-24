@@ -1,10 +1,11 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { closeSync, cpSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, readSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { appendFileSync, closeSync, cpSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, readSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, join, relative } from 'node:path'
 import type {
   WorkspaceCreateInput,
   WorkspaceLifecycleState,
   WorkspaceOverview,
+  WorkspaceEvent,
   WorkspaceSummary
 } from '../../shared/contracts/workspace'
 import { assertTransition } from './machine'
@@ -127,6 +128,7 @@ export class WorkspaceService {
     mkdirSync(join(this.rootDir, workspace.id), { recursive: true })
     store.workspaces.push(workspace)
     this.persist()
+    this.appendEvent(workspace, 'workspace.created', { name, profile: workspace.profile })
     return { ...workspace }
   }
 
@@ -139,6 +141,7 @@ export class WorkspaceService {
     workspace.lastOpenedAt = Date.now()
     store.activeWorkspaceId = workspace.id
     this.persist()
+    this.appendEvent(workspace, 'workspace.opening')
     return { ...workspace }
   }
 
@@ -150,6 +153,7 @@ export class WorkspaceService {
     if (store.activeWorkspaceId !== id) {
       store.activeWorkspaceId = id
       this.persist()
+      this.appendEvent(workspace, 'workspace.selected')
     }
     return { ...workspace }
   }
@@ -174,6 +178,7 @@ export class WorkspaceService {
     workspace.updatedAt = Date.now()
     workspace.version += 1
     this.persist()
+    this.appendEvent(workspace, 'workspace.error', { error: nextError })
     return { ...workspace }
   }
 
@@ -185,6 +190,7 @@ export class WorkspaceService {
     workspace.updatedAt = Date.now()
     workspace.version += 1
     this.persist()
+    this.appendEvent(workspace, 'workspace.profileChanged', { profile })
     return { ...workspace }
   }
 
@@ -221,6 +227,7 @@ export class WorkspaceService {
       writeFileSync(join(stage, 'manifest.json'), JSON.stringify(manifest, null, 2) + '\n', 'utf8')
       mkdirSync(dirname(base), { recursive: true })
       renameSync(stage, base)
+      this.appendEvent(workspace, 'checkpoint.created', { checkpointId, label: manifest.label, files: manifest.files.length })
       return manifest
     } catch (error) {
       rmSync(stage, { recursive: true, force: true })
@@ -264,7 +271,23 @@ export class WorkspaceService {
     mutable.version += 1
     mutable.error = '检查点已恢复；登录证据需重新验证，扩展将在下次打开时复扫。'
     this.persist()
+    this.appendEvent(mutable, 'checkpoint.restored', { checkpointId, files: manifest.files.length })
     return { restored: true, backup, manifest }
+  }
+
+  history(id: string, limit = 100): WorkspaceEvent[] {
+    this.get(id)
+    const path = this.historyPath(id)
+    if (!existsSync(path)) return []
+    const rows: WorkspaceEvent[] = []
+    for (const line of readFileSync(path, 'utf8').split(/\r?\n/)) {
+      if (!line) continue
+      try {
+        const event = JSON.parse(line) as WorkspaceEvent
+        if (event.workspaceId === id) rows.push(event)
+      } catch { /* 尾部损坏行隔离；历史投影仍可读取此前事件。 */ }
+    }
+    return rows.slice(-Math.max(1, Math.min(1000, limit))).reverse()
   }
 
   private copyRuntime(paths: WorkspaceRuntimePaths, destination: string): void {
@@ -316,6 +339,7 @@ export class WorkspaceService {
     this.transition(workspace, next)
     if (next !== 'error') delete workspace.error
     this.persist()
+    this.appendEvent(workspace, `workspace.${next}`)
     return { ...workspace }
   }
 
@@ -372,6 +396,18 @@ export class WorkspaceService {
     const temporary = `${this.indexPath}.${process.pid}.${randomUUID()}.tmp`
     writeFileSync(temporary, JSON.stringify(store, null, 2) + '\n', 'utf8')
     renameSync(temporary, this.indexPath)
+  }
+
+  private historyPath(id: string): string { return join(this.rootDir, '.history', `${id}.jsonl`) }
+
+  private appendEvent(workspace: WorkspaceSummary, type: string, detail?: Record<string, unknown>): void {
+    const path = this.historyPath(workspace.id)
+    mkdirSync(dirname(path), { recursive: true })
+    const event: WorkspaceEvent = {
+      id: randomUUID(), workspaceId: workspace.id, at: Date.now(), type, version: workspace.version,
+      ...(detail ? { detail } : {})
+    }
+    appendFileSync(path, JSON.stringify(event) + '\n', 'utf8')
   }
 
   private requireStore(): WorkspaceStore {

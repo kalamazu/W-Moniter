@@ -2081,6 +2081,17 @@ table.group-table td {
   cursor: row-resize;
 }
 
+.body-image {
+  display: block;
+  max-width: 100%;
+  max-height: 60vh;
+  margin: 8px auto;
+  object-fit: contain;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #fff;
+}
+
 /* 响应式优先级：先保留窗口三键和主区；再逐步收起重复的指标与辅助按钮。 */
 @media (max-width: 1180px) {
   .tb-metrics { display: none; }

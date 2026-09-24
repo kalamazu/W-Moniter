@@ -84,7 +84,7 @@ export interface DetailPanelProps {
   onClose(): void
 }
 
-type BodyView = 'auto' | 'text' | 'hex'
+type BodyView = 'auto' | 'text' | 'json' | 'hex'
 type DetailTab = 'overview' | 'headers' | 'initiator' | 'body'
 
 /** 开局停在哪个 tab（MONITOR_UI_DTAB）。截响应体那一屏时省得手点 */
@@ -104,6 +104,7 @@ export function DetailPanel({ seq, onClose }: DetailPanelProps): React.JSX.Eleme
   const [busy, setBusy] = useState(false)
   const [view, setView] = useState<BodyView>('auto')
   const [tab, setTab] = useState<DetailTab>('overview')
+  const [sensitiveUnlocked, setSensitiveUnlocked] = useState(false)
   // 指定的 tab 只对开门第一条生效，之后换请求都回到概览
   const preferredTab = useRef<DetailTab>(initialDetailTab())
 
@@ -128,6 +129,7 @@ export function DetailPanel({ seq, onClose }: DetailPanelProps): React.JSX.Eleme
     setTab(preferredTab.current)
     preferredTab.current = 'overview'
     setView('auto')
+    setSensitiveUnlocked(false)
     void loadDetail(seq)
   }, [seq])
 
@@ -370,14 +372,14 @@ export function DetailPanel({ seq, onClose }: DetailPanelProps): React.JSX.Eleme
         <div className="body-view">
           <div className="body-toolbar">
             <div className="tabs tabs-xs">
-              {(['auto', 'text', 'hex'] as const).map((key) => (
+              {(['auto', 'text', 'json', 'hex'] as const).map((key) => (
                 <button
                   key={key}
                   type="button"
                   className={`tab${view === key ? ' tab-active' : ''}`}
                   onClick={() => setView(key)}
                 >
-                  {key === 'auto' ? '自动' : key === 'text' ? '文本' : 'HEX'}
+                  {key === 'auto' ? '自动' : key === 'text' ? '文本' : key === 'json' ? 'JSON' : 'HEX'}
                 </button>
               ))}
             </div>
@@ -401,15 +403,14 @@ export function DetailPanel({ seq, onClose }: DetailPanelProps): React.JSX.Eleme
                 {formatSize(body.size)}
                 {body.trunc ? ' · 已截断' : ''} · {decoded.kind === 'text' ? '文本' : '二进制'}
               </p>
-              <pre className="body-pre">
-                {view === 'hex'
-                  ? decoded.hex
-                  : view === 'text'
-                    ? decoded.text
-                    : decoded.kind === 'text'
-                      ? decoded.text
-                      : decoded.hex}
-              </pre>
+              {decoded.sensitive && !sensitiveUnlocked ? <div className="banner">检测到 token / 密钥类字段，预览已遮罩。<button type="button" className="tab" onClick={() => setSensitiveUnlocked(true)}>显式解锁本次预览</button></div> : null}
+              {row.mime_type?.startsWith('image/') && view === 'auto' ? <img className="body-image" alt="响应正文预览" src={`data:${row.mime_type};base64,${body.b64}`} /> :
+                <pre className="body-pre">
+                  {view === 'hex' ? decoded.hex
+                    : view === 'json' ? (decoded.json ?? '不是有效 JSON')
+                      : view === 'text' ? (decoded.sensitive && !sensitiveUnlocked ? decoded.masked : decoded.text)
+                        : decoded.kind === 'text' ? (decoded.sensitive && !sensitiveUnlocked ? decoded.masked : decoded.json ?? decoded.text) : decoded.hex}
+                </pre>}
             </>
           )}
         </div>
@@ -435,6 +436,9 @@ interface DecodedBody {
   kind: 'text' | 'binary'
   text: string
   hex: string
+  json: string | null
+  masked: string
+  sensitive: boolean
 }
 
 const HEX_LIMIT = 64 * 1024
@@ -445,7 +449,17 @@ function decodeBody(body: BodyPayload | null): DecodedBody | null {
   const bytes = new Uint8Array(binary.length)
   for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i)
 
-  return { kind: looksText(bytes) ? 'text' : 'binary', text: toText(bytes), hex: toHex(bytes) }
+  const text = toText(bytes)
+  let json: string | null = null
+  try { json = JSON.stringify(JSON.parse(text), null, 2) } catch { /* 普通文本 */ }
+  const masked = maskSensitive(json ?? text)
+  return { kind: looksText(bytes) ? 'text' : 'binary', text, hex: toHex(bytes), json, masked, sensitive: masked !== (json ?? text) }
+}
+
+function maskSensitive(text: string): string {
+  return text
+    .replace(/("?(?:authorization|cookie|set-cookie|password|passwd|token|secret|api[_-]?key)"?\s*[:=]\s*")([^"\r\n]+)(")/gi, '$1••••••$3')
+    .replace(/\b(Bearer\s+)[A-Za-z0-9._~+\/-]{8,}/gi, '$1••••••')
 }
 
 /** 有 NUL 或大量替换字符就当二进制 —— 乱码比 hex 更难用 */
