@@ -1,0 +1,8 @@
+{
+  "manifest_version": 3,
+  "name": "Monitor Managed Target",
+  "version": "1.0.0",
+  "description": "Controlled target used only for explicit extension enable/disable acceptance.",
+  "permissions": ["storage"],
+  "background": { "service_worker": "background.js" }
+}
