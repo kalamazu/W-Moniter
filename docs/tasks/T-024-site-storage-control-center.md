@@ -1,11 +1,11 @@
 # T-024：Cookie 与站点存储控制中心
 
-状态：开发中
+状态：待验收
 蓝图映射：M4 §6.2 / §10.2
 优先级：P0
 认领：Codex（2026-09-25）
 基线 commit：`7108dad`
-验收：A-024（完成实现后创建）
+验收：[A-024](../acceptance/A-024-site-storage-control-center.md)
 
 ## 背景与目标
 
@@ -31,8 +31,8 @@
 
 ## 完成记录
 
-- 实现 commit：
-- 修改文件：
-- 测试命令与结果：
-- 已知限制：
-- 回滚：`git revert <commit>`
+- 实现 commit：`d1eab06`、`7ea404a`
+- 修改文件：`src/main/controller.ts`、`SitePanel.tsx`、`shared/types.ts`、ActionRegistry。
+- 测试命令与结果：`test:core-centers` 7/7、`test:sitedata` 30/30，恢复后由受控页面读回 Cookie/localStorage 真值。
+- 已知限制：通用状态包只无损恢复 Cookie/local/sessionStorage；IDB/Cache/SW 可浏览、差异、删除并导出清单，但浏览器协议不能无损重建任意复杂值/响应体，恢复时显式警告。
+- 回滚：`git revert 7ea404a d1eab06`

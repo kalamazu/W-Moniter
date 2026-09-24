@@ -1,11 +1,11 @@
 # T-023：代理与环境配置中心
 
-状态：开发中
+状态：待验收
 蓝图映射：M3 §6.1
 优先级：P0
 认领：Codex（2026-09-25）
 基线 commit：`7108dad`
-验收：A-023（完成实现后创建）
+验收：[A-023](../acceptance/A-023-environment-proxy-center.md)
 
 ## 背景与目标
 
@@ -31,8 +31,8 @@
 
 ## 完成记录
 
-- 实现 commit：
-- 修改文件：
-- 测试命令与结果：
-- 已知限制：
-- 回滚：`git revert <commit>`
+- 实现 commit：`d1eab06`、`9678c69`
+- 修改文件：`src/main/environment/repository.ts`、`src/main/index.ts`、`EnvPanel.tsx`、ActionRegistry。
+- 测试命令与结果：`test:core-centers` 7/7，含真实 HTTP CONNECT 上游命中、失败诊断、版本应用与明文秘密拒绝。
+- 已知限制：SecretRef 在没有本机秘密提供器时 fail-closed；不会退化为无认证或直连。PAC 复杂规则依赖 Chromium PAC 语义。
+- 回滚：`git revert 9678c69 d1eab06`

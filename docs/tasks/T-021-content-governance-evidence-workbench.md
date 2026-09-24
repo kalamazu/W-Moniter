@@ -1,11 +1,11 @@
 # T-021：内容治理与统一证据工作台
 
-状态：开发中
+状态：待验收
 蓝图映射：M1 §4 / §10.3 / §12
 优先级：P0
 认领：Codex（2026-09-25）
 基线 commit：`7108dad`
-验收：A-021（完成实现后创建）
+验收：[A-021](../acceptance/A-021-content-governance-evidence-workbench.md)
 
 ## 背景与目标
 
@@ -31,8 +31,8 @@
 
 ## 完成记录
 
-- 实现 commit：
-- 修改文件：
-- 测试命令与结果：
-- 已知限制：
-- 回滚：`git revert <commit>`
+- 实现 commit：`d1eab06`
+- 修改文件：`src/main/content/{store,governance}.ts`、`src/main/actions/registry.ts`、`DetailPanel.tsx`
+- 测试命令与结果：`test:core-centers` 7/7、`test:content` 9/9；正文固定、策略、范围读取、完整性和敏感预览均有自动化证据。
+- 已知限制：GC 由显式 Action 触发，暂未增加后台定时器；不可见的 Chromium 内部字节继续记录为缺口。
+- 回滚：`git revert d1eab06`

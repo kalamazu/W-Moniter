@@ -1,11 +1,11 @@
 # T-022：工作区驾驶舱与浏览器状态历史
 
-状态：开发中
+状态：待验收
 蓝图映射：M2 §5.1/§5.2
 优先级：P0
 认领：Codex（2026-09-25）
 基线 commit：`7108dad`
-验收：A-022（完成实现后创建）
+验收：[A-022](../acceptance/A-022-workspace-cockpit-state-history.md)
 
 ## 背景与目标
 
@@ -31,8 +31,8 @@
 
 ## 完成记录
 
-- 实现 commit：
-- 修改文件：
-- 测试命令与结果：
-- 已知限制：
-- 回滚：`git revert <commit>`
+- 实现 commit：`d1eab06`
+- 修改文件：`src/main/workspace/service.ts`、`workspace.ts`、`WorkspaceBar.tsx`、ActionRegistry。
+- 测试命令与结果：`test:core-centers` 7/7、`test:workspaces` 9/9。
+- 已知限制：事件日志保留最近读取上限 1000 条，长期压缩在 M10 处理。
+- 回滚：`git revert d1eab06`
