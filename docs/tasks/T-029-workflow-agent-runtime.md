@@ -1,11 +1,11 @@
 # T-029：持久工作流与 Agent 协作运行时
 
-状态：开发中
+状态：待验收
 蓝图映射：M8 §8.2
 优先级：P1
 认领：Codex（2026-09-25）
 基线 commit：`11f98e1`
-验收：A-029（完成实现后创建）
+验收：[A-029](../acceptance/A-029-workflow-agent-runtime.md)
 
 ## 背景与目标
 
@@ -31,8 +31,8 @@
 
 ## 完成记录
 
-- 实现 commit：
-- 修改文件：
-- 测试命令与结果：
-- 已知限制：
-- 回滚：`git revert <commit>`
+- 实现 commit：`d77dd1a`、`5b5ff15`
+- 修改文件：`src/shared/contracts/workflow.ts`、`src/main/workflow/service.ts`、`src/main/actions/registry.ts`、`WorkflowPanel.tsx`、`cli/monitor.mjs`
+- 测试命令与结果：`test:knowledge-workflow` 的 T-029 5/5；真实进程中断重启、接管 fencing、旧租约拒绝和跨工作区拒绝通过。
+- 已知限制：本地 V1 为单机工作流和 JSON DAG 编辑；复杂图形布线、暂停后事件流订阅和分布式多用户 lease 留待生产化。
+- 回滚：先 `git revert 5b5ff15`，再 `git revert d77dd1a`（后者与 T-028 共用接线）。

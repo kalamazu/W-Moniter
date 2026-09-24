@@ -1,11 +1,11 @@
 # T-028：站点档案与资源知识库
 
-状态：开发中
+状态：待验收
 蓝图映射：M7 §8.1
 优先级：P1
 认领：Codex（2026-09-25）
 基线 commit：`11f98e1`
-验收：A-028（完成实现后创建）
+验收：[A-028](../acceptance/A-028-site-resource-knowledge-base.md)
 
 ## 背景与目标
 
@@ -31,8 +31,8 @@
 
 ## 完成记录
 
-- 实现 commit：
-- 修改文件：
-- 测试命令与结果：
-- 已知限制：
-- 回滚：`git revert <commit>`
+- 实现 commit：`d77dd1a`、`b89b0db`
+- 修改文件：`src/shared/contracts/resources.ts`、`src/main/resources/service.ts`、`KnowledgePanel.tsx`、`scripts/test-{resources-workflow,resource-scale}.mjs`
+- 测试命令与结果：`test:knowledge-workflow` 的 T-028 4/4；`test:resource-scale` 2/2，真实服务完成 100,000 资源与取消重建。
+- 已知限制：正文索引每版本 1 MiB、diff 2 MiB；中文为确定性子串检索；大规模全文与并发写入达到瓶颈后迁独立 indexer/FTS。
+- 回滚：先 `git revert b89b0db`，再 `git revert d77dd1a`（后者与 T-029 共用 Action/UI 接线）。
