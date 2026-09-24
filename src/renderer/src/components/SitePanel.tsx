@@ -165,6 +165,14 @@ export function SitePanel({ liveTick = 0 }: { liveTick?: number }): React.JSX.El
     finally { setBusy('') }
   }, [refresh, stateAction])
 
+  const setCookie = useCallback(async (): Promise<void> => {
+    if (!selected) return
+    const name = window.prompt('Cookie 名称')?.trim()
+    if (!name) return
+    const value = window.prompt('Cookie 值（原样写入）') ?? ''
+    await act('写 Cookie', () => window.monitor.setCookie({ name, value, url: selected + '/', path: '/' }))
+  }, [act, selected])
+
   const filtered = useMemo(() => {
     const text = search.trim().toLowerCase()
     if (!text) return origins
@@ -289,6 +297,7 @@ export function SitePanel({ liveTick = 0 }: { liveTick?: number }): React.JSX.El
                 {tab === 'cookie' ? (
                   <>
                     <div className="sp-row-actions">
+                      <button type="button" className="tab" disabled={busy !== ''} onClick={() => void setCookie()}>新增 / 覆盖 Cookie</button>
                       <button
                         type="button"
                         className="tab"
@@ -368,6 +377,7 @@ export function SitePanel({ liveTick = 0 }: { liveTick?: number }): React.JSX.El
                           window.monitor.editStorage({ origin: selected, area: 'local', action: 'clear' })
                         )
                       }
+                      onSet={(key, value) => void act('写键', () => window.monitor.editStorage({ origin: selected, area: 'local', action: 'set', key, value }))}
                     />
                     <StorageTable
                       title={`sessionStorage（${detail.sessionStorage.length} 项 / ${formatSize(detail.sessionStorageBytes)}）`}
@@ -382,6 +392,7 @@ export function SitePanel({ liveTick = 0 }: { liveTick?: number }): React.JSX.El
                           window.monitor.editStorage({ origin: selected, area: 'session', action: 'clear' })
                         )
                       }
+                      onSet={(key, value) => void act('写键', () => window.monitor.editStorage({ origin: selected, area: 'session', action: 'set', key, value }))}
                     />
                   </div>
                 ) : null}
@@ -630,18 +641,28 @@ function StorageTable({
   title,
   rows,
   onRemove,
-  onClear
+  onClear,
+  onSet
 }: {
   title: string
   rows: Array<{ key: string; value: string; bytes: number; truncated?: boolean }>
   onRemove: (key: string) => void
   onClear: () => void
+  onSet: (key: string, value: string) => void
 }): React.JSX.Element {
+  const edit = (key = '', current = ''): void => {
+    const nextKey = window.prompt('键', key)?.trim()
+    if (!nextKey) return
+    const value = window.prompt('值', current)
+    if (value === null) return
+    onSet(nextKey, value)
+  }
   return (
     <div className="sp-storage">
       <div className="sp-card-head">
         <span>{title}</span>
         <span className="sp-spacer" />
+        <button type="button" className="tab" onClick={() => edit()}>新增</button>
         <button type="button" className="tab" disabled={rows.length === 0} onClick={onClear}>
           清空
         </button>
@@ -657,6 +678,7 @@ function StorageTable({
             {row.truncated ? <span className="st-warn">（已截断）</span> : null}
           </span>
           <span className="st-dim">{formatSize(row.bytes)}</span>
+          <button type="button" className="tab" onClick={() => edit(row.key, row.value)}>编辑</button>
           <button type="button" className="tab" onClick={() => onRemove(row.key)}>
             ✕
           </button>
