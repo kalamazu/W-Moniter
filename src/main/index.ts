@@ -1049,6 +1049,10 @@ app.whenReady().then(async () => {
       const instance = workspaceControllers.get(id); if (!instance) throw new Error('目标工作区未运行')
       return instance.getDetail(seq)
     },
+    queryRequests: (id, query, limit, offset, order) => {
+      const instance = workspaceControllers.get(id); if (!instance) throw new Error('目标工作区未运行')
+      return instance.queryRequests(query, limit, offset, order)
+    },
     browserReplay: (id, template, signal) => {
       const instance = workspaceControllers.get(id); if (!instance) throw new Error('目标工作区未运行')
       return instance.browserReplay(template, signal)

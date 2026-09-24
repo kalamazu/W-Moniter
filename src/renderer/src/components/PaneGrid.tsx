@@ -31,7 +31,9 @@ export const PANELS: ReadonlyArray<PanelDef> = [
   { id: 'graph', label: '调用图' },
   { id: 'sites', label: '站点资源' },
   { id: 'browser', label: '浏览器控制' },
-  { id: 'replay', label: '重放与测试' }
+  { id: 'replay', label: '重放与测试' },
+  { id: 'knowledge', label: '资源知识库' },
+  { id: 'workflow', label: '工作流' }
 ]
 
 export function panelLabel(id: PanelId): string {

@@ -21,6 +21,8 @@ import { WsPanel } from './components/WsPanel'
 import { WorkspaceBar } from './components/WorkspaceBar'
 import { BrowserPanel } from './components/BrowserPanel'
 import { ReplayPanel } from './components/ReplayPanel'
+import { KnowledgePanel } from './components/KnowledgePanel'
+import { WorkflowPanel } from './components/WorkflowPanel'
 import { CommandPalette, type CommandItem } from './components/CommandPalette'
 import { ContextDrawer } from './components/ContextDrawer'
 import { WorkbenchNav, areaForPanel, type WorkbenchArea } from './components/WorkbenchNav'
@@ -328,6 +330,10 @@ export default function App(): React.JSX.Element {
           return <BrowserPanel liveTick={liveTick} />
         case 'replay':
           return <ReplayPanel selectedSeq={selectedSeq} />
+        case 'knowledge':
+          return <KnowledgePanel />
+        case 'workflow':
+          return <WorkflowPanel />
       }
     },
     [requests, query, liveTick, selectedSeq, onSelect, onClose, waterfallLimit]

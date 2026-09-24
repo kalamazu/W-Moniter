@@ -22,6 +22,7 @@
     "test:workspaces": "node scripts/test-workspaces.mjs",
     "test:core-centers": "node scripts/test-core-centers.mjs",
     "test:execution-centers": "node scripts/test-browser-replay-batch.mjs",
+    "test:knowledge-workflow": "node scripts/test-resources-workflow.mjs",
     "test:auth-ledger": "node scripts/test-auth-ledger.mjs",
     "test:extension-probe": "node scripts/probes/extension-management.mjs",
     "test:extensions": "node scripts/test-extensions.mjs",

@@ -1,0 +1,40 @@
+#!/usr/bin/env node
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { launchApp, makeChecker, sleep } from './app-harness.mjs'
+import { startOrigin } from './test-origin.mjs'
+
+const { check, assert, report } = makeChecker(); const dataDir = mkdtempSync(join(tmpdir(), 'monitor-knowledge-flow-')); const originServer = await startOrigin(0); const base = `http://127.0.0.1:${originServer.port}`; let app = null
+const action = async (name, input = {}, targetExtra = {}) => app.evaluate(`(async()=>{const w=await window.monitor.getWorkspaces();return window.monitor.executeAction({action:${JSON.stringify(name)},input:${JSON.stringify(input)},target:{kind:'workspace',workspaceId:w.output.activeWorkspaceId,...${JSON.stringify(targetExtra)}}})})()`)
+
+try {
+  app = await launchApp({ url: `${base}/`, dataDir, port: 9636, tab: 'knowledge', extraEnv: { MONITOR_CAPTURE_BODIES: '1' } }); await app.waitConnected(5)
+  await app.evaluate(`window.monitor.evaluate(${JSON.stringify(`fetch('${base}/api/json-echo?asset=versioned',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({user:'中文资料',n:1})}).then(r=>r.json())`)})`)
+  await sleep(250); await app.evaluate(`window.monitor.evaluate(${JSON.stringify(`fetch('${base}/api/json-echo?asset=versioned',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({user:'中文资料更新',n:2,extra:true})}).then(r=>r.json())`)})`); await sleep(700)
+  const rebuilt = await action('resources.rebuild'); const listed = await action('resources.list', { limit: 1000 }); const versions = listed.output.rows.filter(item => item.url.includes('asset=versioned'))
+  check('T-028 从不可变请求证据重建同 URL 多资源版本', () => { assert(rebuilt.output.scanned > 0 && rebuilt.output.indexed > 0, JSON.stringify(rebuilt.output)); assert(versions.length >= 2 && new Set(versions.map(item => item.bodyHash)).size >= 2, `versions=${versions.length}`) })
+  const chinese = await action('resources.search', { query: '中文资料', limit: 20 }); const code = await action('resources.search', { query: 'json-echo', limit: 20 })
+  check('T-028 中文/源码/URL 搜索返回 coverage 和原请求证据', () => { assert(chinese.output.rows.length >= 1 && chinese.output.rows[0].evidenceSeq > 0, '中文正文未命中'); assert(code.output.rows.length >= 1, '代码或 URL 未命中'); assert(chinese.output.coverage.indexed > 0, '缺少索引覆盖') })
+  const diff = await action('resources.diff', { leftId: versions[0].id, rightId: versions[1].id }); const n1 = await action('resources.noteSave', { resourceId: versions[0].id, text: '人工笔记 v1' }); const n2 = await action('resources.noteSave', { id: n1.output.id, resourceId: versions[0].id, text: '人工笔记 v2' }); const o1 = await action('resources.endpointOverride', { kind: 'merge', keys: ['POST /a', 'POST /b'], label: '登录接口' }); const o2 = await action('resources.endpointOverride', { id: o1.output.id, kind: 'split', keys: ['POST /b'] })
+  check('T-028 版本 diff、笔记与人工 merge/split 修订均追加版本', () => { assert(diff.output.changed === true, '版本差异未识别'); assert(n1.output.version === 1 && n2.output.version === 2, '笔记未版本化'); assert(o1.output.version === 1 && o2.output.version === 2, '人工纠正未版本化') })
+  const summary = await action('resources.summary'); check('T-028 站点档案聚合且派生索引可重复重建', () => { assert(summary.output.dossiers.some(item => item.origin === base), '缺少站点档案'); assert(summary.output.notes.length >= 2 && summary.output.overrides.length >= 2, '人工资产丢失') })
+
+  const flow = await action('workflow.save', { name: '等待、搜索并留证', nodes: [{ id: 'request', kind: 'wait', wait: { type: 'request', query: { url: `${base}/api/json-echo?asset=versioned` }, timeoutMs: 2000 }, extract: { seenSeq: 'seq' } }, { id: 'search', kind: 'action', action: 'resources.search', input: { query: '中文资料', limit: 20 }, dependsOn: ['request'], extract: { hitCount: 'total' } }, { id: 'note', kind: 'action', action: 'resources.noteSave', input: { resourceId: versions[0].id, text: 'workflow found ${hitCount} at ${seenSeq}' }, dependsOn: ['search'], extract: { noteVersion: 'version' } }] })
+  const flowRun = await action('workflow.start', { workflowId: flow.output.id, version: flow.output.version, variables: {} })
+  check('T-029 冻结版本 DAG 串联等待、Action、变量提取和证据时间线', () => { assert(flowRun.output.state === 'succeeded' && flowRun.output.workflowVersion === 1, JSON.stringify(flowRun.output)); assert(flowRun.output.variables.seenSeq > 0 && flowRun.output.variables.hitCount >= 1 && flowRun.output.variables.noteVersion >= 1, '变量未提取'); assert(flowRun.output.timeline.some(item => item.type === 'node.succeeded'), '缺少节点证据') })
+
+  const delayFlow = await action('workflow.save', { name: '接管流程', nodes: [{ id: 'wait', kind: 'wait', wait: { type: 'delay', ms: 1200 } }, { id: 'note', kind: 'action', action: 'resources.noteSave', input: { resourceId: versions[0].id, text: 'after takeover' }, dependsOn: ['wait'] }] })
+  const takeover = await app.evaluate(`(async()=>{const w=await window.monitor.getWorkspaces();const target={kind:'workspace',workspaceId:w.output.activeWorkspaceId};const start=window.monitor.executeAction({action:'workflow.start',input:{workflowId:${JSON.stringify(delayFlow.output.id)},version:1},target});await new Promise(r=>setTimeout(r,120));const list=await window.monitor.executeAction({action:'workflow.list',input:{},target});const run=list.output.runs.find(x=>x.workflowId===${JSON.stringify(delayFlow.output.id)}&&x.state==='running');const old=run.leaseToken;const handoff=await window.monitor.executeAction({action:'workflow.command',input:{runId:run.id,command:'takeover'},target});const ended=await start;const stale=await window.monitor.executeAction({action:'workflow.resume',input:{runId:run.id,leaseToken:old,acknowledgeUnknown:true},target});const resumed=await window.monitor.executeAction({action:'workflow.resume',input:{runId:run.id,leaseToken:handoff.output.leaseToken,acknowledgeUnknown:true},target});return {old,handoff:handoff.output,ended:ended.output,stale,resumed:resumed.output}})()`)
+  check('T-029 人类接管轮换 fencing lease，旧执行者失效且 unknown 需确认', () => { assert(takeover.handoff.lease === 2 && takeover.handoff.nodes[0].state === 'unknown', '接管未标记在飞效果'); assert(takeover.stale.task.state === 'failed' && takeover.stale.task.error.message.includes('租约'), '旧租约仍可执行'); assert(takeover.resumed.state === 'succeeded', JSON.stringify(takeover.resumed)) })
+
+  const bad = await action('workflow.save', { name: '跨域拒绝', nodes: [{ id: 'bad', kind: 'action', action: 'resources.summary', input: {}, target: { kind: 'workspace', workspaceId: 'ws_other' } }] }); const badRun = await action('workflow.start', { workflowId: bad.output.id, version: 1 })
+  check('T-029 工作流不能扩大动作权限或偷换工作区', () => assert(badRun.output.state === 'failed' && badRun.output.nodes[0].error.includes('跨越工作区'), JSON.stringify(badRun.output)))
+
+  const crashFlow = await action('workflow.save', { name: '崩溃恢复', nodes: [{ id: 'wait', kind: 'wait', wait: { type: 'delay', ms: 5000 } }] })
+  await app.evaluate(`(async()=>{const w=await window.monitor.getWorkspaces();window.__crashFlow=window.monitor.executeAction({action:'workflow.start',input:{workflowId:${JSON.stringify(crashFlow.output.id)},version:1},target:{kind:'workspace',workspaceId:w.output.activeWorkspaceId}}).catch(()=>null);return true})()`); await sleep(150); await app.close(); app = null
+  app = await launchApp({ url: `${base}/`, dataDir, port: 9636, tab: 'workflow', extraEnv: { MONITOR_CAPTURE_BODIES: '1' } }); await app.waitConnected(5); const recovered = await action('workflow.list'); const recoveredRun = recovered.output.runs.find(item => item.workflowId === crashFlow.output.id)
+  check('T-029 进程中断后在飞节点恢复为 unknown，不自动重发', () => { assert(recoveredRun.state === 'needsReview', JSON.stringify(recoveredRun)); assert(recoveredRun.nodes[0].state === 'unknown', '在飞节点未标 unknown'); assert(recoveredRun.timeline.some(item => item.type === 'run.recovered'), '缺少恢复事件') })
+} catch (error) { check('T-028～T-029 综合验收流程', () => { throw error }) }
+finally { if (app) await app.close(); await originServer.close(); rmSync(dataDir, { recursive: true, force: true }) }
+process.exit(report() ? 0 : 1)

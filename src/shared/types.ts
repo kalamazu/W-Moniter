@@ -678,6 +678,8 @@ export type PanelId =
   | 'sites'
   | 'browser'
   | 'replay'
+  | 'knowledge'
+  | 'workflow'
 
 /**
  * 工作区布局：几栏 + 每栏占多大。

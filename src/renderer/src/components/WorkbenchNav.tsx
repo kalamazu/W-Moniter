@@ -16,9 +16,9 @@ interface Props {
 
 const AREAS: Array<{ id: WorkbenchArea; icon: string; label: string; panels: PanelId[] }> = [
   { id: 'observe', icon: '◉', label: '观测', panels: ['list', 'waterfall', 'detail'] },
-  { id: 'analyze', icon: '◇', label: '分析', panels: ['stats', 'endpoints', 'graph', 'events', 'ws'] },
+  { id: 'analyze', icon: '◇', label: '分析', panels: ['stats', 'endpoints', 'graph', 'events', 'ws', 'knowledge'] },
   { id: 'inspect', icon: '⌘', label: '检查', panels: ['console', 'dom', 'sessions', 'sites', 'scripts'] },
-  { id: 'execute', icon: '▶', label: '执行', panels: ['browser', 'replay'] },
+  { id: 'execute', icon: '▶', label: '执行', panels: ['browser', 'replay', 'workflow'] },
   { id: 'configure', icon: '⚙', label: '配置', panels: ['rules', 'env'] }
 ]
 

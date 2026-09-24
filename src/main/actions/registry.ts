@@ -1,7 +1,7 @@
 import { ActionError, type ActionCatalog, type ActionDescriptor, type ActionRequest, type ActionResult, type TargetRef } from '../../shared/contracts/action'
 import type { WorkspaceCreateInput, WorkspaceOverview, WorkspaceSummary } from '../../shared/contracts/workspace'
 import type { WorkspaceService } from '../workspace/service'
-import type { RuleSet, SiteStateBundle } from '../../shared/types'
+import type { Page, RequestQuery, RequestOrder, RuleSet, SiteStateBundle, StoredRequest } from '../../shared/types'
 import { ContentStore } from '../content/store'
 import { CaptureEvidenceLedger } from '../content/evidence'
 import { ContentGovernance } from '../content/governance'
@@ -10,14 +10,17 @@ import { dirname, join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { ReplayService } from '../replay/service'
 import { TestingService } from '../testing/service'
+import { ResourceKnowledgeService } from '../resources/service'
+import { WorkflowService } from '../workflow/service'
 import type { BrowserTabCommand } from '../../shared/contracts/browser'
 import type { ReplayExecutionInput, ReplayRun, ReplayTemplate } from '../../shared/contracts/replay'
 import type { TestSuite } from '../../shared/contracts/testing'
+import type { WorkflowNode } from '../../shared/contracts/workflow'
 import { ActionPolicy } from './policy'
 import { TaskService, type TaskJournalDiagnostics } from './task-service'
 import { WorkspaceTargetResolver } from './target-resolver'
 
-type WorkspaceAction = 'workspaces.list' | 'workspace.create' | 'workspace.open' | 'workspace.suspend' | 'workspace.history' | 'workspace.cockpit' | 'workspace.checkpointCreate' | 'workspace.checkpointList' | 'workspace.checkpointRestore' | 'tasks.diagnostics' | 'rules.get' | 'rules.save' | 'content.verify' | 'content.readRange' | 'content.inspect' | 'content.pin' | 'content.unpin' | 'content.policySet' | 'content.gc' | 'content.revoke' | 'capture.evidence' | 'capture.summary' | 'workspaces.contentStats' | 'environment.get' | 'environment.save' | 'environment.apply' | 'environment.rollback' | 'environment.diagnose' | 'site.stateExport' | 'site.stateRestore' | 'browser.tree' | 'browser.tabCreate' | 'tab.command' | 'browser.timeline' | 'browser.dialog' | 'replay.list' | 'replay.import' | 'replay.createFromRequest' | 'replay.save' | 'replay.run' | 'tests.list' | 'tests.save' | 'tests.run' | 'auth.summary' | 'auth.verifyFixture' | 'extensions.summary' | 'extensions.setDesired'
+type WorkspaceAction = 'workspaces.list' | 'workspace.create' | 'workspace.open' | 'workspace.suspend' | 'workspace.history' | 'workspace.cockpit' | 'workspace.checkpointCreate' | 'workspace.checkpointList' | 'workspace.checkpointRestore' | 'tasks.diagnostics' | 'rules.get' | 'rules.save' | 'content.verify' | 'content.readRange' | 'content.inspect' | 'content.pin' | 'content.unpin' | 'content.policySet' | 'content.gc' | 'content.revoke' | 'capture.evidence' | 'capture.summary' | 'workspaces.contentStats' | 'environment.get' | 'environment.save' | 'environment.apply' | 'environment.rollback' | 'environment.diagnose' | 'site.stateExport' | 'site.stateRestore' | 'browser.tree' | 'browser.tabCreate' | 'tab.command' | 'browser.timeline' | 'browser.dialog' | 'replay.list' | 'replay.import' | 'replay.createFromRequest' | 'replay.save' | 'replay.run' | 'tests.list' | 'tests.save' | 'tests.run' | 'resources.summary' | 'resources.rebuild' | 'resources.list' | 'resources.search' | 'resources.diff' | 'resources.noteSave' | 'resources.endpointOverride' | 'workflow.list' | 'workflow.save' | 'workflow.start' | 'workflow.resume' | 'workflow.command' | 'workflow.get' | 'auth.summary' | 'auth.verifyFixture' | 'extensions.summary' | 'extensions.setDesired'
 
 export interface WorkspaceActionRuntime {
   create(input: WorkspaceCreateInput): WorkspaceSummary
@@ -39,6 +42,7 @@ export interface WorkspaceActionRuntime {
   browserTimeline(id: string, limit?: number): unknown
   browserDialog(id: string, accept: boolean, promptText?: string): Promise<unknown>
   getRequest(id: string, seq: number): Promise<unknown>
+  queryRequests(id: string, query: RequestQuery, limit: number, offset: number, order: RequestOrder): Promise<Page<StoredRequest> | null>
   browserReplay(id: string, template: ReplayTemplate, signal?: AbortSignal): Promise<{ status: number; url: string; headers: Array<{ name: string; value: string }>; bodyBase64: string; durationMs: number }>
 }
 
@@ -86,6 +90,19 @@ const DESCRIPTORS: Record<WorkspaceAction, ActionDescriptor> = {
   'tests.list': { name: 'tests.list', kind: 'query', target: 'required', description: '读取测试套件与批量报告' },
   'tests.save': { name: 'tests.save', kind: 'mutation', target: 'required', description: '保存批量测试套件新版本' },
   'tests.run': { name: 'tests.run', kind: 'mutation', target: 'required', description: '运行带数据集、断言、重试与并发的测试套件' },
+  'resources.summary': { name: 'resources.summary', kind: 'query', target: 'required', description: '读取站点档案、索引覆盖、笔记和人工纠正' },
+  'resources.rebuild': { name: 'resources.rebuild', kind: 'mutation', target: 'required', description: '从不可变请求/正文证据重建派生资源索引' },
+  'resources.list': { name: 'resources.list', kind: 'query', target: 'required', description: '分页读取资源及 URL 内容版本' },
+  'resources.search': { name: 'resources.search', kind: 'query', target: 'required', description: '按源码、中文正文或 URL 搜索并返回证据引用' },
+  'resources.diff': { name: 'resources.diff', kind: 'query', target: 'required', description: '比较两个资源版本的正文差异' },
+  'resources.noteSave': { name: 'resources.noteSave', kind: 'mutation', target: 'required', description: '追加保存站点或资源笔记版本' },
+  'resources.endpointOverride': { name: 'resources.endpointOverride', kind: 'mutation', target: 'required', description: '版本化保存 endpoint merge/split 人工纠正' },
+  'workflow.list': { name: 'workflow.list', kind: 'query', target: 'required', description: '读取工作流版本和运行时间线' },
+  'workflow.save': { name: 'workflow.save', kind: 'mutation', target: 'required', description: '校验并保存顺序或 DAG 工作流新版本' },
+  'workflow.start': { name: 'workflow.start', kind: 'mutation', target: 'required', description: '冻结工作流版本并从新 fencing lease 启动' },
+  'workflow.resume': { name: 'workflow.resume', kind: 'mutation', target: 'required', description: '使用有效租约从安全检查点恢复工作流' },
+  'workflow.command': { name: 'workflow.command', kind: 'mutation', target: 'required', description: '暂停、取消或由人类接管工作流' },
+  'workflow.get': { name: 'workflow.get', kind: 'query', target: 'required', description: '读取单个工作流运行、节点结果和证据时间线' },
   'auth.summary': { name: 'auth.summary', kind: 'query', target: 'required', description: '读取指定工作区的登录证据摘要，不包含 Cookie 值' },
   'auth.verifyFixture': { name: 'auth.verifyFixture', kind: 'mutation', target: 'required', description: '在明确工作区对受控本地 fixture 主动验证身份' }
   ,'extensions.summary': { name: 'extensions.summary', kind: 'query', target: 'required', description: '读取工作区扩展观察与期望对账；Profile 快照不是完整枚举' }
@@ -97,6 +114,8 @@ export class WorkspaceActionRegistry {
   private readonly tasks: TaskService
   private readonly policy = new ActionPolicy()
   private readonly targets: WorkspaceTargetResolver
+  private readonly resourceServices = new Map<string, ResourceKnowledgeService>()
+  private readonly workflowServices = new Map<string, WorkflowService>()
 
   constructor(
     private readonly workspaces: WorkspaceService,
@@ -298,6 +317,28 @@ export class WorkspaceActionRegistry {
           const testing = this.testing(id); const suite = testing.get(payload.suiteId, payload.version); const replay = this.replay(id); const template = replay.get(suite.templateId)
           return testing.run(suite, template, (candidate, signal) => this.executeReplayTemplate(id, candidate, suite.mode, signal), context.signal)
         }
+        case 'resources.summary': return this.resources(workspaceIdOf(request.target)).summary()
+        case 'resources.rebuild': {
+          const id = workspaceIdOf(request.target)
+          return this.resources(id).rebuild((limit, offset) => this.runtime.queryRequests(id, {}, limit, offset, 'time_asc'), context.signal)
+        }
+        case 'resources.list': return this.resources(workspaceIdOf(request.target)).list(input as { origin?: string; limit?: number; offset?: number })
+        case 'resources.search': { const payload = input as { query: string; origin?: string; limit?: number; offset?: number }; return this.resources(workspaceIdOf(request.target)).search(payload.query, payload) }
+        case 'resources.diff': { const payload = input as { leftId: string; rightId: string }; return this.resources(workspaceIdOf(request.target)).diff(payload.leftId, payload.rightId) }
+        case 'resources.noteSave': return this.resources(workspaceIdOf(request.target)).saveNote(input as { id?: string; resourceId?: string; origin?: string; text: string })
+        case 'resources.endpointOverride': return this.resources(workspaceIdOf(request.target)).saveOverride(input as { id?: string; kind: 'merge' | 'split'; keys: string[]; label?: string })
+        case 'workflow.list': return this.workflows(workspaceIdOf(request.target)).list()
+        case 'workflow.save': return this.workflows(workspaceIdOf(request.target)).save(input as { id?: string; name: string; nodes: WorkflowNode[] })
+        case 'workflow.start': {
+          const id = workspaceIdOf(request.target); const payload = input as { workflowId: string; version?: number; variables?: Record<string, unknown> }; const service = this.workflows(id); const definition = service.get(payload.workflowId, payload.version)
+          return service.start(definition, id, payload.variables ?? {}, (nested) => this.execute(nested), (query) => this.waitRequest(id, query), context.signal)
+        }
+        case 'workflow.resume': {
+          const id = workspaceIdOf(request.target); const payload = input as { runId: string; leaseToken: string; acknowledgeUnknown?: boolean }
+          return this.workflows(id).resume(payload.runId, payload.leaseToken, (nested) => this.execute(nested), (query) => this.waitRequest(id, query), context.signal, payload.acknowledgeUnknown)
+        }
+        case 'workflow.command': { const payload = input as { runId: string; command: 'pause' | 'cancel' | 'takeover'; leaseToken?: string }; return this.workflows(workspaceIdOf(request.target)).command(payload.runId, payload.command, payload.leaseToken) }
+        case 'workflow.get': return this.workflows(workspaceIdOf(request.target)).getRun(String((input as { runId: string }).runId))
         case 'auth.summary':
           return this.runtime.getAuth((request.target as Extract<TargetRef, { kind: 'workspace' }>).workspaceId)
         case 'auth.verifyFixture':
@@ -320,6 +361,9 @@ export class WorkspaceActionRegistry {
   private root(id: string): string { return dirname(this.workspaces.pathsFor(id).uiSettingsPath) }
   private replay(id: string): ReplayService { return new ReplayService(this.root(id), new ContentStore(this.workspaces.pathsFor(id).contentDir)) }
   private testing(id: string): TestingService { return new TestingService(this.root(id), new ContentStore(this.workspaces.pathsFor(id).contentDir)) }
+  private resources(id: string): ResourceKnowledgeService { let service = this.resourceServices.get(id); if (!service) { service = new ResourceKnowledgeService(this.root(id), new ContentStore(this.workspaces.pathsFor(id).contentDir)); this.resourceServices.set(id, service) } return service }
+  private workflows(id: string): WorkflowService { let service = this.workflowServices.get(id); if (!service) { service = new WorkflowService(this.root(id)); this.workflowServices.set(id, service) } return service }
+  private async waitRequest(id: string, query: Record<string, unknown>): Promise<StoredRequest | null> { const page = await this.runtime.queryRequests(id, query as RequestQuery, 1, 0, 'time_desc'); return page?.rows[0] ?? null }
 
   private async runReplay(id: string, input: ReplayExecutionInput, signal?: AbortSignal): Promise<ReplayRun> {
     const service = this.replay(id); const template = service.get(input.templateId, input.version)
