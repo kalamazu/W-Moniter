@@ -1024,6 +1024,34 @@ app.whenReady().then(async () => {
       const instance = workspaceControllers.get(id)
       if (!instance) throw new Error('目标工作区未运行，无法恢复站点状态')
       return instance.restoreSiteState(bundle, options)
+    },
+    browserTree: (id) => {
+      const instance = workspaceControllers.get(id); if (!instance) throw new Error('目标工作区未运行')
+      return instance.browserTree()
+    },
+    browserCreateTab: (id, url) => {
+      const instance = workspaceControllers.get(id); if (!instance) throw new Error('目标工作区未运行')
+      return instance.browserCreateTab(url)
+    },
+    browserTabCommand: (id, targetId, generation, command, signal) => {
+      const instance = workspaceControllers.get(id); if (!instance) throw new Error('目标工作区未运行')
+      return instance.browserTabCommand(targetId, generation, command, signal)
+    },
+    browserTimeline: (id, limit) => {
+      const instance = workspaceControllers.get(id); if (!instance) throw new Error('目标工作区未运行')
+      return instance.browserTimeline(limit)
+    },
+    browserDialog: (id, accept, promptText) => {
+      const instance = workspaceControllers.get(id); if (!instance) throw new Error('目标工作区未运行')
+      return instance.browserDialog(accept, promptText)
+    },
+    getRequest: (id, seq) => {
+      const instance = workspaceControllers.get(id); if (!instance) throw new Error('目标工作区未运行')
+      return instance.getDetail(seq)
+    },
+    browserReplay: (id, template, signal) => {
+      const instance = workspaceControllers.get(id); if (!instance) throw new Error('目标工作区未运行')
+      return instance.browserReplay(template, signal)
     }
   }, { journalPath: join(DATA_DIR, 'tasks', 'journal.json') })
   activeWorkspace = workspaceService.active()

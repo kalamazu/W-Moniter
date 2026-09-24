@@ -29,7 +29,9 @@ export const PANELS: ReadonlyArray<PanelDef> = [
   { id: 'ws', label: 'WebSocket' },
   { id: 'endpoints', label: '接口画像' },
   { id: 'graph', label: '调用图' },
-  { id: 'sites', label: '站点资源' }
+  { id: 'sites', label: '站点资源' },
+  { id: 'browser', label: '浏览器控制' },
+  { id: 'replay', label: '重放与测试' }
 ]
 
 export function panelLabel(id: PanelId): string {

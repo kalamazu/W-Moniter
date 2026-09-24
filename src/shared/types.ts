@@ -676,6 +676,8 @@ export type PanelId =
   | 'endpoints'
   | 'graph'
   | 'sites'
+  | 'browser'
+  | 'replay'
 
 /**
  * 工作区布局：几栏 + 每栏占多大。

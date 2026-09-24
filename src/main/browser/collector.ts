@@ -669,6 +669,14 @@ export class Collector extends EventEmitter {
     return null
   }
 
+  findSessionByTargetId(targetId: string): string | null {
+    return this.targets.get(targetId)?.sessionId ?? null
+  }
+
+  targetIdForSession(sessionId: string): string | null {
+    return this.sessions.get(sessionId)?.targetId ?? null
+  }
+
   private async attach(targetId: string): Promise<void> {
     try {
       const { sessionId } = (await this.cdp.send('Target.attachToTarget', {

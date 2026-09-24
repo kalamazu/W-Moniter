@@ -1,7 +1,7 @@
 import type { PanelId } from '../../../shared/types'
 import { PANELS, panelLabel } from './PaneGrid'
 
-export type WorkbenchArea = 'observe' | 'analyze' | 'inspect' | 'configure'
+export type WorkbenchArea = 'observe' | 'analyze' | 'inspect' | 'execute' | 'configure'
 
 interface Props {
   area: WorkbenchArea
@@ -18,6 +18,7 @@ const AREAS: Array<{ id: WorkbenchArea; icon: string; label: string; panels: Pan
   { id: 'observe', icon: '◉', label: '观测', panels: ['list', 'waterfall', 'detail'] },
   { id: 'analyze', icon: '◇', label: '分析', panels: ['stats', 'endpoints', 'graph', 'events', 'ws'] },
   { id: 'inspect', icon: '⌘', label: '检查', panels: ['console', 'dom', 'sessions', 'sites', 'scripts'] },
+  { id: 'execute', icon: '▶', label: '执行', panels: ['browser', 'replay'] },
   { id: 'configure', icon: '⚙', label: '配置', panels: ['rules', 'env'] }
 ]
 

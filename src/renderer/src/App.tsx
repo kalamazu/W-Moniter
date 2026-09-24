@@ -19,6 +19,8 @@ import { TitleBar } from './components/TitleBar'
 import { Waterfall } from './components/Waterfall'
 import { WsPanel } from './components/WsPanel'
 import { WorkspaceBar } from './components/WorkspaceBar'
+import { BrowserPanel } from './components/BrowserPanel'
+import { ReplayPanel } from './components/ReplayPanel'
 import { CommandPalette, type CommandItem } from './components/CommandPalette'
 import { ContextDrawer } from './components/ContextDrawer'
 import { WorkbenchNav, areaForPanel, type WorkbenchArea } from './components/WorkbenchNav'
@@ -322,6 +324,10 @@ export default function App(): React.JSX.Element {
           return <GraphPanel liveTick={liveTick} />
         case 'sites':
           return <SitePanel liveTick={liveTick} />
+        case 'browser':
+          return <BrowserPanel liveTick={liveTick} />
+        case 'replay':
+          return <ReplayPanel selectedSeq={selectedSeq} />
       }
     },
     [requests, query, liveTick, selectedSeq, onSelect, onClose, waterfallLimit]

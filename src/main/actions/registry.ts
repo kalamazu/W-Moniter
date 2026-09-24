@@ -7,11 +7,17 @@ import { CaptureEvidenceLedger } from '../content/evidence'
 import { ContentGovernance } from '../content/governance'
 import { EnvironmentRepository, type EnvironmentConfig } from '../environment/repository'
 import { dirname, join } from 'node:path'
+import { randomUUID } from 'node:crypto'
+import { ReplayService } from '../replay/service'
+import { TestingService } from '../testing/service'
+import type { BrowserTabCommand } from '../../shared/contracts/browser'
+import type { ReplayExecutionInput, ReplayRun, ReplayTemplate } from '../../shared/contracts/replay'
+import type { TestSuite } from '../../shared/contracts/testing'
 import { ActionPolicy } from './policy'
 import { TaskService, type TaskJournalDiagnostics } from './task-service'
 import { WorkspaceTargetResolver } from './target-resolver'
 
-type WorkspaceAction = 'workspaces.list' | 'workspace.create' | 'workspace.open' | 'workspace.suspend' | 'workspace.history' | 'workspace.cockpit' | 'workspace.checkpointCreate' | 'workspace.checkpointList' | 'workspace.checkpointRestore' | 'tasks.diagnostics' | 'rules.get' | 'rules.save' | 'content.verify' | 'content.readRange' | 'content.inspect' | 'content.pin' | 'content.unpin' | 'content.policySet' | 'content.gc' | 'content.revoke' | 'capture.evidence' | 'capture.summary' | 'workspaces.contentStats' | 'environment.get' | 'environment.save' | 'environment.apply' | 'environment.rollback' | 'environment.diagnose' | 'site.stateExport' | 'site.stateRestore' | 'auth.summary' | 'auth.verifyFixture' | 'extensions.summary' | 'extensions.setDesired'
+type WorkspaceAction = 'workspaces.list' | 'workspace.create' | 'workspace.open' | 'workspace.suspend' | 'workspace.history' | 'workspace.cockpit' | 'workspace.checkpointCreate' | 'workspace.checkpointList' | 'workspace.checkpointRestore' | 'tasks.diagnostics' | 'rules.get' | 'rules.save' | 'content.verify' | 'content.readRange' | 'content.inspect' | 'content.pin' | 'content.unpin' | 'content.policySet' | 'content.gc' | 'content.revoke' | 'capture.evidence' | 'capture.summary' | 'workspaces.contentStats' | 'environment.get' | 'environment.save' | 'environment.apply' | 'environment.rollback' | 'environment.diagnose' | 'site.stateExport' | 'site.stateRestore' | 'browser.tree' | 'browser.tabCreate' | 'tab.command' | 'browser.timeline' | 'browser.dialog' | 'replay.list' | 'replay.createFromRequest' | 'replay.save' | 'replay.run' | 'tests.list' | 'tests.save' | 'tests.run' | 'auth.summary' | 'auth.verifyFixture' | 'extensions.summary' | 'extensions.setDesired'
 
 export interface WorkspaceActionRuntime {
   create(input: WorkspaceCreateInput): WorkspaceSummary
@@ -27,6 +33,13 @@ export interface WorkspaceActionRuntime {
   setExtensionDesired(id: string, input: { extensionId: string; version?: string; permissions?: string[] }): Promise<unknown>
   exportSiteState(id: string, origins?: string[]): Promise<unknown>
   restoreSiteState(id: string, bundle: SiteStateBundle, options: { areas?: Array<'cookies' | 'localStorage' | 'sessionStorage'>; replace?: boolean }): Promise<unknown>
+  browserTree(id: string): Promise<unknown>
+  browserCreateTab(id: string, url?: string): Promise<unknown>
+  browserTabCommand(id: string, targetId: string, generation: number, command: BrowserTabCommand, signal?: AbortSignal): Promise<unknown>
+  browserTimeline(id: string, limit?: number): unknown
+  browserDialog(id: string, accept: boolean, promptText?: string): Promise<unknown>
+  getRequest(id: string, seq: number): Promise<unknown>
+  browserReplay(id: string, template: ReplayTemplate, signal?: AbortSignal): Promise<{ status: number; url: string; headers: Array<{ name: string; value: string }>; bodyBase64: string; durationMs: number }>
 }
 
 const DESCRIPTORS: Record<WorkspaceAction, ActionDescriptor> = {
@@ -60,6 +73,18 @@ const DESCRIPTORS: Record<WorkspaceAction, ActionDescriptor> = {
   'environment.diagnose': { name: 'environment.diagnose', kind: 'query', target: 'required', description: '执行 DNS 与上游 TCP 诊断' },
   'site.stateExport': { name: 'site.stateExport', kind: 'query', target: 'required', description: '导出 Cookie、DOM Storage 与 IDB/Cache/SW 清单' },
   'site.stateRestore': { name: 'site.stateRestore', kind: 'mutation', target: 'required', description: '选择性恢复站点状态并进行浏览器读回验证' },
+  'browser.tree': { name: 'browser.tree', kind: 'query', target: 'required', description: '读取 Browser/Tab/Frame 稳定对象树与代次' },
+  'browser.tabCreate': { name: 'browser.tabCreate', kind: 'mutation', target: 'required', description: '在指定工作区创建标签页' },
+  'tab.command': { name: 'tab.command', kind: 'mutation', target: 'required', description: '对显式 Tab 代次执行导航、刷新、关闭、上传或等待' },
+  'browser.timeline': { name: 'browser.timeline', kind: 'query', target: 'required', description: '读取浏览器控制动作证据时间线' },
+  'browser.dialog': { name: 'browser.dialog', kind: 'mutation', target: 'required', description: '处理指定工作区当前 JavaScript 对话框' },
+  'replay.list': { name: 'replay.list', kind: 'query', target: 'required', description: '读取版本化请求模板与运行历史' },
+  'replay.createFromRequest': { name: 'replay.createFromRequest', kind: 'mutation', target: 'required', description: '从不可变历史请求派生重放模板' },
+  'replay.save': { name: 'replay.save', kind: 'mutation', target: 'required', description: '保存请求模板新版本' },
+  'replay.run': { name: 'replay.run', kind: 'mutation', target: 'required', description: '以浏览器或独立 HTTP 模式单次重放' },
+  'tests.list': { name: 'tests.list', kind: 'query', target: 'required', description: '读取测试套件与批量报告' },
+  'tests.save': { name: 'tests.save', kind: 'mutation', target: 'required', description: '保存批量测试套件新版本' },
+  'tests.run': { name: 'tests.run', kind: 'mutation', target: 'required', description: '运行带数据集、断言、重试与并发的测试套件' },
   'auth.summary': { name: 'auth.summary', kind: 'query', target: 'required', description: '读取指定工作区的登录证据摘要，不包含 Cookie 值' },
   'auth.verifyFixture': { name: 'auth.verifyFixture', kind: 'mutation', target: 'required', description: '在明确工作区对受控本地 fixture 主动验证身份' }
   ,'extensions.summary': { name: 'extensions.summary', kind: 'query', target: 'required', description: '读取工作区扩展观察与期望对账；Profile 快照不是完整枚举' }
@@ -246,6 +271,31 @@ export class WorkspaceActionRegistry {
           const payload = input as { bundle: SiteStateBundle; areas?: Array<'cookies' | 'localStorage' | 'sessionStorage'>; replace?: boolean }
           return this.runtime.restoreSiteState(id, payload.bundle, { areas: payload.areas, replace: payload.replace })
         }
+        case 'browser.tree': return this.runtime.browserTree(workspaceIdOf(request.target))
+        case 'browser.tabCreate': return this.runtime.browserCreateTab(workspaceIdOf(request.target), (input as { url?: string }).url)
+        case 'tab.command': {
+          const target = request.target as Extract<TargetRef, { kind: 'tab' }>
+          const payload = input as { generation: number; command: BrowserTabCommand }
+          return this.runtime.browserTabCommand(target.workspaceId, target.tabId, payload.generation, payload.command, context.signal)
+        }
+        case 'browser.timeline': return this.runtime.browserTimeline(workspaceIdOf(request.target), (input as { limit?: number }).limit)
+        case 'browser.dialog': return this.runtime.browserDialog(workspaceIdOf(request.target), Boolean((input as { accept?: boolean }).accept), (input as { promptText?: string }).promptText)
+        case 'replay.list': return this.replay(workspaceIdOf(request.target)).list()
+        case 'replay.createFromRequest': {
+          const id = workspaceIdOf(request.target); const detail = await this.runtime.getRequest(id, Number((input as { seq: number }).seq)) as { request?: { seq?: number; method: string; url: string; req_headers?: string | null; req_body?: string | null; status?: number | null } } | null
+          if (!detail?.request) throw new Error('历史请求不存在')
+          let headers: Record<string, string | string[]> = {}; try { headers = JSON.parse(detail.request.req_headers ?? '{}') as typeof headers } catch { /* 空头 */ }
+          return this.replay(id).createFromRequest({ seq: detail.request.seq, method: detail.request.method, url: detail.request.url, headers, body: detail.request.req_body, status: detail.request.status }, (input as { name?: string }).name)
+        }
+        case 'replay.save': return this.replay(workspaceIdOf(request.target)).save(input as never)
+        case 'replay.run': return this.runReplay(workspaceIdOf(request.target), input as ReplayExecutionInput, context.signal)
+        case 'tests.list': return this.testing(workspaceIdOf(request.target)).list()
+        case 'tests.save': return this.testing(workspaceIdOf(request.target)).save(input as never)
+        case 'tests.run': {
+          const id = workspaceIdOf(request.target); const payload = input as { suiteId: string; version?: number }
+          const testing = this.testing(id); const suite = testing.get(payload.suiteId, payload.version); const replay = this.replay(id); const template = replay.get(suite.templateId)
+          return testing.run(suite, template, (candidate, signal) => this.executeReplayTemplate(id, candidate, suite.mode, signal), context.signal)
+        }
         case 'auth.summary':
           return this.runtime.getAuth((request.target as Extract<TargetRef, { kind: 'workspace' }>).workspaceId)
         case 'auth.verifyFixture':
@@ -265,4 +315,32 @@ export class WorkspaceActionRegistry {
     return new EnvironmentRepository(join(dirname(paths.uiSettingsPath), 'environment.json'))
   }
 
+  private root(id: string): string { return dirname(this.workspaces.pathsFor(id).uiSettingsPath) }
+  private replay(id: string): ReplayService { return new ReplayService(this.root(id), new ContentStore(this.workspaces.pathsFor(id).contentDir)) }
+  private testing(id: string): TestingService { return new TestingService(this.root(id), new ContentStore(this.workspaces.pathsFor(id).contentDir)) }
+
+  private async runReplay(id: string, input: ReplayExecutionInput, signal?: AbortSignal): Promise<ReplayRun> {
+    const service = this.replay(id); const template = service.get(input.templateId, input.version)
+    if (!['GET', 'HEAD', 'OPTIONS'].includes(template.method.toUpperCase()) && input.confirmWrite !== true) throw new Error('非只读请求必须显式 confirmWrite=true')
+    return this.executeReplayTemplate(id, template, input.mode, signal, input.timeoutMs)
+  }
+
+  private async executeReplayTemplate(id: string, template: ReplayTemplate, mode: 'browser' | 'independent', signal?: AbortSignal, timeoutMs = 30_000): Promise<ReplayRun> {
+    const service = this.replay(id)
+    let sourceStatus: number | null | undefined
+    if (template.sourceSeq) { const detail = await this.runtime.getRequest(id, template.sourceSeq) as { request?: { status?: number | null } } | null; sourceStatus = detail?.request?.status }
+    if (mode === 'independent') return service.runIndependent(template, timeoutMs, signal, sourceStatus)
+    const startedAt = Date.now(); const runId = `rr_${randomUUID()}`
+    try {
+      const response = await this.runtime.browserReplay(id, template, signal); const bytes = Buffer.from(response.bodyBase64, 'base64'); const ref = await new ContentStore(this.workspaces.pathsFor(id).contentDir).put(bytes)
+      const run: ReplayRun = { id: runId, templateId: template.id, templateVersion: template.version, mode, startedAt, finishedAt: Date.now(), state: 'succeeded', request: { method: template.method, url: template.url, headers: template.headers }, response: { status: response.status, url: response.url, headers: response.headers, bodyHash: ref.hash, size: bytes.length, durationMs: response.durationMs }, diff: { ...(sourceStatus != null && sourceStatus !== response.status ? { statusChanged: [sourceStatus, response.status] as [number, number] } : {}) } }
+      service.record(run); return run
+    } catch (error) { const run: ReplayRun = { id: runId, templateId: template.id, templateVersion: template.version, mode, startedAt, finishedAt: Date.now(), state: signal?.aborted ? 'canceled' : 'failed', request: { method: template.method, url: template.url, headers: template.headers }, error: error instanceof Error ? error.message : String(error) }; service.record(run); return run }
+  }
+
+}
+
+function workspaceIdOf(target: TargetRef | undefined): string {
+  if (!target || target.kind === 'workspace-collection') throw new ActionError('动作缺少工作区目标', 'target_required')
+  return target.workspaceId
 }

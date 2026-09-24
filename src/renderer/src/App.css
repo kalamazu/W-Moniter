@@ -2914,3 +2914,10 @@ body.is-row-resize * {
   color: var(--muted);
   font-weight: 500;
 }
+
+.replay-editor {
+  width: 100%;
+  min-height: 300px;
+  resize: vertical;
+  font-family: var(--mono);
+}

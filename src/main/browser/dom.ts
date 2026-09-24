@@ -637,6 +637,15 @@ export class DomInspector {
     }
   }
 
+  async resolveNode(sessionId: string, selector: string): Promise<number | null> {
+    await this.ensure(sessionId, ['DOM'])
+    const hit = await this.retryOnStale(sessionId, async (refresh) => {
+      const rootId = await this.documentRoot(sessionId, refresh)
+      return (await this.cdp.send('DOM.querySelector', { nodeId: rootId, selector }, sessionId)) as { nodeId: number }
+    })
+    return hit.nodeId || null
+  }
+
   /** 页面里高亮一个节点（Overlay）。页面侧看不见，风险表里没把它列成红线 */
   async highlight(sessionId: string, nodeId: number, on: boolean): Promise<string[]> {
     const fresh = await this.ensure(sessionId, ['Overlay'])

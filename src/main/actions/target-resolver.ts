@@ -15,9 +15,14 @@ export class WorkspaceTargetResolver {
       if (target.kind !== 'workspace-collection' && target.kind !== 'workspace') throw new ActionError('查询工作区只接受工作区范围目标', 'target_invalid')
       return
     }
-    if (target.kind !== 'workspace') throw new ActionError(`动作 ${descriptor.name} 必须指定 workspace 目标`, 'target_invalid')
+    const isBrowserObject = descriptor.name.startsWith('browser.') || descriptor.name.startsWith('tab.')
+    if (target.kind === 'workspace-collection') throw new ActionError(`动作 ${descriptor.name} 不能以工作区集合为目标`, 'target_invalid')
+    if (isBrowserObject && target.kind !== 'workspace' && target.kind !== 'tab' && target.kind !== 'browser') {
+      throw new ActionError(`动作 ${descriptor.name} 必须指定 browser/tab 目标`, 'target_invalid')
+    }
+    if (!isBrowserObject && target.kind !== 'workspace') throw new ActionError(`动作 ${descriptor.name} 必须指定 workspace 目标`, 'target_invalid')
     const workspace = this.workspaces.get(target.workspaceId)
-    if (target.expectedVersion !== undefined && target.expectedVersion !== workspace.version) {
+    if (target.kind === 'workspace' && target.expectedVersion !== undefined && target.expectedVersion !== workspace.version) {
       throw new ActionError(`工作区目标已过期：期望版本 ${target.expectedVersion}，当前为 ${workspace.version}`, 'target_stale')
     }
   }

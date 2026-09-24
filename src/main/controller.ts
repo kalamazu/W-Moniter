@@ -2,7 +2,7 @@ import { EventEmitter } from 'node:events'
 import type { ChildProcess } from 'node:child_process'
 import { mkdirSync, readdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
-import { basename, join } from 'node:path'
+import { basename, join, resolve, sep } from 'node:path'
 import { ContentStore } from './content/store'
 import { ContentClient } from './content/client'
 import { verifyFixture } from './auth/fixture'
@@ -100,6 +100,8 @@ import type {
   WsFrameQuery,
   WsFrameRecord
 } from '../shared/types'
+import type { BrowserActionEvidence, BrowserTabCommand, BrowserTree } from '../shared/contracts/browser'
+import type { ReplayTemplate } from '../shared/contracts/replay'
 
 /** 批量推送给 UI 的间隔。逐条推送会在重页面上打死渲染进程。 */
 const FLUSH_INTERVAL_MS = 150
@@ -283,6 +285,8 @@ export class Controller extends EventEmitter {
   private domLogged = new Set<string>()
   private queue: RequestRecord[] = []
   private flushTimer: NodeJS.Timeout | null = null
+  private readonly targetGenerations = new Map<string, number>()
+  private readonly browserActions: BrowserActionEvidence[] = []
 
   constructor(private readonly options: ControllerOptions) {
     super()
@@ -630,7 +634,11 @@ export class Controller extends EventEmitter {
       })
       this.collector.on('log', (line: string) => this.emit('log', line))
       // 页面换文档后节点编号作废：清掉 DOM 面板缓存的根，下次调用重新取
-      this.collector.on('navigated', () => this.dom?.forgetNodes())
+      this.collector.on('navigated', (sessionId: string) => {
+        this.dom?.forgetNodes()
+        const targetId = this.collector?.targetIdForSession(sessionId)
+        if (targetId) this.targetGenerations.set(targetId, (this.targetGenerations.get(targetId) ?? 0) + 1)
+      })
       this.collector.on('console', (entry: ConsoleEntry) => this.emit('console', entry))
       // 事件流与 WS 帧：只入存储队列，不推给 UI —— 分析面板按 since 轮询库，
       // 同一条数据走两条路迟早会不一致，这里保持单一路径
@@ -2222,6 +2230,119 @@ export class Controller extends EventEmitter {
   }
 
   /* ------------------------------------------------------------- 导航 */
+
+  async browserTree(): Promise<BrowserTree> {
+    if (!this.cdp || !this.collector) return { browserId: 'primary', tabs: [], capturedAt: Date.now() }
+    const tabs = []
+    for (const target of this.collector.getTargets().filter((item) => item.type === 'page')) {
+      const frames: BrowserTree['tabs'][number]['frames'] = []
+      const sessionId = this.collector.findSessionByTargetId(target.targetId)
+      if (sessionId) {
+        try {
+          const tree = await this.cdp.send('Page.getFrameTree', {}, sessionId) as { frameTree?: unknown }
+          const visit = (node: unknown): void => {
+            const item = node as { frame?: { id?: string; parentId?: string; url?: string; name?: string }; childFrames?: unknown[] }
+            if (item.frame?.id) frames.push({ id: item.frame.id, ...(item.frame.parentId ? { parentId: item.frame.parentId } : {}), url: item.frame.url ?? '', ...(item.frame.name ? { name: item.frame.name } : {}) })
+            for (const child of item.childFrames ?? []) visit(child)
+          }
+          if (tree.frameTree) visit(tree.frameTree)
+        } catch { /* target 可能正在关闭 */ }
+      }
+      tabs.push({ ...target, generation: this.targetGenerations.get(target.targetId) ?? 0, frames })
+    }
+    return { browserId: 'primary', tabs, capturedAt: Date.now() }
+  }
+
+  async browserCreateTab(url = 'about:blank'): Promise<{ targetId: string; generation: number }> {
+    if (!this.cdp) throw new Error('浏览器还没起来')
+    if (url !== 'about:blank' && !/^https?:\/\//i.test(url)) throw new Error('新标签只允许 about:blank 或 HTTP(S)')
+    const result = await this.cdp.send('Target.createTarget', { url }) as { targetId: string }
+    this.targetGenerations.set(result.targetId, 0)
+    return { targetId: result.targetId, generation: 0 }
+  }
+
+  browserTimeline(limit = 100): BrowserActionEvidence[] { return this.browserActions.slice(-Math.max(1, Math.min(1000, limit))).reverse() }
+
+  async browserTabCommand(targetId: string, expectedGeneration: number, command: BrowserTabCommand, signal?: AbortSignal): Promise<BrowserActionEvidence> {
+    const startedAt = Date.now()
+    const actionId = randomUUID()
+    const finish = (ok: boolean, result?: unknown, error?: string): BrowserActionEvidence => {
+      const evidence = { actionId, targetId, generation: expectedGeneration, kind: command.kind, startedAt, finishedAt: Date.now(), ok, ...(result !== undefined ? { result } : {}), ...(error ? { error } : {}) }
+      this.browserActions.push(evidence); if (this.browserActions.length > 1000) this.browserActions.shift()
+      return evidence
+    }
+    try {
+      if (!this.cdp || !this.collector) throw new Error('浏览器还没起来')
+      const actualGeneration = this.targetGenerations.get(targetId) ?? 0
+      if (expectedGeneration !== actualGeneration) throw new Error(`Tab 引用已过期：期望代次 ${expectedGeneration}，当前 ${actualGeneration}`)
+      if (signal?.aborted) throw new Error('任务已取消')
+      if (command.kind === 'close') { await this.cdp.send('Target.closeTarget', { targetId }); return finish(true, { closed: true }) }
+      if (command.kind === 'activate') { await this.cdp.send('Target.activateTarget', { targetId }); return finish(true, { activated: true }) }
+      const sessionId = this.collector.findSessionByTargetId(targetId)
+      if (!sessionId) throw new Error('目标 Tab 尚未 attach 或已经关闭')
+      if (command.kind === 'reload') {
+        await this.cdp.send('Page.reload', { ignoreCache: command.ignoreCache === true }, sessionId)
+        return finish(true, { reloaded: true })
+      }
+      if (command.kind === 'navigate') {
+        if (!/^https?:\/\//i.test(command.url)) throw new Error('导航只允许 HTTP(S)')
+        const result = await this.cdp.send('Page.navigate', { url: command.url }, sessionId)
+        return finish(true, result)
+      }
+      if (command.kind === 'upload') {
+        if (!this.dom) throw new Error('DOM 检查器不可用')
+        const uploadRoot = resolve(this.options.userDataDir, 'uploads') + sep
+        const files = command.files.map((file) => resolve(file))
+        if (!files.length || files.some((file) => !file.startsWith(uploadRoot) || !statSync(file).isFile())) throw new Error(`上传文件必须已授权并位于 ${uploadRoot}`)
+        const nodeId = await this.dom.resolveNode(sessionId, command.selector)
+        if (!nodeId) throw new Error(`找不到上传控件：${command.selector}`)
+        await this.cdp.send('DOM.setFileInputFiles', { nodeId, files }, sessionId)
+        return finish(true, { selector: command.selector, files: files.map((file) => basename(file)) })
+      }
+      const timeoutMs = Math.max(100, Math.min(120_000, command.timeoutMs ?? 15_000))
+      const deadline = Date.now() + timeoutMs
+      while (Date.now() < deadline) {
+        if (signal?.aborted) throw new Error('任务已取消')
+        if (command.condition === 'selector') {
+          if (!command.value) throw new Error('selector wait 需要 value')
+          if (this.dom && await this.dom.resolveNode(sessionId, command.value)) return finish(true, { condition: command.condition, value: command.value })
+        } else if (command.condition === 'url') {
+          const history = await this.cdp.send('Page.getNavigationHistory', {}, sessionId) as { currentIndex?: number; entries?: Array<{ url?: string }> }
+          const url = history.entries?.[history.currentIndex ?? -1]?.url ?? ''
+          if (!command.value || url.includes(command.value)) return finish(true, { condition: command.condition, url })
+        } else {
+          const ready = await this.cdp.send('Runtime.evaluate', { expression: 'document.readyState', returnByValue: true }, sessionId) as { result?: { value?: string } }
+          if (ready.result?.value === 'complete') return finish(true, { condition: 'load' })
+        }
+        await new Promise((resolveDelay) => setTimeout(resolveDelay, 100))
+      }
+      throw new Error(`等待 ${command.condition} 超时`)
+    } catch (error) { return finish(false, undefined, error instanceof Error ? error.message : String(error)) }
+  }
+
+  async browserDialog(accept: boolean, promptText?: string): Promise<{ ok: boolean; error?: string }> {
+    return this.collector?.handleDialog(accept, promptText) ?? { ok: false, error: '浏览器还没起来' }
+  }
+
+  async browserReplay(template: ReplayTemplate, signal?: AbortSignal): Promise<{ status: number; url: string; headers: Array<{ name: string; value: string }>; bodyBase64: string; durationMs: number }> {
+    const started = Date.now()
+    if (this.profile !== 'L' || !this.cdp || !this.collector) throw new Error('浏览器语义重放需要运行中的 Profile L')
+    const sessionId = await this.waitPageSession(); if (!sessionId) throw new Error('没有 page 会话')
+    if (signal?.aborted) throw new Error('任务已取消')
+    const init = {
+      method: template.method,
+      headers: template.headers,
+      credentials: template.cookiePolicy === 'browser' ? 'include' : 'omit',
+      redirect: 'follow',
+      ...(template.body ? { bodyBase64: template.body.kind === 'base64' ? template.body.value : Buffer.from(template.body.value).toString('base64') } : {})
+    }
+    const expression = `(async()=>{const i=${JSON.stringify(init)};const h=new Headers();for(const x of i.headers)h.append(x.name,x.value);const b=i.bodyBase64?Uint8Array.from(atob(i.bodyBase64),c=>c.charCodeAt(0)):undefined;const r=await fetch(${JSON.stringify(template.url)},{method:i.method,headers:h,body:b,credentials:i.credentials,redirect:i.redirect});const a=new Uint8Array(await r.arrayBuffer());if(a.length>67108864)throw new Error('响应超过 64 MiB 重放上限');let s='';for(let p=0;p<a.length;p+=32768)s+=String.fromCharCode(...a.subarray(p,p+32768));return {status:r.status,url:r.url,headers:[...r.headers].map(([name,value])=>({name,value})),bodyBase64:btoa(s)}})()`
+    const result = await this.cdp.send('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true, userGesture: true }, sessionId) as { result?: { value?: unknown }; exceptionDetails?: { exception?: { description?: string }; text?: string } }
+    if (result.exceptionDetails) throw new Error(result.exceptionDetails.exception?.description ?? result.exceptionDetails.text ?? '浏览器重放失败')
+    const value = result.result?.value as { status: number; url: string; headers: Array<{ name: string; value: string }>; bodyBase64: string } | undefined
+    if (!value) throw new Error('浏览器重放没有返回值')
+    return { ...value, durationMs: Date.now() - started }
+  }
 
   /**
    * 让被监控页面跳到一个 URL（agent 的「翻页」动作）。
