@@ -33,9 +33,9 @@
 | [T-022](T-022-workspace-cockpit-state-history.md) | 已通过 | 工作区驾驶舱与浏览器状态历史 | M2 收口 | Codex | [A-022](../acceptance/A-022-workspace-cockpit-state-history.md) |
 | [T-023](T-023-environment-proxy-center.md) | 已通过 | 代理与环境配置中心 | M3 | Codex | [A-023](../acceptance/A-023-environment-proxy-center.md) |
 | [T-024](T-024-site-storage-control-center.md) | 已通过 | Cookie 与站点存储控制中心 | M4 | Codex | [A-024](../acceptance/A-024-site-storage-control-center.md) |
-| [T-025](T-025-browser-control-center.md) | 开发中 | 浏览器完全控制中心 | M4 | Codex | 待创建 |
-| [T-026](T-026-request-replay-workbench.md) | 开发中 | 请求模板与单次重放工作台 | M5 | Codex | 待创建 |
-| [T-027](T-027-batch-testing-script-runner.md) | 开发中 | 批量测试、断言与脚本运行器 | M6 | Codex | 待创建 |
+| [T-025](T-025-browser-control-center.md) | 待验收 | 浏览器完全控制中心 | M4 | Codex | [A-025](../acceptance/A-025-browser-control-center.md) |
+| [T-026](T-026-request-replay-workbench.md) | 待验收 | 请求模板与单次重放工作台 | M5 | Codex | [A-026](../acceptance/A-026-request-replay-workbench.md) |
+| [T-027](T-027-batch-testing-script-runner.md) | 待验收 | 批量测试、断言与脚本运行器 | M6 | Codex | [A-027](../acceptance/A-027-batch-testing-script-runner.md) |
 | [T-028](T-028-site-resource-knowledge-base.md) | 可认领 | 站点档案与资源知识库 | M7 | 未认领 | 待创建 |
 | [T-029](T-029-workflow-agent-runtime.md) | 可认领 | 持久工作流与 Agent 协作运行时 | M8 | 未认领 | 待创建 |
 | [T-030](T-030-intelligence-protocol-experiments.md) | 可认领 | 证据化智能分析与协议实验 | M9 | 未认领 | 待创建 |
@@ -45,6 +45,8 @@
 2026-09-24 T-016～T-020 已实现并复验：前四项收口上传、实时流、下载和缓存/SW 正文链路，T-020 建立 suspended 独立工作区的可校验检查点与冷恢复。
 
 2026-09-25 T-021～T-024 已实现并复验：内容治理与证据查看、工作区驾驶舱/事件历史、版本化代理环境、Cookie/站点存储工作台均进入统一 Action。通用状态包对 IDB/Cache/SW 只承诺结构清单，不伪称可无损重建，边界见 ADR-0010。
+
+2026-09-25 T-025～T-027 已完成实现并交付验收：稳定 Browser/Tab/Frame 对象与代次、版本化模板/双执行器、安全 cURL/HAR 导入，以及批量断言/变量/脚本/报告。执行边界见 ADR-0011。
 
 下一批 T-021～T-030 采用较大的纵向任务粒度以加速工程：每张卡同时包含领域服务、持久化、UI、Agent 动作和验收，不再把同一能力按技术层拆成多张小卡。建议依次推进 T-021/022 基础收口，T-023～025 控制面，T-026/027 执行与测试，再进入 T-028～030 资料、工作流和智能能力；依赖满足时允许并行认领。
 

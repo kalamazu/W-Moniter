@@ -1,11 +1,11 @@
 # T-027：批量测试、断言与脚本运行器
 
-状态：开发中
+状态：待验收
 蓝图映射：M6 §7.2
 优先级：P1
 认领：Codex（2026-09-25）
 基线 commit：`19a3c8e`
-验收：A-027（完成实现后创建）
+验收：[A-027](../acceptance/A-027-batch-testing-script-runner.md)
 
 ## 背景与目标
 
@@ -31,8 +31,8 @@
 
 ## 完成记录
 
-- 实现 commit：
-- 修改文件：
-- 测试命令与结果：
-- 已知限制：
-- 回滚：`git revert <commit>`
+- 实现 commit：`f923b34`
+- 修改文件：`src/shared/contracts/testing.ts`、`src/main/testing/service.ts`、`src/main/actions/registry.ts`、`ReplayPanel.tsx`
+- 测试命令与结果：`test:execution-centers` 的 T-027 4/4；1/10/100 次、并发、断言、重试和 stopOnFailure 通过。
+- 已知限制：可信本地脚本仅有同步 100 ms 超时，不是恶意代码沙箱；暂停/继续和独立 runner 进程留到运行时生产化任务。
+- 回滚：`git revert f923b34`（与 T-025/T-026 共用接线，按批次回退）

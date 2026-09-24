@@ -1,11 +1,11 @@
 # T-026：请求模板与单次重放工作台
 
-状态：开发中
+状态：待验收
 蓝图映射：M5 §7.1
 优先级：P0
 认领：Codex（2026-09-25）
 基线 commit：`19a3c8e`
-验收：A-026（完成实现后创建）
+验收：[A-026](../acceptance/A-026-request-replay-workbench.md)
 
 ## 背景与目标
 
@@ -31,8 +31,8 @@
 
 ## 完成记录
 
-- 实现 commit：
-- 修改文件：
-- 测试命令与结果：
-- 已知限制：
-- 回滚：`git revert <commit>`
+- 实现 commit：`f923b34`、`5df97a0`
+- 修改文件：`src/shared/contracts/replay.ts`、`src/main/replay/service.ts`、`src/main/controller.ts`、`src/main/actions/registry.ts`、`ReplayPanel.tsx`
+- 测试命令与结果：`test:execution-centers` 的 T-026 3/3；受控 origin 实证两种执行器返回 200、正文进入 ContentStore、写请求无确认被拒。
+- 已知限制：浏览器模式受页面 CORS/SW/Runtime 能力约束；独立模式不承诺浏览器 TLS/HTTP 指纹；multipart 首版按 raw/base64 正文保存，尚无逐 part 图形编辑器。
+- 回滚：先 `git revert 5df97a0`，再 `git revert f923b34`。

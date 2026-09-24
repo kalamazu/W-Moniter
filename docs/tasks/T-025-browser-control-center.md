@@ -1,11 +1,11 @@
 # T-025：浏览器完全控制中心
 
-状态：开发中
+状态：待验收
 蓝图映射：M4 §6.2
 优先级：P0
 认领：Codex（2026-09-25）
 基线 commit：`19a3c8e`
-验收：A-025（完成实现后创建）
+验收：[A-025](../acceptance/A-025-browser-control-center.md)
 
 ## 背景与目标
 
@@ -31,8 +31,8 @@
 
 ## 完成记录
 
-- 实现 commit：
-- 修改文件：
-- 测试命令与结果：
-- 已知限制：
-- 回滚：`git revert <commit>`
+- 实现 commit：`f923b34`
+- 修改文件：`src/shared/contracts/browser.ts`、`src/main/controller.ts`、`src/main/browser/{collector,dom}.ts`、`src/main/actions/*`、`BrowserPanel.tsx`
+- 测试命令与结果：`test:execution-centers` 的 T-025 4/4；`test:input` 16/16；`test:dom` 19/19；`test:control` 33/33。
+- 已知限制：首版控制中心复用既有截图、输入、DOM、下载证据链；尚未把窗口几何、视觉 Tab 分组和人类接管租约做成独立持久模型。
+- 回滚：`git revert f923b34`（该提交与 T-026/T-027 共用 Action/Controller/UI 接线，按批次回退）
