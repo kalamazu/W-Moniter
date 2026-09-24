@@ -33,9 +33,9 @@
 | [T-022](T-022-workspace-cockpit-state-history.md) | 已通过 | 工作区驾驶舱与浏览器状态历史 | M2 收口 | Codex | [A-022](../acceptance/A-022-workspace-cockpit-state-history.md) |
 | [T-023](T-023-environment-proxy-center.md) | 已通过 | 代理与环境配置中心 | M3 | Codex | [A-023](../acceptance/A-023-environment-proxy-center.md) |
 | [T-024](T-024-site-storage-control-center.md) | 已通过 | Cookie 与站点存储控制中心 | M4 | Codex | [A-024](../acceptance/A-024-site-storage-control-center.md) |
-| [T-025](T-025-browser-control-center.md) | 可认领 | 浏览器完全控制中心 | M4 | 未认领 | 待创建 |
-| [T-026](T-026-request-replay-workbench.md) | 可认领 | 请求模板与单次重放工作台 | M5 | 未认领 | 待创建 |
-| [T-027](T-027-batch-testing-script-runner.md) | 可认领 | 批量测试、断言与脚本运行器 | M6 | 未认领 | 待创建 |
+| [T-025](T-025-browser-control-center.md) | 开发中 | 浏览器完全控制中心 | M4 | Codex | 待创建 |
+| [T-026](T-026-request-replay-workbench.md) | 开发中 | 请求模板与单次重放工作台 | M5 | Codex | 待创建 |
+| [T-027](T-027-batch-testing-script-runner.md) | 开发中 | 批量测试、断言与脚本运行器 | M6 | Codex | 待创建 |
 | [T-028](T-028-site-resource-knowledge-base.md) | 可认领 | 站点档案与资源知识库 | M7 | 未认领 | 待创建 |
 | [T-029](T-029-workflow-agent-runtime.md) | 可认领 | 持久工作流与 Agent 协作运行时 | M8 | 未认领 | 待创建 |
 | [T-030](T-030-intelligence-protocol-experiments.md) | 可认领 | 证据化智能分析与协议实验 | M9 | 未认领 | 待创建 |
