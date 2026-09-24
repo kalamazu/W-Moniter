@@ -60,7 +60,10 @@ try {
   for (const route of routes) {
     let rows = []
     for (let retry = 0; retry < 15 && !rows.length; retry += 1) {
-      const pageOfRows = await app.evaluate(`window.monitor.queryRequests({search:${JSON.stringify('/' + route)}}, 20, 0, 'time_desc')`)
+      const filter = { search: '/' + route,
+        ...(route === 'matrix-cache' ? { fromCache: true } : {}),
+        ...(route === 'api/through-sw' ? { fromSw: true } : {}) }
+      const pageOfRows = await app.evaluate(`window.monitor.queryRequests(${JSON.stringify(filter)}, 20, 0, 'time_desc')`)
       rows = pageOfRows?.rows ?? []
       if (!rows.length) await sleep(200)
     }
@@ -69,17 +72,38 @@ try {
     const truth = origin.requests.filter((item) => item.path === '/' + route)
     coverage.push({ route, originCount: truth.length, originLatencyMs: truth[0]?.finishedAt ? truth[0].finishedAt - truth[0].at : null,
       observed: !!row, bodyState: detail?.request?.body_state ?? null, bodyHash: detail?.body?.hash ?? null,
-      bodySize: detail?.request?.body_size ?? null })
+      bodySize: detail?.request?.body_size ?? null,
+      requestBodyHash: detail?.request?.req_body_hash ?? null,
+      requestBodySize: detail?.request?.req_body_size ?? null,
+      responseSource: detail?.request?.response_source ?? null })
   }
   const binary = coverage.find((item) => item.route === 'matrix-binary')
+  let streamEvidence = null
+  if (proxy) {
+    for (let retry = 0; retry < 30 && !streamEvidence; retry += 1) {
+      const events = await app.evaluate("window.monitor.queryEvents({kind:'stream',limit:50,order:'asc'})")
+      streamEvidence = events?.rows?.find((item) => String(item.url ?? '').includes('/events') && item.detail?.event === 'segment') ?? null
+      if (!streamEvidence) await sleep(100)
+    }
+  }
   check('监控记录可与独立真值逐条比对', () => {
     assert(binary.observed, `二进制请求未被记录：${JSON.stringify(binary)}`)
     if (proxy) assert(binary.bodyState === 'stored', `代理流正文未完成提交：${JSON.stringify(binary)}`)
     if (binary.bodyState === 'stored') assert(binary.bodyHash === binaryTruth, `已存正文 hash 与真值不符：${JSON.stringify(binary)}`)
     if (page) {
+      const upload = coverage.find((item) => item.route === 'matrix-upload')
+      if (proxy && !skipUpload) {
+        assert(upload?.requestBodyHash === uploadTruth, `上传 ContentRef hash 与 origin 不一致：${JSON.stringify(upload)}`)
+        assert(upload?.requestBodySize === page.upload.bytes, `上传 ContentRef 字节数不一致：${JSON.stringify(upload)}`)
+      }
       const truncated = coverage.find((item) => item.route === 'matrix-truncate')
       const aborted = coverage.find((item) => item.route === 'matrix-slow')
       assert(truncated?.bodyState !== 'stored' && aborted?.bodyState !== 'stored', '失败/取消响应被误标为完整正文')
+      const cached = coverage.find((item) => item.route === 'matrix-cache')
+      const sw = coverage.find((item) => item.route === 'api/through-sw')
+      assert(cached?.bodyState === 'stored' && cached.responseSource === 'disk_cache', `CacheStorage/缓存来源或正文不完整：${JSON.stringify(cached)}`)
+      assert(sw?.bodyState === 'stored' && sw.responseSource === 'service_worker', `Service Worker 来源或正文不完整：${JSON.stringify(sw)}`)
+      if (proxy) assert(streamEvidence?.detail?.hash && streamEvidence.detail.size > 0, `SSE 活跃流没有可读分段证据：${JSON.stringify(streamEvidence)}`)
     }
   })
   const status = await app.evaluate('window.monitor.getStatus()')
@@ -95,10 +119,11 @@ try {
       ...(proxy && !page ? ['proxy_upload_stalled_page'] : []),
       ...(page?.ws?.error ? ['proxy_websocket_failed'] : []),
       ...(coverage.find((item) => item.route === 'matrix-download')?.observed ? [] : ['download_request_not_observed']),
-      ...(coverage.find((item) => item.route === 'events')?.bodyState === 'stored' ? [] : ['sse_body_not_stored']),
-      ...(!skipUpload && coverage.find((item) => item.route === 'matrix-upload')?.bodySize !== page?.upload?.bytes ? ['upload_original_not_stored'] : [])
+      ...((coverage.find((item) => item.route === 'events')?.bodyState === 'stored' || streamEvidence?.detail?.hash) ? [] : ['sse_body_not_stored']),
+      ...(!skipUpload && coverage.find((item) => item.route === 'matrix-upload')?.requestBodySize !== page?.upload?.bytes ? ['upload_original_not_stored'] : [])
     ],
-    facts: { responseHash: binaryTruth, uploadHash: uploadTruth, uploadReceivedBytes: originUpload?.receivedBytes ?? 0, wsFramesAtOrigin: origin.wsLog.length } }
+    facts: { responseHash: binaryTruth, uploadHash: uploadTruth, uploadReceivedBytes: originUpload?.receivedBytes ?? 0, wsFramesAtOrigin: origin.wsLog.length,
+      streamSegment: streamEvidence?.detail ?? null } }
   if (process.env['CAPTURE_REPORT']) writeFileSync(process.env['CAPTURE_REPORT'], JSON.stringify(result, null, 2) + '\n')
   console.log('CAPTURE_MATRIX ' + JSON.stringify(result))
 } catch (error) {

@@ -13,7 +13,6 @@ const root = process.argv[2]
 if (!root) throw new Error('content root required')
 const token = randomBytes(32).toString('hex')
 const CHUNK = 1024 * 1024
-let prior = Promise.resolve()
 let active = 0
 
 async function atomic(path, bytes) {
@@ -90,8 +89,11 @@ const server = http.createServer((req, res) => {
     res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ active })); return
   }
   if (req.method !== 'PUT' || req.url !== '/object') { res.writeHead(404); res.end(); return }
-  const current = prior.catch(() => {}).then(() => receive(req, res))
-  prior = current
+  // Each upload owns a unique staging file. Serializing entire request bodies
+  // lets one long-lived response (SSE/slow stream) head-of-line block every
+  // upload and download artifact, so receive concurrently and only serialize
+  // publication through atomic content-addressed files.
+  void receive(req, res)
 })
 server.listen(0, '127.0.0.1', () => {
   const address = server.address()

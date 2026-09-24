@@ -66,7 +66,6 @@ const EVENT_NOISY_LIMIT = 20000
 /** 单实例最多记多少帧 WebSocket 数据。帧的数量完全由页面决定，必须封顶 */
 const WS_FRAME_LIMIT = 20000
 /** 单帧 payload 的落库上限。超了截断并标记，别让一条大帧把库撑爆 */
-const WS_PAYLOAD_MAX = 4096
 /** WS 连接 → URL 缓存的容量 */
 const WS_URL_CACHE = 512
 
@@ -854,7 +853,6 @@ export class Collector extends EventEmitter {
     const data = p.response?.payloadData ?? ''
     const opcode = p.response?.opcode ?? 0
     const binary = opcode === 2
-    const truncated = data.length > WS_PAYLOAD_MAX
     const frame: WsFrameRecord = {
       seq: this.resolveSeq(event.sessionId, p.requestId),
       ts: toMs(p.timestamp),
@@ -862,9 +860,11 @@ export class Collector extends EventEmitter {
       url: this.wsUrlFor(event.sessionId, p.requestId),
       direction,
       opcode,
-      payload: truncated ? data.slice(0, WS_PAYLOAD_MAX) : data,
+      // Keep the original CDP payload until the controller has committed it to
+      // ContentStore. Only the database preview is bounded afterwards.
+      payload: data,
       size: binary ? Math.floor((data.length * 3) / 4) : data.length,
-      truncated,
+      truncated: false,
       binary
     }
     this.emit('wsframe', frame)
@@ -1378,6 +1378,7 @@ export class Collector extends EventEmitter {
     record.mimeType = p.response.mimeType
     record.fromCache = Boolean(p.response.fromDiskCache)
     record.fromServiceWorker = Boolean(p.response.fromServiceWorker)
+    record.responseSource = record.fromServiceWorker ? 'service_worker' : record.fromCache ? 'disk_cache' : 'network'
     this.trace(record.url, 'responseReceived', event.sessionId, `status=${p.response.status}`)
   }
 
@@ -1393,6 +1394,21 @@ export class Collector extends EventEmitter {
     entry.record.encodedDataLength = p.encodedDataLength
     entry.record.endTs = Date.now()
     entry.record.durationMs = Math.round((p.timestamp - entry.monoStart) * 1000)
+    if (entry.record.fromServiceWorker) {
+      // Fetch.getResponseBody may return an empty outer body for a Service
+      // Worker synthesized response. Once loadingFinished fires, Network owns
+      // the finalized buffer and can provide the actual bytes.
+      void this.cdp.send('Network.getResponseBody', { requestId: p.requestId }, event.sessionId)
+        .then((value: unknown) => {
+          const result = value as { body?: string; base64Encoded?: boolean }
+          if (!result.body) return
+          const bytes = result.base64Encoded
+            ? new Uint8Array(Buffer.from(result.body, 'base64'))
+            : new Uint8Array(Buffer.from(result.body, 'utf8'))
+          if (bytes.byteLength > 0) this.emit('body', { seq: entry.record.seq, bytes, state: 'stored', size: bytes.byteLength } satisfies CapturedBody)
+        })
+        .catch(() => undefined)
+    }
     this.inflight.delete(key)
     this.trace(entry.record.url, 'loadingFinished', event.sessionId, `bytes=${p.encodedDataLength}`)
     this.emitRecord(entry.record, !entry.pendingEmitted)

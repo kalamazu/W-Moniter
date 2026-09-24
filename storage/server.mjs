@@ -55,6 +55,10 @@ let dbScope = { workspaceId: 'default', profileId: 'primary' }
  * 漏列的表现是「界面有字段、库里没有」，而且只在老库上出现。
  */
 const PROXY_COLUMNS = [
+  ['req_body_hash', 'TEXT'],
+  ['req_body_size', 'INTEGER'],
+  ['req_body_chunks', 'INTEGER'],
+  ['content_segments', 'TEXT'],
   ['merge_state', 'TEXT'],
   ['proxy_flow_id', 'TEXT'],
   ['net_dns_ms', 'REAL'],
@@ -122,6 +126,7 @@ CREATE TABLE IF NOT EXISTS requests (
   decoded_len INTEGER,
   from_cache INTEGER DEFAULT 0,
   from_sw INTEGER DEFAULT 0,
+  response_source TEXT,
   ttfb_ms REAL,
   duration_ms REAL,
   start_ts REAL NOT NULL,
@@ -222,7 +227,11 @@ CREATE TABLE IF NOT EXISTS ws_frames (
   payload TEXT,
   size INTEGER,
   truncated INTEGER DEFAULT 0,
-  binary INTEGER DEFAULT 0
+  binary INTEGER DEFAULT 0,
+  content_hash TEXT,
+  content_size INTEGER,
+  content_chunks INTEGER,
+  capture_state TEXT
 );
 
 CREATE INDEX IF NOT EXISTS ix_ws_inst_id ON ws_frames (inst, id);
@@ -327,7 +336,7 @@ const REQUEST_COLUMNS = [
   'frame_url', 'url', 'host', 'scheme', 'path', 'query', 'method', 'resource_type',
   'initiator_type', 'initiator_stack', 'priority', 'status', 'status_text', 'mime_type', 'protocol',
   'remote_ip', 'remote_port', 'req_headers', 'resp_headers', 'req_body',
-  'encoded_len', 'decoded_len', 'from_cache', 'from_sw', 'ttfb_ms', 'duration_ms',
+  'encoded_len', 'decoded_len', 'from_cache', 'from_sw', 'response_source', 'ttfb_ms', 'duration_ms',
   'start_ts', 'end_ts', 'failed', 'canceled',
   ...PROXY_COLUMNS.map(([column]) => column)
 ]
@@ -341,7 +350,7 @@ const REQUEST_COLUMNS = [
  */
 const REQUEST_RESULT_COLUMNS = [
   'status', 'status_text', 'mime_type', 'protocol', 'remote_ip', 'remote_port',
-  'encoded_len', 'decoded_len', 'from_cache', 'from_sw', 'ttfb_ms', 'duration_ms',
+  'encoded_len', 'decoded_len', 'from_cache', 'from_sw', 'response_source', 'ttfb_ms', 'duration_ms',
   'end_ts', 'failed', 'canceled',
   // 代理侧字段也要跟着终态行更新：晚配（长连接）就是靠这次 upsert 把字段补上去的
   ...PROXY_COLUMNS.map(([column]) => column)
@@ -388,6 +397,11 @@ function openDatabase(dbPath, scope) {
   ensureColumn(handle, 'scripts', 'start_line', 'INTEGER NOT NULL DEFAULT 0')
   // §7.1 #2 的发起链：老库的 requests 表没有这一列
   ensureColumn(handle, 'requests', 'initiator_stack', 'TEXT')
+  ensureColumn(handle, 'requests', 'response_source', 'TEXT')
+  ensureColumn(handle, 'ws_frames', 'content_hash', 'TEXT')
+  ensureColumn(handle, 'ws_frames', 'content_size', 'INTEGER')
+  ensureColumn(handle, 'ws_frames', 'content_chunks', 'INTEGER')
+  ensureColumn(handle, 'ws_frames', 'capture_state', 'TEXT')
   // P5：老库没有代理那几列。CREATE TABLE IF NOT EXISTS 不会补列，必须显式迁移
   for (const [column, decl] of PROXY_COLUMNS) ensureColumn(handle, 'requests', column, decl)
   // v7：事件流加了 level（info/warn/error），老库的 events 没有这一列
@@ -483,8 +497,8 @@ function buildStatements() {
       'INSERT INTO events (inst, ts, kind, level, target_type, url, detail) VALUES (?, ?, ?, ?, ?, ?, ?)'
     ),
     insertWsFrame: db.prepare(
-      'INSERT INTO ws_frames (inst, seq, ts, request_id, url, direction, opcode, payload, size, truncated, binary) ' +
-        'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+      'INSERT INTO ws_frames (inst, seq, ts, request_id, url, direction, opcode, payload, size, truncated, binary, content_hash, content_size, content_chunks, capture_state) ' +
+        'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
     ),
     bodyBudget: db.prepare(
       'SELECT COUNT(*) AS n, COALESCE(SUM(size), 0) AS bytes FROM bodies WHERE stored = 1'
@@ -618,7 +632,7 @@ function queryRequests(args) {
       'SELECT id, inst, seq, key, request_id, session_id, target_id, target_type, frame_url, ' +
         'url, host, scheme, path, query, method, resource_type, initiator_type, priority, ' +
         'status, status_text, mime_type, protocol, remote_ip, remote_port, ' +
-        'encoded_len, decoded_len, from_cache, from_sw, ttfb_ms, duration_ms, ' +
+        'encoded_len, decoded_len, from_cache, from_sw, response_source, ttfb_ms, duration_ms, ' +
         'start_ts, end_ts, failed, canceled, body_state, body_size, body_hash, body_trunc, ' +
         PROXY_COLUMNS.map(([column]) => column).join(', ') + ' ' +
         'FROM requests ' + where.sql + ' ORDER BY ' + order + ' LIMIT ? OFFSET ?'
@@ -1463,7 +1477,7 @@ function queryWsFrames(args) {
   const limit = clampInt(args.limit, 200, 1, 5000)
   const rows = db
     .prepare(
-      'SELECT id, seq, ts, request_id, url, direction, opcode, payload, size, truncated, binary ' +
+      'SELECT id, seq, ts, request_id, url, direction, opcode, payload, size, truncated, binary, content_hash, content_size, content_chunks, capture_state ' +
         'FROM ws_frames ' + where + ' ORDER BY id ' + (args.order === 'desc' ? 'DESC' : 'ASC') + ' LIMIT ?'
     )
     .all(...params, limit)
@@ -1483,7 +1497,11 @@ function queryWsFrames(args) {
       binary: Boolean(row.binary),
       size: row.size,
       truncated: Boolean(row.truncated),
-      payload: row.payload
+      payload: row.payload,
+      contentHash: row.content_hash,
+      contentSize: row.content_size,
+      contentChunks: row.content_chunks,
+      captureState: row.capture_state
     })),
     latest,
     nextSince: rows.length > 0 ? rows[rows.length - 1].id : Number(args.since) || 0,
@@ -3640,6 +3658,10 @@ const OPS = {
           norm(item.size),
           item.truncated ? 1 : 0,
           item.binary ? 1 : 0
+          ,norm(item.contentHash)
+          ,norm(item.contentSize)
+          ,norm(item.contentChunks)
+          ,norm(item.captureState)
         )
       }
       db.exec('COMMIT')

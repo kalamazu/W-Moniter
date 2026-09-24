@@ -249,6 +249,8 @@ export class ProxyClient extends EventEmitter {
         if (msg.ev === 'flow') {
           this.flowCount += 1
           this.emit('flow', msg.data as ProxyFlow)
+        } else if (msg.ev === 'segment') {
+          this.emit('segment', msg.data)
         } else if (msg.ev === 'log') {
           const data = msg.data as { level?: string; msg?: string }
           this.emit('log', '[' + String(data.level) + '] ' + String(data.msg))

@@ -145,6 +145,8 @@ function toProxyOnly(flow) {
     fromCache: false,
     fromServiceWorker: false,
     proxyFlowId: flow.flowId,
+    ...(flow.requestContentRef ? { proxyRequestContentRef: flow.requestContentRef } : {}),
+    ...(flow.contentSegments?.length ? { proxyContentSegments: flow.contentSegments } : {}),
     mergeState: 'proxy-only',
     ...(flow.open ? { proxyOpen: true } : {}),
     timings: flow.timings ?? {},
@@ -165,6 +167,8 @@ function withFlow(record, flow, ties = 1) {
   return {
     ...record,
     proxyFlowId: flow.flowId,
+    ...(flow.requestContentRef ? { proxyRequestContentRef: flow.requestContentRef } : {}),
+    ...(flow.contentSegments?.length ? { proxyContentSegments: flow.contentSegments } : {}),
     ...(flow.contentRef ? { proxyContentRef: flow.contentRef } : {}),
     mergeState: 'merged',
     timings: flow.timings ?? {},

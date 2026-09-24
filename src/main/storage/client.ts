@@ -136,10 +136,15 @@ function toRow(record: RequestRecord): Record<string, unknown> {
     req_headers: record.reqHeaders ? JSON.stringify(record.reqHeaders) : null,
     resp_headers: record.respHeaders ? JSON.stringify(record.respHeaders) : null,
     req_body: record.reqBody ?? null,
+    req_body_hash: record.proxyRequestContentRef?.hash ?? null,
+    req_body_size: record.proxyRequestContentRef?.size ?? null,
+    req_body_chunks: record.proxyRequestContentRef?.chunks ?? null,
+    content_segments: record.proxyContentSegments ? JSON.stringify(record.proxyContentSegments) : null,
     encoded_len: record.encodedDataLength ?? null,
     decoded_len: null,
     from_cache: record.fromCache ? 1 : 0,
     from_sw: record.fromServiceWorker ? 1 : 0,
+    response_source: record.responseSource ?? null,
     // TTFB 用代理量到的那个：CDP 的回调里拿不到「首字节」这个时刻，
     // 代理的 ttfb 是「上游连接就绪 → 首字节」的实测值（§5.1）。
     // 来源是不是代理，看 merge_state / proxy_flow_id 就知道。

@@ -61,6 +61,8 @@ export interface RequestRecord {
   encodedDataLength?: number
   fromCache?: boolean
   fromServiceWorker?: boolean
+  /** 响应字节的浏览器来源；不能由是否经过代理反推。 */
+  responseSource?: 'network' | 'disk_cache' | 'service_worker'
   /**
    * 请求头。来自 CDP 的 Network.requestWillBeSentExtraInfo —— 它**不在**
    * requestWillBeSent 的 params 里，必须单独订阅（见 collector 的 extraInfo 缓冲）。
@@ -85,6 +87,10 @@ export interface RequestRecord {
    * 会以 mergeState='proxy-only' 的形式单独存在，不丢。
    */
   proxyFlowId?: string
+  /** 代理在上传流 EOF 后提交的完整请求正文；与响应正文引用互不覆盖。 */
+  proxyRequestContentRef?: { hash: string; size: number; chunks: number }
+  /** SSE/gRPC 等长连接按原始网络片段提交的有序正文。 */
+  proxyContentSegments?: Array<{ cursor: number; hash: string; size: number; chunks: number }>
   /** 代理流收到内容服务完整 EOF 回执后才有；不经 CDP JSON/base64。 */
   proxyContentRef?: { hash: string; size: number; chunks: number }
   /**
@@ -1188,6 +1194,7 @@ export type MonitorEventKind =
   | 'target'
   | 'rule'
   | 'overflow'
+  | 'stream'
   /** cookie 罐的变化（种上 / 改写 / 过期 / 被策略拦下） */
   | 'cookie'
   /** 站点存储的变化（localStorage 逐键，缓存 / IndexedDB / SW 是域级） */
@@ -1252,6 +1259,11 @@ export interface WsFrameRecord {
   size: number
   truncated: boolean
   binary: boolean
+  /** 完整帧正文位于 ContentStore；payload 仅是安全预览。 */
+  contentHash?: string
+  contentSize?: number
+  contentChunks?: number
+  captureState?: 'stored' | 'content_error'
 }
 
 export interface WsFrameRow extends WsFrameRecord {

@@ -1,6 +1,7 @@
 import { spawn, type ChildProcess } from 'node:child_process'
 import http from 'node:http'
-import { existsSync } from 'node:fs'
+import { createReadStream, existsSync } from 'node:fs'
+import { stat } from 'node:fs/promises'
 import { locateNode } from '../storage/locate-node'
 import { resolveRuntimeFile } from '../paths'
 import type { ContentRef } from './store'
@@ -69,6 +70,32 @@ export class ContentClient {
       })
       req.on('error', reject)
       req.end(Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength))
+    })
+  }
+
+  /** Stream an already-downloaded artifact without copying it through Electron memory. */
+  async putFile(path: string): Promise<ContentRef> {
+    const endpoint = this.endpoint
+    if (!endpoint) throw new Error('内容服务未启动')
+    const info = await stat(path)
+    if (!info.isFile()) throw new Error('下载产物不是普通文件')
+    return new Promise((resolve, reject) => {
+      const req = http.request({ hostname: endpoint.host, port: endpoint.port, method: 'PUT', path: '/object',
+        headers: { authorization: `Bearer ${endpoint.token}`, 'x-expected-bytes': String(info.size) } }, res => {
+        const chunks: Buffer[] = []
+        res.on('data', (chunk: Buffer) => chunks.push(chunk))
+        res.on('end', () => {
+          try {
+            const payload = JSON.parse(Buffer.concat(chunks).toString('utf8')) as ContentRef & { error?: string }
+            if (res.statusCode !== 200 || !payload.hash) throw new Error(payload.error ?? `content service HTTP ${res.statusCode}`)
+            resolve(payload)
+          } catch (error) { reject(error) }
+        })
+      })
+      req.on('error', reject)
+      const input = createReadStream(path)
+      input.on('error', reject)
+      input.pipe(req)
     })
   }
 

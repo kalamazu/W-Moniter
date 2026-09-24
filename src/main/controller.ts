@@ -2,7 +2,7 @@ import { EventEmitter } from 'node:events'
 import type { ChildProcess } from 'node:child_process'
 import { mkdirSync, readdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 import { ContentStore } from './content/store'
 import { ContentClient } from './content/client'
 import { verifyFixture } from './auth/fixture'
@@ -108,6 +108,8 @@ const FLUSH_INTERVAL_MS = 150
 function proxyPatchOf(record: RequestRecord): Partial<RequestRecord> {
   return {
     proxyFlowId: record.proxyFlowId,
+    ...(record.proxyRequestContentRef ? { proxyRequestContentRef: record.proxyRequestContentRef } : {}),
+    ...(record.proxyContentSegments ? { proxyContentSegments: record.proxyContentSegments } : {}),
     ...(record.proxyContentRef ? { proxyContentRef: record.proxyContentRef } : {}),
     mergeState: record.mergeState,
     timings: record.timings,
@@ -229,6 +231,7 @@ export class Controller extends EventEmitter {
   private sitePoller: NodeJS.Timeout | null = null
   /** cookie 被带出去的累计（罐内主键 → 发往过的 host）。按批冲库，别一个请求写一次 */
   private readonly cookieSent = new Map<string, Set<string>>()
+  private readonly downloads = new Map<string, { filename?: string; url?: string }>()
 
   private consoleSnapshot: ConsoleEntry[] = []
   private storage: StorageClient
@@ -434,7 +437,7 @@ export class Controller extends EventEmitter {
     })
     client.on('flow', (flow: ProxyFlow) => {
       if (process.env['MONITOR_CONTENT_DEBUG'] === '1' && (flow.contentRef || flow.contentError)) {
-        this.emit('log', `[content] 代理流 ${flow.url}: ${flow.contentRef?.hash ?? flow.contentError}`)
+        this.emit('log', `[content] 代理流 ${flow.url}: response=${flow.contentRef?.hash ?? flow.contentError} request=${flow.requestContentRef?.hash ?? flow.requestContentError ?? '-'}`)
       }
       this.correlator.addFlow(flow)
       // UI 侧只需要节流后的计数，flow 本体在记录关联时随记录一起走
@@ -448,6 +451,10 @@ export class Controller extends EventEmitter {
           merge: this.correlator.scopeStats
         }
       })
+    })
+    client.on('segment', (segment: { flowId: string; url: string; cursor: number; hash?: string; size?: number; chunks?: number; error?: string; at?: number }) => {
+      this.onEvent({ ts: segment.at ?? Date.now(), kind: 'stream', level: segment.error ? 'warn' : 'info', url: segment.url,
+        detail: { event: segment.error ? 'gap' : 'segment', ...segment } })
     })
     client.on('log', (line: string) => this.emit('log', `[proxy] ${line}`))
     try {
@@ -1112,8 +1119,8 @@ export class Controller extends EventEmitter {
     // 终态行本身可能后到；pending 行先到时算出来的结果就缓存在这里
     void first
     const merged = this.correlator.match(record)
-    if (process.env['MONITOR_CONTENT_DEBUG'] === '1' && record.url.includes('/matrix-binary')) {
-      this.emit('log', `[content] match seq=${record.seq} merge=${merged.mergeState} ref=${merged.proxyContentRef?.hash ?? '-'}`)
+    if (process.env['MONITOR_CONTENT_DEBUG'] === '1' && /\/matrix-(binary|upload)/.test(record.url)) {
+      this.emit('log', `[content] match seq=${record.seq} merge=${merged.mergeState} response=${merged.proxyContentRef?.hash ?? '-'} request=${merged.proxyRequestContentRef?.hash ?? '-'}`)
     }
     if (merged.mergeState === 'merged') {
       const keep = proxyPatchOf(merged)
@@ -1153,8 +1160,8 @@ export class Controller extends EventEmitter {
    */
   private applyRevisions(): void {
     for (const revision of this.correlator.takeRevisions()) {
-      if (process.env['MONITOR_CONTENT_DEBUG'] === '1' && revision.url.includes('/matrix-binary')) {
-        this.emit('log', `[content] revision seq=${revision.seq} ref=${revision.proxyContentRef?.hash ?? '-'}`)
+      if (process.env['MONITOR_CONTENT_DEBUG'] === '1' && /\/matrix-(binary|upload)/.test(revision.url)) {
+        this.emit('log', `[content] revision seq=${revision.seq} response=${revision.proxyContentRef?.hash ?? '-'} request=${revision.proxyRequestContentRef?.hash ?? '-'}`)
       }
       const patch = proxyPatchOf(revision)
       this.mergeCache.set(mergeCacheKey(revision), patch)
@@ -1165,8 +1172,8 @@ export class Controller extends EventEmitter {
   }
 
   private enqueue(record: RequestRecord, first = true): void {
-    if (process.env['MONITOR_CONTENT_DEBUG'] === '1' && record.url.includes('/matrix-binary')) {
-      this.emit('log', `[content] enqueue seq=${record.seq} merge=${record.mergeState} ref=${record.proxyContentRef?.hash ?? '-'} first=${first}`)
+    if (process.env['MONITOR_CONTENT_DEBUG'] === '1' && /\/matrix-(binary|upload)/.test(record.url)) {
+      this.emit('log', `[content] enqueue seq=${record.seq} merge=${record.mergeState} response=${record.proxyContentRef?.hash ?? '-'} request=${record.proxyRequestContentRef?.hash ?? '-'} first=${first}`)
     }
     // 同一条请求会来两次（pending 行 + 终态行），只数第一次 ——
     // 这样「本次采集」和「已落库」是一致的一对数
@@ -1188,12 +1195,56 @@ export class Controller extends EventEmitter {
 
   private onEvent(item: MonitoredEvent): void {
     this.eventCount += 1
+    if (item.kind === 'download') {
+      const detail = (item.detail ?? {}) as { event?: string; guid?: string; filename?: string }
+      if (detail.event === 'begin' && detail.guid) {
+        this.downloads.set(detail.guid, { filename: detail.filename, url: item.url })
+      } else if (detail.event === 'completed' && detail.guid) {
+        void this.captureDownload(item, detail.guid)
+        return
+      }
+    }
     this.storage.appendEvent(item)
+  }
+
+  private async captureDownload(item: MonitoredEvent, guid: string): Promise<void> {
+    const meta = this.downloads.get(guid)
+    const name = meta?.filename ? basename(meta.filename) : ''
+    try {
+      if (!name || !this.options.downloadDir) throw new Error('下载文件名或工作区目录不可用')
+      const path = join(this.options.downloadDir, name)
+      const ref = await this.contentClient?.putFile(path)
+      if (!ref) throw new Error('内容服务未启动')
+      this.storage.appendEvent({ ...item, url: item.url ?? meta?.url, detail: {
+        ...(item.detail as Record<string, unknown>), artifact: ref, filename: name, captureState: 'stored'
+      } })
+    } catch (error) {
+      this.storage.appendEvent({ ...item, url: item.url ?? meta?.url, level: 'warn', detail: {
+        ...(item.detail as Record<string, unknown>), filename: name || undefined,
+        captureState: 'content_error', error: (error as Error).message
+      } })
+    } finally {
+      this.downloads.delete(guid)
+    }
   }
 
   private onWsFrame(frame: WsFrameRecord): void {
     this.wsFrameCount += 1
-    this.storage.appendWsFrame(frame)
+    const bytes = frame.binary ? Buffer.from(frame.payload, 'base64') : Buffer.from(frame.payload, 'utf8')
+    void (this.contentClient?.connection ? this.contentClient.put(bytes) : this.content.put(bytes)).then((ref) => {
+      this.storage.appendWsFrame({
+        ...frame,
+        payload: frame.payload.slice(0, 4096),
+        truncated: frame.payload.length > 4096,
+        contentHash: ref.hash,
+        contentSize: ref.size,
+        contentChunks: ref.chunks,
+        captureState: 'stored'
+      })
+    }).catch((error) => {
+      this.storage.appendWsFrame({ ...frame, payload: frame.payload.slice(0, 4096), truncated: true, captureState: 'content_error' })
+      this.emit('log', `[content] WebSocket 帧落盘失败：${(error as Error).message}`)
+    })
   }
 
   private onBody(body: CapturedBody): void {

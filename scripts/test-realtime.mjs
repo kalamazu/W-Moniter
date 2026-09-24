@@ -272,6 +272,13 @@ try {
     assert(phase1Api.ok === true && phase1Api.echo.user === 'amy', `页面侧收到的响应不对：${phase1}`)
   })
 
+  await check('每个 WS 帧都有完整 ContentRef，数据库 payload 只是可检索预览', async () => {
+    for (const row of frames.rows) {
+      assert(row.captureState === 'stored' && /^[a-f0-9]{64}$/.test(row.contentHash), `帧缺少 ContentRef：${JSON.stringify(row)}`)
+      assert(existsSync(join(DATA_DIR, 'content', 'manifests', `${row.contentHash}.json`)), `帧 manifest 不存在：${row.contentHash}`)
+    }
+  })
+
   await check('WS 生命周期进了事件流（created / handshake / closed）', async () => {
     const res = await api('GET', '/events', { query: { kinds: 'websocket', limit: 100, order: 'asc' } })
     const names = (res.body?.rows ?? []).map((row) => row.detail?.event)
@@ -394,6 +401,8 @@ try {
     assert(begin.detail.filename === DOWNLOAD_NAME, `filename=${begin.detail.filename}`)
     assert(String(begin.url ?? '').includes('/download.txt'), `url=${begin.url}`)
     assert(done.detail.receivedBytes > 0, `completed 的字节数是 ${done.detail.receivedBytes}`)
+    assert(done.detail.captureState === 'stored' && /^[a-f0-9]{64}$/.test(done.detail.artifact?.hash), `下载没有归档为 artifact：${JSON.stringify(done.detail)}`)
+    assert(done.detail.artifact.size === done.detail.receivedBytes, '下载 artifact 大小与浏览器完成事件不一致')
     assert(done.id > begin.id, `completed(${done.id}) 排在 begin(${begin.id}) 之前`)
   })
 

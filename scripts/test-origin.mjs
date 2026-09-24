@@ -516,7 +516,14 @@ self.addEventListener('install', (event) => {
 })
 self.addEventListener('activate', (event) => event.waitUntil(self.clients.claim()))
 self.addEventListener('fetch', (event) => {
-  // 只旁观，不改写 —— 保证服务端看到的请求集合是确定的
+  const url = new URL(event.request.url)
+  // 受控路由显式走 respondWith；仍然透传网络，因此 origin 真值保持可核对。
+  if (url.pathname === '/api/through-sw') event.respondWith(
+    fetch(event.request).then(async (response) => new Response(await response.arrayBuffer(), {
+      status: response.status,
+      headers: { 'content-type': response.headers.get('content-type') || 'application/octet-stream', 'x-sw-fixture': '1' }
+    }))
+  )
 })
 `
 
@@ -552,11 +559,19 @@ const CAPTURE_MATRIX_PAGE = `<!doctype html><meta charset="utf-8"><title>capture
   await attempt('cache', async () => {
     const cache = await caches.open('matrix-v1')
     await cache.add('/matrix-cache')
-    return { stored: !!(await cache.match('/matrix-cache')) }
+    const stored = !!(await cache.match('/matrix-cache'))
+    await fetch('/matrix-cache', { cache: 'force-cache' })
+    return { stored }
   })
   await attempt('serviceWorker', async () => {
     await navigator.serviceWorker.register('/sw.js', { scope: '/' })
     await navigator.serviceWorker.ready
+    if (!navigator.serviceWorker.controller) {
+      await new Promise((resolve) => {
+        const timer = setTimeout(resolve, 3000)
+        navigator.serviceWorker.addEventListener('controllerchange', () => { clearTimeout(timer); resolve() }, { once: true })
+      })
+    }
     return { ready: true, status: (await fetch('/api/through-sw')).status }
   })
   await attempt('sse', () => new Promise((resolve, reject) => {

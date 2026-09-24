@@ -201,7 +201,7 @@ function stripHopByHop(headers) {
 
 // ---------------------------------------------------------------- 上游请求
 
-function proxyRequest(clientReq, clientRes, target, reqBody) {
+function proxyRequest(clientReq, clientRes, target) {
   const flow = {
     flowId: 'f' + (++flowSeq),
     startedAt: Date.now(),
@@ -212,7 +212,7 @@ function proxyRequest(clientReq, clientRes, target, reqBody) {
     url: target.scheme + '://' + target.host + (target.port === 80 || target.port === 443 ? '' : ':' + target.port) + target.path,
     path: target.path,
     requestHeaders: clientReq.headers,
-    requestBytes: reqBody ? reqBody.length : 0,
+    requestBytes: 0,
     timings: {},
     ruleHits: [],
     mergeState: 'proxy-only'
@@ -263,6 +263,64 @@ function proxyRequest(clientReq, clientRes, target, reqBody) {
 
   const proto = isTls ? https : http
   const upReq = proto.request(options)
+
+  // Request bodies must never be accumulated before forwarding. Besides making
+  // multi-hundred-MiB uploads unsafe, the old sample buffer was accidentally
+  // used as the upstream body and therefore truncated every upload above
+  // bodyMaxBytes. Tee the incoming stream to the upstream and ContentStore;
+  // Node's pipe backpressure pauses the browser when either consumer is full.
+  let requestSink = null
+  let requestCapturedBytes = 0
+  const requestSample = []
+  let resolveRequestCapture
+  const requestCaptureDone = new Promise(resolve => { resolveRequestCapture = resolve })
+  const hasRequestBody = Number(clientReq.headers['content-length'] ?? 0) > 0 || clientReq.headers['transfer-encoding'] !== undefined
+
+  if (config.contentEndpoint && hasRequestBody) {
+    const endpoint = config.contentEndpoint
+    requestSink = http.request({ hostname: endpoint.host, port: endpoint.port, method: 'PUT', path: '/object',
+      headers: { authorization: `Bearer ${endpoint.token}`,
+        ...(clientReq.headers['content-length'] ? { 'x-expected-bytes': String(clientReq.headers['content-length']) } : {}) } }, response => {
+      const parts = []
+      response.on('data', part => parts.push(part))
+      response.on('end', () => {
+        if (response.statusCode === 200) {
+          try { flow.requestContentRef = JSON.parse(Buffer.concat(parts).toString('utf8')) }
+          catch { flow.requestContentError = 'invalid content service reply' }
+        } else flow.requestContentError = `content service HTTP ${response.statusCode}`
+        resolveRequestCapture()
+      })
+    })
+    requestSink.on('error', error => {
+      flow.requestContentError = error.message
+      resolveRequestCapture()
+    })
+  } else resolveRequestCapture()
+
+  clientReq.on('data', chunk => {
+    flow.requestBytes += chunk.length
+    if (config.captureBodies && requestCapturedBytes < config.bodyMaxBytes) {
+      const part = chunk.subarray(0, config.bodyMaxBytes - requestCapturedBytes)
+      requestSample.push(part)
+      requestCapturedBytes += part.length
+    }
+  })
+  clientReq.on('aborted', () => {
+    flow.requestContentError = 'client request aborted'
+    requestSink?.destroy()
+    upReq.destroy(new Error('client request aborted'))
+    resolveRequestCapture()
+  })
+
+  const recordRequestBody = () => {
+    if (!config.captureBodies || flow.requestBytes === 0) return
+    flow.requestBodyRef = {
+      size: flow.requestBytes,
+      capturedBytes: requestCapturedBytes,
+      truncated: requestCapturedBytes < flow.requestBytes,
+      base64: Buffer.concat(requestSample).toString('base64')
+    }
+  }
 
   upReq.on('socket', (sock) => {
     if (sock.__monitorSeen) return
@@ -351,8 +409,10 @@ function proxyRequest(clientReq, clientRes, target, reqBody) {
       // Tee raw upstream bytes to the local content service. The browser pipe is
       // independent; slow disk only pauses the upstream on socket backpressure.
       let sink = null
+      let segmentTail = Promise.resolve()
       const mediaType = String(upRes.headers['content-type'] ?? '').toLowerCase()
       const indefinitelyStreaming = mediaType.includes('text/event-stream') || mediaType.includes('multipart/x-mixed-replace') || mediaType.includes('application/grpc')
+      if (config.contentEndpoint && indefinitelyStreaming) flow.contentSegments = []
       if (config.contentEndpoint && !indefinitelyStreaming && flow.status !== 204 && flow.status !== 304) {
         const endpoint = config.contentEndpoint
         sink = http.request({ hostname: endpoint.host, port: endpoint.port, method: 'PUT', path: '/object',
@@ -374,6 +434,38 @@ function proxyRequest(clientReq, clientRes, target, reqBody) {
         bytes += c.length
         takeSample(c)
         if (sink && !sink.write(c)) upRes.pause()
+        if (config.contentEndpoint && indefinitelyStreaming) {
+          // Long-lived streams never produce EOF during normal operation. Commit
+          // each raw network segment independently so evidence is queryable while
+          // the stream remains open and a crash can lose at most the in-flight
+          // segment. Pausing until the local ACK keeps memory bounded.
+          upRes.pause()
+          const bytes = Buffer.from(c)
+          segmentTail = segmentTail.then(() => new Promise(resolve => {
+            const endpoint = config.contentEndpoint
+            const request = http.request({ hostname: endpoint.host, port: endpoint.port, method: 'PUT', path: '/object',
+              headers: { authorization: `Bearer ${endpoint.token}`, 'x-expected-bytes': String(bytes.length) } }, response => {
+              const parts = []
+              response.on('data', part => parts.push(part))
+              response.on('end', () => {
+                if (response.statusCode === 200) {
+                  try {
+                    const ref = JSON.parse(Buffer.concat(parts).toString('utf8'))
+                    const segment = { cursor: flow.contentSegments.length, ...ref }
+                    flow.contentSegments.push(segment)
+                    say({ ev: 'segment', data: { flowId: flow.flowId, url: flow.url, ...segment, at: Date.now() } })
+                  } catch { flow.contentSegmentError = 'invalid content service reply' }
+                } else {
+                  flow.contentSegmentError = `content service HTTP ${response.statusCode}`
+                  say({ ev: 'segment', data: { flowId: flow.flowId, url: flow.url, cursor: flow.contentSegments.length, error: flow.contentSegmentError, at: Date.now() } })
+                }
+                resolve()
+              })
+            })
+            request.on('error', error => { flow.contentSegmentError = error.message; resolve() })
+            request.end(bytes)
+          })).finally(() => upRes.resume())
+        }
       })
       sink?.on('drain', () => upRes.resume())
       upRes.on('close', () => { if (!flow.finishedAt) sink?.destroy() })
@@ -393,6 +485,7 @@ function proxyRequest(clientReq, clientRes, target, reqBody) {
             setTimeout(resolve, 15000).unref()
           })
         }
+        await segmentTail
         const last = now()
         flow.timings.download = ms(last - (firstByteAt ?? last))
         flow.responseBytes = bytes
@@ -405,13 +498,8 @@ function proxyRequest(clientReq, clientRes, target, reqBody) {
             base64: Buffer.concat(captured).toString('base64')
           }
         }
-        if (reqBody && config.captureBodies) {
-          flow.requestBodyRef = {
-            size: reqBody.length,
-            truncated: reqBody.length > config.bodyMaxBytes,
-            base64: reqBody.subarray(0, config.bodyMaxBytes).toString('base64')
-          }
-        }
+        await requestCaptureDone
+        recordRequestBody()
         finish(flow)
       })
       flow.sentHeaders = baseHeaders
@@ -446,13 +534,13 @@ function proxyRequest(clientReq, clientRes, target, reqBody) {
       }
     })
 
-    upRes.on('end', () => {
+    upRes.on('end', async () => {
       const last = now()
       flow.timings.download = ms(last - (firstByteAt ?? last))
       flow.responseBytes = bytes
       flow.finishedAt = Date.now()
 
-      if (mode === 'pass') { finish(flow); clientRes.end(); return }
+      if (mode === 'pass') { await requestCaptureDone; recordRequestBody(); finish(flow); clientRes.end(); return }
 
       // 到这里说明整个响应体都在 buffered 里
       const raw = Buffer.concat(buffered)
@@ -520,13 +608,8 @@ function proxyRequest(clientReq, clientRes, target, reqBody) {
           base64: Buffer.concat(captured).toString('base64')
         }
       }
-      if (reqBody && config.captureBodies) {
-        flow.requestBodyRef = {
-          size: reqBody.length,
-          truncated: reqBody.length > config.bodyMaxBytes,
-          base64: reqBody.subarray(0, config.bodyMaxBytes).toString('base64')
-        }
-      }
+      await requestCaptureDone
+      recordRequestBody()
 
       finish(flow)
       flow.sentHeaders = outHeaders
@@ -546,9 +629,9 @@ function proxyRequest(clientReq, clientRes, target, reqBody) {
     }
   })
 
-  if (reqBody && reqBody.length) upReq.end(reqBody)
-  else upReq.end()
   t.sentAt = now()
+  clientReq.pipe(upReq)
+  if (requestSink) clientReq.pipe(requestSink)
   return flow
 }
 
@@ -590,25 +673,12 @@ function handleRequest(meta) {
       // 这里如果偷懒用 meta.path（'/'），所有 https 请求都会被打到根路径（踩过）。
       target = { ...meta, path: req.url }
     }
-    const chunks = []
-    let bodyBytes = 0
-    let aborted = false
-    req.on('data', (c) => {
-      bodyBytes += c.length
-      if (config.captureBodies && bodyBytes <= config.bodyMaxBytes) chunks.push(c)
-      else if (!config.captureBodies) req.pause(), req.resume()
-    })
-    req.on('error', () => { aborted = true })
-    req.on('end', () => {
-      if (aborted) return
-      try {
-        const flow = proxyRequest(req, res, target, Buffer.concat(chunks))
-        flow.requestBytes = bodyBytes
-      } catch (e) {
-        log('error', 'proxyRequest 抛异常: ' + String(e && e.message || e))
-        if (!res.headersSent) { res.writeHead(500); res.end('proxy error') }
-      }
-    })
+    try {
+      proxyRequest(req, res, target)
+    } catch (e) {
+      log('error', 'proxyRequest 抛异常: ' + String(e && e.message || e))
+      if (!res.headersSent) { res.writeHead(500); res.end('proxy error') }
+    }
   }
 }
 
