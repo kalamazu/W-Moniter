@@ -1,10 +1,10 @@
 # T-018：下载文件采集与证据化
 
-状态：可认领
+状态：已通过
 蓝图映射：M1 §4.1/§4.2、M4 §6.2、§13
 优先级：P0
-认领：未认领
-基线 commit：待认领时填写
+认领：Codex（2026-09-24）
+基线 commit：`a08c6c6`
 验收：A-018（完成实现后创建）
 
 ## 背景与目标
@@ -31,8 +31,8 @@
 
 ## 完成记录
 
-- 实现 commit：
-- 修改文件：
-- 测试命令与结果：
-- 已知限制：
-- 回滚：`git revert <commit>`
+- 实现 commit：`bfe7cc3`、`56e358b`
+- 修改文件：`ContentClient.putFile()`、下载事件关联/归档、artifact 证据与实时验收。
+- 测试命令与结果：`test:realtime` 验证 begin→completed、文件名/URL、artifact hash/size、ContentStore 正文与临时原文件清理。
+- 已知限制：相同文件名的并发下载依赖 Chromium 的最终 suggested filename；取消下载记录事件但不会发布 artifact。
+- 回滚：`git revert 56e358b bfe7cc3`

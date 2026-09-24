@@ -1,10 +1,10 @@
 # T-016：上传请求原文流式采集
 
-状态：可认领
+状态：已通过
 蓝图映射：M1 §4.1/§4.2、§10.3、§13；E03/E07
 优先级：P0
-认领：未认领
-基线 commit：待认领时填写
+认领：Codex（2026-09-24）
+基线 commit：`a08c6c6`
 验收：A-016（完成实现后创建）
 
 ## 背景与目标
@@ -31,8 +31,8 @@
 
 ## 完成记录
 
-- 实现 commit：
-- 修改文件：
-- 测试命令与结果：
-- 已知限制：
-- 回滚：`git revert <commit>`
+- 实现 commit：`bfe7cc3`
+- 修改文件：`proxy/server.mjs`、`proxy/correlate.*`、`content/server.mjs`、请求引用 schema/投影与采集路径探针。
+- 测试命令与结果：代理开启的 `test:capture-paths` 3/3，2 MiB 浏览器上传的 origin/ContentRef hash 与字节一致；`STREAM_TEST_MIB=1024 test:stream-content` 验证 1 GiB 分块、hash、长度不符与中断无 manifest；类型检查和构建通过。
+- 已知限制：1 GiB 压测在同一 content 二进制流协议上执行，真实 Chrome 代理路径使用 2 MiB fixture；浏览器内部未交付给代理的上传仍只能标缺口。
+- 回滚：`git revert bfe7cc3`

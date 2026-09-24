@@ -1,10 +1,10 @@
 # T-019：缓存与 Service Worker 响应覆盖收口
 
-状态：可认领
+状态：已通过
 蓝图映射：M1 §4.2、§13.2；E04
 优先级：P0
-认领：未认领
-基线 commit：待认领时填写
+认领：Codex（2026-09-24）
+基线 commit：`a08c6c6`
 验收：A-019（完成实现后创建）
 
 ## 背景与目标
@@ -31,8 +31,8 @@
 
 ## 完成记录
 
-- 实现 commit：
-- 修改文件：
-- 测试命令与结果：
-- 已知限制：
-- 回滚：`git revert <commit>`
+- 实现 commit：`bfe7cc3`
+- 修改文件：响应来源字段、SW `Network.getResponseBody` 完成态回退、受控 Cache/SW fixture 与矩阵断言。
+- 测试命令与结果：非代理 `test:capture-paths` 3/3；同一 origin 真值下，disk cache 与 service worker 两条记录均有正确来源、完整 hash/size 与可读 ContentRef。
+- 已知限制：浏览器未暴露正文的 opaque/cross-origin 响应仍按明确 gap 处理，不推断或伪造正文。
+- 回滚：`git revert bfe7cc3`

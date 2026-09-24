@@ -24,15 +24,15 @@
 | [T-013](T-013-workspace-auth-ledger.md) | 已通过 | 工作区登录证据台账 | M2 §5 | Codex | [A-013](../acceptance/A-013-workspace-auth-ledger.md) |
 | [T-014](T-014-extension-observation.md) | 已通过 | 插件能力验证与期望/实际对账 | M2 §5 | Codex | [A-014](../acceptance/A-014-extension-observation.md) |
 | [T-015](T-015-workbench-ui.md) | 已通过 | 工作台信息架构与响应式窗口控制 | M2 §5 / M5 §11 | Codex | [A-015](../acceptance/A-015-workbench-ui.md) |
-| [T-016](T-016-upload-content-stream.md) | 可认领 | 上传请求原文流式采集 | M1 §4 | 未认领 | 待创建 |
-| [T-017](T-017-realtime-content-streams.md) | 可认领 | WebSocket 与 SSE 原文内容链路 | M1 §4 / M9 基础 | 未认领 | 待创建 |
-| [T-018](T-018-download-artifact-capture.md) | 可认领 | 下载文件采集与证据化 | M1 §4 / M4 | 未认领 | 待创建 |
-| [T-019](T-019-cache-service-worker-coverage.md) | 可认领 | 缓存与 Service Worker 响应覆盖 | M1 §4.2 | 未认领 | 待创建 |
-| [T-020](T-020-workspace-checkpoint-restore.md) | 可认领 | 工作区检查点与冷恢复 | M2 §5 | 未认领 | 待创建 |
+| [T-016](T-016-upload-content-stream.md) | 已通过 | 上传请求原文流式采集 | M1 §4 | Codex | [A-016](../acceptance/A-016-upload-content-stream.md) |
+| [T-017](T-017-realtime-content-streams.md) | 已通过 | WebSocket 与 SSE 原文内容链路 | M1 §4 / M9 基础 | Codex | [A-017](../acceptance/A-017-realtime-content-streams.md) |
+| [T-018](T-018-download-artifact-capture.md) | 已通过 | 下载文件采集与证据化 | M1 §4 / M4 | Codex | [A-018](../acceptance/A-018-download-artifact-capture.md) |
+| [T-019](T-019-cache-service-worker-coverage.md) | 已通过 | 缓存与 Service Worker 响应覆盖 | M1 §4.2 | Codex | [A-019](../acceptance/A-019-cache-service-worker-coverage.md) |
+| [T-020](T-020-workspace-checkpoint-restore.md) | 已通过 | 工作区检查点与冷恢复 | M2 §5 | Codex | [A-020](../acceptance/A-020-workspace-checkpoint-restore.md) |
 
 2026-09-24 已完成 T-006～T-015 独立验收；T-014 经 `6905516` 返工和真实启停复验后也已通过。T-010 通过的是“缺口真值矩阵”，不代表 M1 全量采集门槛已达成。
 
-下一批 T-016～T-020 已从蓝图抽象为可认领任务：前四项收口 M1 的上传、实时流、下载和缓存/SW 缺口，T-020 建立 M2 工作区检查点与冷恢复纵向链路。
+2026-09-24 T-016～T-020 已实现并复验：前四项收口上传、实时流、下载和缓存/SW 正文链路，T-020 建立 suspended 独立工作区的可校验检查点与冷恢复。
 
 ## 生命周期与规则
 

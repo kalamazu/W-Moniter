@@ -1,10 +1,10 @@
 # T-017：WebSocket 与 SSE 原文内容链路
 
-状态：可认领
+状态：已通过
 蓝图映射：M1 §4.1/§4.2、§13；M9 基础
 优先级：P0
-认领：未认领
-基线 commit：待认领时填写
+认领：Codex（2026-09-24）
+基线 commit：`a08c6c6`
 验收：A-017（完成实现后创建）
 
 ## 背景与目标
@@ -31,8 +31,8 @@
 
 ## 完成记录
 
-- 实现 commit：
-- 修改文件：
-- 测试命令与结果：
-- 已知限制：
-- 回滚：`git revert <commit>`
+- 实现 commit：`bfe7cc3`
+- 修改文件：代理长流分段、`ProxyClient` segment 事件、WS ContentRef 投影、事件/WS schema 与实时验收。
+- 测试命令与结果：`test:realtime` 48/48；代理 `test:capture-paths` 3/3 并在连接存活时取得 SSE cursor/hash/size；类型检查和构建通过。
+- 已知限制：WebSocket 仍受 20,000 帧会话上限和 2,048 条待落库队列保护，溢出计入 health；代理目前不支持 WebSocket upgrade，因此 WS 完整链路使用 CDP。
+- 回滚：`git revert bfe7cc3`
