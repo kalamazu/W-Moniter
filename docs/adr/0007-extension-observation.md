@@ -8,6 +8,10 @@
 
 当前生产观察源是 Chrome Profile `Secure Preferences` 只读快照和运行中的 CDP extension target。两者均非完整扩展清单：Profile 可能尚未落盘、可能包含停用项，service worker target 可以休眠。因此 `complete=false`，期望项缺席只能是 `unknown`。目标运行时与 Profile 观察都不得修改扩展状态。不可读取时保留错误原因而非报告“空清单”。
 
+T-014 返工使用 CDP `Extensions.loadUnpacked` 和带 `management` 权限的受控探针，仅在 Chrome for Testing 的临时 Profile 中验证启停能力。探针必须同时收到显式授权开关、精确目标名称与审计原因，且不能操作自身；每次 `setEnabled` 后立即回读状态并记录前后值。`chrome.storage.session` 区分真实浏览器重启与 service worker 重载，`chrome.storage.local` 保留阶段及审计。
+
+`loadUnpacked` 是调试加载，重新加载时会将目标强制为启用；探针必须报告 `forcedReenabledOnLoad`，并再做一次禁用/启用回读。该证据只证明 API 可行性、授权边界和配置/审计跨重启，不证明商店、政策或 unpacked 安装持久性，也不为生产开放写入入口。CDP 实验域见 [DevTools Protocol Extensions](https://chromedevtools.github.io/devtools-protocol/tot/Extensions/)。
+
 受控 Manifest V3 fixture 在 Chrome for Testing 154 验证了 `chrome.management.getAll()` 可枚举、版本/权限可读、扩展 storage 跨重启保留。正式版 Chrome 153 不支持以 `--load-extension` 注入该受控 fixture；开发探针仅在未打包应用中显式设置 fixture 目录。官方约束见 [Chrome 扩展新闻](https://developer.chrome.com/blog/extension-news-june-2025)和 [Chromium Extensions 公告](https://groups.google.com/a/chromium.org/g/chromium-extensions/c/1-g8EFx2BBY)。`chrome.management` 报告尚未接入生产可信桥，因此不得把探针中的完整枚举能力写成当前产品能力。
 
 ## 安全与后续门槛

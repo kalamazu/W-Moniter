@@ -22,10 +22,10 @@
 | [T-011](T-011-scoped-metadata-migration.md) | 已通过 | 工作区元数据归属与范围校验迁移 | M2 §5 / §10.2 | Codex | [A-011](../acceptance/A-011-scoped-metadata-migration.md) |
 | [T-012](T-012-streaming-content-service.md) | 已通过 | 流式内容服务第一条纵向链路 | M1 §4 / §10.3 | Codex | [A-012](../acceptance/A-012-streaming-content-service.md) |
 | [T-013](T-013-workspace-auth-ledger.md) | 已通过 | 工作区登录证据台账 | M2 §5 | Codex | [A-013](../acceptance/A-013-workspace-auth-ledger.md) |
-| [T-014](T-014-extension-observation.md) | 返工 | 插件能力验证与期望/实际对账 | M2 §5 | Codex | [A-014](../acceptance/A-014-extension-observation.md) |
+| [T-014](T-014-extension-observation.md) | 已通过 | 插件能力验证与期望/实际对账 | M2 §5 | Codex | [A-014](../acceptance/A-014-extension-observation.md) |
 | [T-015](T-015-workbench-ui.md) | 已通过 | 工作台信息架构与响应式窗口控制 | M2 §5 / M5 §11 | Codex | [A-015](../acceptance/A-015-workbench-ui.md) |
 
-2026-09-24 已完成 T-006～T-015 独立验收：T-006～T-013 与 T-015 通过；T-014 因没有实际执行受控扩展的禁用/启用操作而返工。T-010 通过的是“缺口真值矩阵”，不代表 M1 全量采集门槛已达成。
+2026-09-24 已完成 T-006～T-015 独立验收；T-014 经 `6905516` 返工和真实启停复验后也已通过。T-010 通过的是“缺口真值矩阵”，不代表 M1 全量采集门槛已达成。
 
 ## 生命周期与规则
 

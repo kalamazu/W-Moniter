@@ -1,6 +1,6 @@
 # T-014：插件能力验证与工作区期望/实际对账
 
-- 状态：返工
+- 状态：已通过
 - 蓝图映射：M2 §5.1/§5.2、§13；E04/E12 的插件切片
 - 优先级：P1
 - 认领：Codex · 2026-09-23
@@ -36,3 +36,10 @@
 - 验证：`typecheck`、`build`；Chrome for Testing 154 下 `test:extension-probe` 3/3、`test:extensions` 9/9；`test:scoped-migration` 16/16、`test:auth-ledger` 11/11、`test:storage` 54/54、`test:workspaces` 7/7、`test:actions` 13/13。
 - 已知限制：正式 Chrome 153 不加载测试 fixture 的 `--load-extension`；产品未接入可信 `chrome.management` 桥。Profile/CDP 只能做部分观察，缺席为 unknown；插件启停/安装/卸载未执行也未开放。受控探针验证了 API 枚举与跨重启存储，但未验证 `setEnabled` 写入。生产的跨版本/权限漂移只在能够读到元数据时判断，不能保证任意插件实时完整枚举。休眠工作区暂无离线摘要。
 - 回滚：`git revert <本任务提交>`；观察记录不应影响浏览器现有扩展状态。
+
+## 返工与复验记录
+
+- 返工 commit：`6905516`。新增独立受控目标扩展，管理探针仅在显式测试授权、精确目标名称和审计原因齐全时调用 `chrome.management.setEnabled`，不向生产 UI/HTTP/MCP 开放写入。
+- 真实 Chrome for Testing 154 中完成禁用回读 `false`、整个浏览器重启、再禁用回读 `false`、启用回读 `true`；稳定 ID、阶段、启动次数和 3 条授权审计记录跨重启保留。
+- 复验：`test:extension-probe` 7/7、`test:extensions` 9/9、`test:scoped-migration` 17/17、`test:actions` 13/13；`typecheck` 和 `build` 通过。
+- 真实边界：调试接口重新加载 unpacked 扩展会强制其为启用，探针显式记录 `forcedReenabledOnLoad=true`，不把调试加载误称为生产安装持久性。

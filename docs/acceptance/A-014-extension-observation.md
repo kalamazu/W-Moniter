@@ -1,8 +1,8 @@
 # A-014：插件能力与工作区对账独立验收
 
-状态：返工 · 独立验收 2026-09-24 · 实现 `5ba1686` · 验收加固 `516364a` · 对应 [T-014](../tasks/T-014-extension-observation.md)
+状态：已通过 · 返工复验 2026-09-24 · 实现 `5ba1686` · 返工 `6905516` · 对应 [T-014](../tasks/T-014-extension-observation.md)
 
-自动证据：Chrome for Testing 154 下 `npm run test:extension-probe` 3/3、`npm run test:extensions` 9/9；A/B 使用不同受控扩展及版本/权限，Profile/CDP 观察与期望漂移不串区；重启保留并重新观察；UI/HTTP/MCP 同源；Profile 部分扫描时缺席为 `unknown`。v10→v11 迁移与备份在 `test:scoped-migration` 16/16 覆盖。`typecheck`、`build`、登录 11/11、存储 54/54、工作区 7/7、动作 13/13 通过。
+自动证据：Chrome for Testing 154 下 `npm run test:extension-probe` 7/7、`npm run test:extensions` 9/9；A/B 使用不同受控扩展及版本/权限，Profile/CDP 观察与期望漂移不串区；重启保留并重新观察；UI/HTTP/MCP 同源；Profile 部分扫描时缺席为 `unknown`。v10→v11 迁移与备份在 `test:scoped-migration` 17/17 覆盖。`typecheck`、`build`、登录 11/11、存储 54/54、工作区 7/7、动作 13/13 通过。
 
 独立复核重点：
 
@@ -16,3 +16,9 @@
 ## 独立验收结论
 
 返工。Chrome for Testing 154 下扩展探针 3/3、工作区对账 9/9，已证明观察、版本/权限漂移、A/B 隔离、非法目标、重启持久化与 UI/HTTP/MCP 同源。但探针明确返回 `enableDisable: not_attempted_without_user_approval`，与 T-014 验收标准“验证枚举及启用/禁用能力边界”不符。返工须用受控目标扩展实际执行禁用→观察→重启→启用→再观察，并将授权、审计和 stale/unknown 语义固化。不要换成一张只写“以后做控制”的新任务来绕过本卡门槛。
+
+## 返工复验结论
+
+通过。`6905516` 用独立管理探针和受控目标扩展完成了真实 `setEnabled(false/true)`，并通过每次 `chrome.management.get()` 回读状态。操作需要显式测试授权、精确目标名称和原因，拒绝操作自身；有序审计记录保留时间、目标、操作、前后状态及授权标志。
+
+Chrome for Testing 154 专项 7/7：首轮禁用后回读 `false`；完整浏览器重启后稳定 ID、控制阶段、启动次数和审计记录保留；再禁用回读 `false`、启用回读 `true`。调试重加载会强制 unpacked 扩展启用，证据明确标记 `forcedReenabledOnLoad=true`，因此本验收不把它误称为商店/政策安装的持久性。产品观察与对账 9/9、迁移 17/17、动作契约 13/13，类型检查与构建通过。生产仍未开放插件安装/卸载/启停入口，符合本卡的安全边界。
