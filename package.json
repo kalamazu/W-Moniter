@@ -49,6 +49,7 @@
     "test:detail": "node scripts/test-detail.mjs",
     "test:drill": "node scripts/test-agent-drill.mjs",
     "mcp": "node mcp/server.mjs",
+    "cli": "node cli/monitor.mjs",
     "dist:win": "electron-builder --win"
   },
   "dependencies": {

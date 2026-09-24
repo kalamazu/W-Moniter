@@ -2,6 +2,7 @@
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { execFileSync } from 'node:child_process'
 import { launchApp, makeChecker, sleep } from './app-harness.mjs'
 import { startOrigin } from './test-origin.mjs'
 
@@ -19,6 +20,8 @@ try {
   const diff = await action('resources.diff', { leftId: versions[0].id, rightId: versions[1].id }); const n1 = await action('resources.noteSave', { resourceId: versions[0].id, text: '人工笔记 v1' }); const n2 = await action('resources.noteSave', { id: n1.output.id, resourceId: versions[0].id, text: '人工笔记 v2' }); const o1 = await action('resources.endpointOverride', { kind: 'merge', keys: ['POST /a', 'POST /b'], label: '登录接口' }); const o2 = await action('resources.endpointOverride', { id: o1.output.id, kind: 'split', keys: ['POST /b'] })
   check('T-028 版本 diff、笔记与人工 merge/split 修订均追加版本', () => { assert(diff.output.changed === true, '版本差异未识别'); assert(n1.output.version === 1 && n2.output.version === 2, '笔记未版本化'); assert(o1.output.version === 1 && o2.output.version === 2, '人工纠正未版本化') })
   const summary = await action('resources.summary'); check('T-028 站点档案聚合且派生索引可重复重建', () => { assert(summary.output.dossiers.some(item => item.origin === base), '缺少站点档案'); assert(summary.output.notes.length >= 2 && summary.output.overrides.length >= 2, '人工资产丢失') })
+  const workspaces = await app.evaluate('window.monitor.getWorkspaces()'); const cli = JSON.parse(execFileSync(process.execPath, ['cli/monitor.mjs', 'resources.summary', workspaces.output.activeWorkspaceId, '{}', '--data-dir', dataDir], { cwd: process.cwd(), encoding: 'utf8' }))
+  check('T-029 CLI 复用 HTTP 与统一 Action 结果外壳', () => assert(cli.task.state === 'succeeded' && cli.output.coverage.indexed > 0, JSON.stringify(cli)))
 
   const flow = await action('workflow.save', { name: '等待、搜索并留证', nodes: [{ id: 'request', kind: 'wait', wait: { type: 'request', query: { url: `${base}/api/json-echo?asset=versioned` }, timeoutMs: 2000 }, extract: { seenSeq: 'seq' } }, { id: 'search', kind: 'action', action: 'resources.search', input: { query: '中文资料', limit: 20 }, dependsOn: ['request'], extract: { hitCount: 'total' } }, { id: 'note', kind: 'action', action: 'resources.noteSave', input: { resourceId: versions[0].id, text: 'workflow found ${hitCount} at ${seenSeq}' }, dependsOn: ['search'], extract: { noteVersion: 'version' } }] })
   const flowRun = await action('workflow.start', { workflowId: flow.output.id, version: flow.output.version, variables: {} })
