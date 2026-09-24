@@ -282,10 +282,32 @@ export class WorkspaceService {
       [paths.contentDir, 'content'], [paths.downloadDir, 'downloads'],
       [paths.rulesPath, 'rules.json'], [paths.uiSettingsPath, 'ui-settings.json']
     ]
-    for (const [target, name] of entries) {
-      rmSync(target, { recursive: true, force: true })
-      const from = join(source, name)
-      if (existsSync(from)) { mkdirSync(dirname(target), { recursive: true }); cpSync(from, target, { recursive: true }) }
+    const token = randomUUID()
+    const prepared: Array<{ target: string; stage: string; old: string; present: boolean }> = []
+    try {
+      // Validate/copy every component before touching the active workspace.
+      for (const [target, name] of entries) {
+        const from = join(source, name)
+        const stage = `${target}.restore-stage-${token}`
+        const old = `${target}.restore-old-${token}`
+        rmSync(stage, { recursive: true, force: true })
+        if (existsSync(from)) { mkdirSync(dirname(stage), { recursive: true }); cpSync(from, stage, { recursive: true }) }
+        prepared.push({ target, stage, old, present: existsSync(from) })
+      }
+      for (const item of prepared) {
+        if (existsSync(item.target)) renameSync(item.target, item.old)
+        if (item.present) renameSync(item.stage, item.target)
+      }
+      for (const item of prepared) rmSync(item.old, { recursive: true, force: true })
+    } catch (error) {
+      for (const item of [...prepared].reverse()) {
+        rmSync(item.stage, { recursive: true, force: true })
+        if (existsSync(item.old)) {
+          rmSync(item.target, { recursive: true, force: true })
+          renameSync(item.old, item.target)
+        }
+      }
+      throw error
     }
   }
 
