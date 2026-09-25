@@ -83,6 +83,27 @@ try {
     assert(/过期/.test(staleTarget ?? ''), `过期目标没有被拒绝：${staleTarget}`)
   })
 
+  const workflowTarget = { kind: 'workspace', workspaceId: ui.output.id }
+  const savedWorkflow = await control('/actions/execute', { method: 'POST', body: JSON.stringify({ action: 'workflow.save', target: workflowTarget, input: { name: '异步协议验收', nodes: [{ id: 'delay', kind: 'wait', wait: { type: 'delay', ms: 800 } }] } }) })
+  const asyncStartedAt = Date.now()
+  const asyncTask = await control('/actions/start', { method: 'POST', body: JSON.stringify({ action: 'workflow.start', target: workflowTarget, input: { workflowId: savedWorkflow.output.id } }) })
+  const asyncReturnMs = Date.now() - asyncStartedAt
+  let asyncResult = null
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    asyncResult = await control(`/tasks/${asyncTask.id}`)
+    if (!['queued', 'running'].includes(asyncResult?.task?.state)) break
+    await sleep(50)
+  }
+  const firstEvents = await control('/tasks/events?after=0&limit=1000')
+  const cursorEvents = await control(`/tasks/events?after=${firstEvents.nextCursor}&limit=1000`)
+  const ownEvents = firstEvents.rows.filter((item) => item.taskId === asyncTask.id)
+  check('长任务启动立即返回，结果与事件游标可恢复读取', () => {
+    assert(asyncReturnMs < 500, `启动阻塞了 ${asyncReturnMs}ms`)
+    assert(asyncResult?.task?.state === 'succeeded', `最终状态：${asyncResult?.task?.state}`)
+    assert(ownEvents.some((item) => item.type === 'running') && ownEvents.some((item) => item.type === 'succeeded'), JSON.stringify(ownEvents))
+    assert(cursorEvents.rows.length === 0 && cursorEvents.nextCursor === firstEvents.nextCursor, '相同 cursor 重复返回事件')
+  })
+
   const taskBuildDir = mkdtempSync(join(tmpdir(), 'monitor-task-service-'))
   execFileSync(process.execPath, [
     join(ROOT, 'node_modules', 'typescript', 'bin', 'tsc'),
@@ -105,11 +126,15 @@ try {
   })
   while (!taskId) await sleep(1)
   const canceled = tasks.cancel(taskId)
+  const canceledAgain = tasks.cancel(taskId)
   release()
   const canceledResult = await pending
+  const canceledEvents = tasks.readEvents(0, 100).rows.filter((item) => item.taskId === taskId)
   check('任务取消与远端效果 unknown 有明确状态', () => {
     assert(unknown.task.state === 'unknown' && unknown.task.error?.code === 'effect_unknown', 'unknown 状态或错误码不正确')
-    assert(canceled.state === 'canceled' && canceledResult.task.state === 'canceled', '取消没有稳定落为 canceled')
+    assert(canceled.state === 'canceled' && canceledAgain.state === 'canceled' && canceledResult.task.state === 'canceled', '取消没有稳定落为 canceled')
+    assert(canceledEvents.filter((item) => item.type === 'canceled').length === 1, '重复取消或 handler 收尾写入了多个终态事件')
+    assert(canceledEvents.every((item, index) => index === 0 || item.cursor > canceledEvents[index - 1].cursor), '任务事件游标未单调递增')
   })
   const journal = join(taskBuildDir, 'journal.json')
   const persisted = new TaskService({ journalPath: journal })

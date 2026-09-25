@@ -16,6 +16,7 @@ import type { BrowserTabCommand } from '../../shared/contracts/browser'
 import type { ReplayExecutionInput, ReplayRun, ReplayTemplate } from '../../shared/contracts/replay'
 import type { TestSuite } from '../../shared/contracts/testing'
 import type { WorkflowNode } from '../../shared/contracts/workflow'
+import type { WorkerReplayInput, WorkerReplayOutput } from '../workers/client'
 import { ActionPolicy } from './policy'
 import { TaskService, type TaskJournalDiagnostics } from './task-service'
 import { WorkspaceTargetResolver } from './target-resolver'
@@ -44,6 +45,8 @@ export interface WorkspaceActionRuntime {
   getRequest(id: string, seq: number): Promise<unknown>
   queryRequests(id: string, query: RequestQuery, limit: number, offset: number, order: RequestOrder): Promise<Page<StoredRequest> | null>
   browserReplay(id: string, template: ReplayTemplate, signal?: AbortSignal): Promise<{ status: number; url: string; headers: Array<{ name: string; value: string }>; bodyBase64: string; durationMs: number }>
+  independentReplay(input: WorkerReplayInput, signal?: AbortSignal): Promise<WorkerReplayOutput>
+  extractText(bytes: Uint8Array, signal?: AbortSignal): Promise<string>
 }
 
 const DESCRIPTORS: Record<WorkspaceAction, ActionDescriptor> = {
@@ -362,9 +365,9 @@ export class WorkspaceActionRegistry {
   }
 
   private root(id: string): string { return dirname(this.workspaces.pathsFor(id).uiSettingsPath) }
-  private replay(id: string): ReplayService { return new ReplayService(this.root(id), new ContentStore(this.workspaces.pathsFor(id).contentDir)) }
+  private replay(id: string): ReplayService { return new ReplayService(this.root(id), new ContentStore(this.workspaces.pathsFor(id).contentDir), (input, signal) => this.runtime.independentReplay(input, signal)) }
   private testing(id: string): TestingService { return new TestingService(this.root(id), new ContentStore(this.workspaces.pathsFor(id).contentDir)) }
-  private resources(id: string): ResourceKnowledgeService { let service = this.resourceServices.get(id); if (!service) { service = new ResourceKnowledgeService(this.root(id), new ContentStore(this.workspaces.pathsFor(id).contentDir)); this.resourceServices.set(id, service) } return service }
+  private resources(id: string): ResourceKnowledgeService { let service = this.resourceServices.get(id); if (!service) { service = new ResourceKnowledgeService(this.root(id), new ContentStore(this.workspaces.pathsFor(id).contentDir), (bytes, signal) => this.runtime.extractText(bytes, signal)); this.resourceServices.set(id, service) } return service }
   private workflows(id: string): WorkflowService { let service = this.workflowServices.get(id); if (!service) { service = new WorkflowService(this.root(id)); this.workflowServices.set(id, service) } return service }
   private async waitRequest(id: string, query: Record<string, unknown>): Promise<StoredRequest | null> { const page = await this.runtime.queryRequests(id, query as RequestQuery, 1, 0, 'time_desc'); return page?.rows[0] ?? null }
 

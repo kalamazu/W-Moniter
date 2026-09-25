@@ -120,6 +120,7 @@ export class TaskService {
   cancel(taskId: string): TaskSnapshot {
     const stored = this.tasks.get(taskId)
     if (!stored) throw new ActionError(`找不到任务：${taskId}`, 'invalid_action')
+    if (stored.completed) return copy(stored.snapshot)
     if (!stored.completed && stored.snapshot.state !== 'canceled') stored.controller.abort()
     if (!stored.completed) {
       stored.snapshot.state = 'canceled'
@@ -128,7 +129,7 @@ export class TaskService {
       stored.completed = true
     }
     this.persist()
-    this.event(stored.snapshot.id, stored.snapshot.state === 'canceled' ? 'canceled' : stored.snapshot.state as TaskEvent['type'])
+    this.event(stored.snapshot.id, 'canceled')
     return copy(stored.snapshot)
   }
 
@@ -146,6 +147,7 @@ export class TaskService {
   }
 
   private finishCanceled<O>(stored: StoredTask): ActionResult<O> {
+    if (stored.completed) return { task: copy(stored.snapshot), output: stored.output as O | null }
     stored.snapshot.state = 'canceled'
     stored.snapshot.finishedAt = Date.now()
     stored.snapshot.error = { code: 'task_canceled', message: '任务已取消' }
@@ -190,7 +192,16 @@ export class TaskService {
     }
   }
 
-  private event(taskId: string, type: TaskEvent['type'], detail?: unknown): void { const item: TaskEvent = { cursor: this.nextCursor++, taskId, at: Date.now(), type, ...(detail === undefined ? {} : { detail }) }; this.events.push(item); if (this.events.length > 10_000) this.events.splice(0, this.events.length - 10_000); if (this.journalPath) { mkdirSync(dirname(this.journalPath), { recursive: true }); appendFileSync(`${this.journalPath}.events.jsonl`, JSON.stringify(item) + '\n') } }
+  private event(taskId: string, type: TaskEvent['type'], detail?: unknown): void {
+    const item: TaskEvent = { cursor: this.nextCursor++, taskId, at: Date.now(), type, ...(detail === undefined ? {} : { detail }) }
+    this.events.push(item)
+    if (this.events.length > 10_000) this.events.splice(0, this.events.length - 10_000)
+    if (!this.journalPath) return
+    mkdirSync(dirname(this.journalPath), { recursive: true })
+    const path = `${this.journalPath}.events.jsonl`
+    appendFileSync(path, JSON.stringify(item) + '\n')
+    if (statSync(path).size > 8 * 1024 * 1024) writeFileSync(path, this.events.map((entry) => JSON.stringify(entry)).join('\n') + '\n', 'utf8')
+  }
   private restoreEvents(): void { if (!this.journalPath || !existsSync(`${this.journalPath}.events.jsonl`)) return; try { for (const line of readFileSync(`${this.journalPath}.events.jsonl`, 'utf8').split(/\r?\n/).filter(Boolean).slice(-10_000)) { const item = JSON.parse(line) as TaskEvent; if (item.cursor > 0 && item.taskId) this.events.push(item) } this.nextCursor = (this.events.at(-1)?.cursor ?? 0) + 1 } catch { /* task journal remains authoritative */ } }
 
   private persist(): void {

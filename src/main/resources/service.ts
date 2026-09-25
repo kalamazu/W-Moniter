@@ -3,15 +3,16 @@ import { join } from 'node:path'
 import type { Page, StoredRequest } from '../../shared/types'
 import type { EndpointOverride, ResourceIndexCoverage, ResourceNote, ResourceSearchHit, ResourceVersion, SiteDossier } from '../../shared/contracts/resources'
 import type { ContentStore } from '../content/store'
-import { VersionedJsonRepository } from '../repositories/versioned-json'
+import { VersionedJsonRepository } from '../repositories/versioned-json.ts'
 
 interface SearchDocument { resourceId: string; text: string }
 interface ResourceState { schemaVersion: 1; resources: ResourceVersion[]; documents: SearchDocument[]; coverage: ResourceIndexCoverage | null; notes: ResourceNote[]; overrides: EndpointOverride[] }
 type PageProvider = (limit: number, offset: number) => Promise<Page<StoredRequest> | null>
+type TextExtractor = (bytes: Uint8Array, signal?: AbortSignal) => Promise<string>
 
 export class ResourceKnowledgeService {
   private readonly repository: VersionedJsonRepository<ResourceState>
-  constructor(root: string, private readonly content: ContentStore) { this.repository = new VersionedJsonRepository<ResourceState>(join(root, 'knowledge.json'), () => ({ schemaVersion: 1, resources: [], documents: [], coverage: null, notes: [], overrides: [] }), validateState) }
+  constructor(root: string, private readonly content: ContentStore, private readonly extractText: TextExtractor) { this.repository = new VersionedJsonRepository<ResourceState>(join(root, 'knowledge.json'), () => ({ schemaVersion: 1, resources: [], documents: [], coverage: null, notes: [], overrides: [] }), validateState) }
 
   summary(): { coverage: ResourceIndexCoverage | null; dossiers: SiteDossier[]; notes: ResourceNote[]; overrides: EndpointOverride[] } {
     const state = this.read(); return { coverage: state.coverage, dossiers: dossiers(state.resources), notes: state.notes, overrides: state.overrides }
@@ -45,10 +46,10 @@ export class ResourceKnowledgeService {
       if (!resource.bodyHash) { missingBody += 1; continue }
       const bytes = await this.content.get(resource.bodyHash, 0, Math.min(resource.size, 1024 * 1024)).catch(() => null)
       if (!bytes) { missingBody += 1; continue }
-      documents.push({ resourceId: resource.id, text: new TextDecoder().decode(bytes) })
+      documents.push({ resourceId: resource.id, text: await this.extractText(bytes, signal) })
     }
     const coverage: ResourceIndexCoverage = { scanned, versions: resources.length, indexed: documents.length, binary, missingBody, truncated, canceled: signal?.aborted === true, builtAt: Date.now() }
-    const previous = this.read(); this.write({ ...previous, resources, documents, coverage }); return coverage
+    this.repository.update((previous) => ({ ...previous, resources, documents, coverage })); return coverage
   }
 
   list(input: { origin?: string; limit?: number; offset?: number } = {}): Page<ResourceVersion> {
@@ -77,11 +78,10 @@ export class ResourceKnowledgeService {
     return { left, right, changed: left.bodyHash !== right.bodyHash || lines.length > 0, lines }
   }
 
-  saveNote(input: { id?: string; resourceId?: string; origin?: string; text: string }): ResourceNote { if (!input.text.trim()) throw new Error('笔记不能为空'); const state = this.read(); const old = input.id ? state.notes.filter((item) => item.id === input.id).sort((a, b) => b.version - a.version)[0] : undefined; const now = Date.now(); const note: ResourceNote = { id: input.id ?? `note_${randomUUID()}`, ...(input.resourceId ? { resourceId: input.resourceId } : {}), ...(input.origin ? { origin: input.origin } : {}), text: input.text, version: (old?.version ?? 0) + 1, createdAt: old?.createdAt ?? now, updatedAt: now }; state.notes.push(note); this.write(state); return note }
-  saveOverride(input: { id?: string; kind: 'merge' | 'split'; keys: string[]; label?: string }): EndpointOverride { if (!input.keys.length) throw new Error('人工纠正至少包含一个 endpoint key'); const state = this.read(); const old = input.id ? state.overrides.filter((item) => item.id === input.id).sort((a, b) => b.version - a.version)[0] : undefined; const value: EndpointOverride = { id: input.id ?? `eo_${randomUUID()}`, kind: input.kind, keys: [...input.keys], ...(input.label ? { label: input.label } : {}), version: (old?.version ?? 0) + 1, createdAt: Date.now() }; state.overrides.push(value); this.write(state); return value }
+  saveNote(input: { id?: string; resourceId?: string; origin?: string; text: string }): ResourceNote { if (!input.text.trim()) throw new Error('笔记不能为空'); let note!: ResourceNote; this.repository.update((state) => { const old = input.id ? state.notes.filter((item) => item.id === input.id).sort((a, b) => b.version - a.version)[0] : undefined; const now = Date.now(); note = { id: input.id ?? `note_${randomUUID()}`, ...(input.resourceId ? { resourceId: input.resourceId } : {}), ...(input.origin ? { origin: input.origin } : {}), text: input.text, version: (old?.version ?? 0) + 1, createdAt: old?.createdAt ?? now, updatedAt: now }; state.notes.push(note); return state }); return note }
+  saveOverride(input: { id?: string; kind: 'merge' | 'split'; keys: string[]; label?: string }): EndpointOverride { if (!input.keys.length) throw new Error('人工纠正至少包含一个 endpoint key'); let value!: EndpointOverride; this.repository.update((state) => { const old = input.id ? state.overrides.filter((item) => item.id === input.id).sort((a, b) => b.version - a.version)[0] : undefined; value = { id: input.id ?? `eo_${randomUUID()}`, kind: input.kind, keys: [...input.keys], ...(input.label ? { label: input.label } : {}), version: (old?.version ?? 0) + 1, createdAt: Date.now() }; state.overrides.push(value); return state }); return value }
 
   private read(): ResourceState { return this.repository.read().value }
-  private write(value: ResourceState): void { this.repository.write(value) }
 }
 function validateState(value: ResourceState): void { if (value.schemaVersion !== 1 || !Array.isArray(value.resources) || !Array.isArray(value.documents) || !Array.isArray(value.notes) || !Array.isArray(value.overrides)) throw new Error('知识库版本不兼容') }
 

@@ -24,6 +24,7 @@
     "test:execution-centers": "node scripts/test-browser-replay-batch.mjs",
     "test:knowledge-workflow": "node scripts/test-resources-workflow.mjs",
     "test:resource-scale": "node --no-warnings --experimental-transform-types scripts/test-resource-scale.mjs",
+    "test:quality-core": "node --no-warnings --experimental-transform-types scripts/test-quality-core.mjs",
     "test:auth-ledger": "node scripts/test-auth-ledger.mjs",
     "test:extension-probe": "node scripts/probes/extension-management.mjs",
     "test:extensions": "node scripts/test-extensions.mjs",

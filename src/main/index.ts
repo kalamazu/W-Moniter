@@ -8,6 +8,7 @@ import { WindowDock } from './window/dock'
 import { asLayout, asSide, readUiSettings, writeUiSettings } from './window/settings'
 import { resolveRuntimeFile, resolveRuntimeRoot } from './paths'
 import { locateNode } from './storage/locate-node'
+import { ExecutionWorkerClient } from './workers/client'
 import { DEFAULT_WINDOW_MS } from '../../proxy/correlate.mjs'
 import { emptyRuleSet, readRuleSet, writeRuleSet } from './rules/store'
 import { WorkspaceService } from './workspace/service'
@@ -161,6 +162,7 @@ let controlWindow: BrowserWindow | null = null
 let dock: WindowDock | null = null
 let workspaceService: WorkspaceService | null = null
 let workspaceActions: WorkspaceActionRegistry | null = null
+let executionWorker: ExecutionWorkerClient | null = null
 let activeWorkspace: WorkspaceSummary | null = null
 
 function currentWorkspacePaths(): {
@@ -978,6 +980,9 @@ app.whenReady().then(async () => {
     defaultProfile: PROFILE
   })
   workspaceService.initialize()
+  const locatedNode = await locateNode()
+  const workerEntry = resolveRuntimeFile('workers', 'server.mjs')
+  if (locatedNode.candidate && workerEntry) executionWorker = new ExecutionWorkerClient(locatedNode.candidate.path, workerEntry)
   workspaceActions = new WorkspaceActionRegistry(workspaceService, {
     create: createWorkspace,
     open: openWorkspace,
@@ -1056,6 +1061,14 @@ app.whenReady().then(async () => {
     browserReplay: (id, template, signal) => {
       const instance = workspaceControllers.get(id); if (!instance) throw new Error('目标工作区未运行')
       return instance.browserReplay(template, signal)
+    },
+    independentReplay: (input, signal) => {
+      if (!executionWorker) throw new Error('独立执行 Worker 不可用：未找到 Node >= 22')
+      return executionWorker.replay(input, signal)
+    },
+    extractText: (bytes, signal) => {
+      if (!executionWorker) throw new Error('索引 Worker 不可用：未找到 Node >= 22')
+      return executionWorker.extract(bytes, signal)
     }
   }, { journalPath: join(DATA_DIR, 'tasks', 'journal.json') })
   activeWorkspace = workspaceService.active()
@@ -1064,9 +1077,8 @@ app.whenReady().then(async () => {
   // AI 友好面：把控制服务拉起来，并把它的地址写进状态（面板与 agent 都读得到）
   if (CONTROL_API) {
     try {
-      const located = await locateNode()
-      if (!located.candidate) throw new Error('找不到系统 Node（控制服务需要 node >= 22）')
-      const nodePath = located.candidate.path
+      if (!locatedNode.candidate) throw new Error('找不到系统 Node（控制服务需要 node >= 22）')
+      const nodePath = locatedNode.candidate.path
       controlBridge = new ControlBridge({
         root: resolveRuntimeRoot(),
         dataDir: DATA_DIR,
@@ -1088,8 +1100,8 @@ app.whenReady().then(async () => {
           return workspaceActions.cancel(taskId)
         },
         task: (taskId) => workspaceActions?.task(taskId) ?? null,
-        taskEvents: (after, limit) => workspaceActions?.taskEvents(after, limit) ?? { rows: [], nextCursor: after ?? 0 }
-        ,start: (request) => { if (!workspaceActions) throw new Error('工作区动作服务还没准备好'); return workspaceActions.start(request) }
+        taskEvents: (after, limit) => workspaceActions?.taskEvents(after, limit) ?? { rows: [], nextCursor: after ?? 0 },
+        start: (request) => { if (!workspaceActions) throw new Error('工作区动作服务还没准备好'); return workspaceActions.start(request) }
       })
       if (!controller) throw new Error('活动工作区没有可用的浏览器控制器')
       controlBridge.attach(controller)
@@ -1127,6 +1139,8 @@ app.whenReady().then(async () => {
     void (async () => {
       await controlBridge?.stop()
       controlBridge = null
+      executionWorker?.stop()
+      executionWorker = null
       const summaries = await shutdownAllWorkspaces()
       console.log('MONITOR_SUMMARY ' + JSON.stringify({ workspaces: summaries }))
       app.quit()
@@ -1145,6 +1159,8 @@ app.whenReady().then(async () => {
 
 app.on('window-all-closed', () => {
   void controlBridge?.stop()
+  executionWorker?.stop()
+  executionWorker = null
   stopAllWorkspaces()
   dock?.dispose()
   dock = null
@@ -1153,6 +1169,8 @@ app.on('window-all-closed', () => {
 
 app.on('before-quit', () => {
   void controlBridge?.stop()
+  executionWorker?.stop()
+  executionWorker = null
   stopAllWorkspaces()
   dock?.dispose()
   dock = null

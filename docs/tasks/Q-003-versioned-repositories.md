@@ -6,3 +6,4 @@
 
 验收：旧 replay/testing/knowledge/workflow 文件原位升级且数据保留；并发更新不丢失；损坏文件隔离并可诊断。
 
+进展：已建立 envelope/revision、原子替换、旧文件备份、损坏隔离和 CAS；Replay/Resource 的写入改为 repository 原子 update，专项验证陈旧 revision 不可覆盖新值。Testing/Workflow 的 mutation 全量改造和跨进程写锁尚未完成，因此保持开发中。

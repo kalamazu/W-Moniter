@@ -40,10 +40,12 @@
 | [T-029](T-029-workflow-agent-runtime.md) | 纵向首版通过 | 持久工作流与 Agent 协作运行时 | M8 | Codex | [A-029](../acceptance/A-029-workflow-agent-runtime.md) |
 | [T-030](T-030-intelligence-protocol-experiments.md) | 可认领 | 证据化智能分析与协议实验 | M9 | 未认领 | 待创建 |
 | [Q-001](Q-001-acceptance-calibration.md) | 开发中 | 验收口径纠偏 | 质量收口 | Codex | 待创建 |
-| [Q-002](Q-002-worker-runtime.md) | 开发中 | Runner/Indexer 独立进程 | 质量收口 | Codex | 待创建 |
+| [Q-002](Q-002-worker-runtime.md) | 已通过 | Runner/Indexer 独立进程基础 | 质量收口 | Codex | [A-Q002](../acceptance/A-Q002-worker-runtime.md) |
 | [Q-003](Q-003-versioned-repositories.md) | 开发中 | 版本仓库与迁移 | 质量收口 | Codex | 待创建 |
 | [Q-004](Q-004-long-task-protocol.md) | 开发中 | 长任务事件协议 | 质量收口 | Codex | 待创建 |
 | [Q-005](Q-005-core-modularization.md) | 开发中 | Core 模块化 | 质量收口 | Codex | 待创建 |
+
+2026-09-25 Q-002 已通过：独立 HTTP socket 与正文解码进入可崩溃重启的 worker；Q-004 的 HTTP 非阻塞启动、结果轮询、事件 cursor 和取消单终态已通过，但因 MCP/UI 对等入口尚缺仍保持开发中。Q-003、Q-005 不提前结项。
 
 2026-09-24 已完成 T-006～T-015 独立验收；T-014 经 `6905516` 返工和真实启停复验后也已通过。T-010 通过的是“缺口真值矩阵”，不代表 M1 全量采集门槛已达成。
 
