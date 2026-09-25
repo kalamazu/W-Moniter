@@ -258,6 +258,7 @@ route('POST', '/workspaces/:id/content/:hash/revoke', (_req, { params, body }) =
 route('POST', '/workspaces/:id/auth/verify-fixture', (_req, { params, body }) => call('action.execute', { request: { action: 'auth.verifyFixture', input: { origin: String(body?.origin ?? '') }, target: { kind: 'workspace', workspaceId: params.id }, ...(body?.idempotencyKey ? { idempotencyKey: body.idempotencyKey } : {}) } }), { mutating: true })
 route('POST', '/workspaces/:id/extensions/desired', (_req, { params, body }) => call('action.execute', { request: { action: 'extensions.setDesired', input: { extensionId: body?.extensionId, version: body?.version, permissions: body?.permissions }, target: { kind: 'workspace', workspaceId: params.id }, ...(body?.idempotencyKey ? { idempotencyKey: body.idempotencyKey } : {}) } }), { mutating: true })
 route('POST', '/actions/execute', async (_req, { body }) => call('action.execute', { request: body ?? {} }, 180000), { mutating: true })
+route('POST', '/actions/start', async (_req, { body }) => call('action.start', { request: body ?? {} }), { mutating: true })
 route('POST', '/tasks/:id/cancel', async (_req, { params }) => call('task.cancel', { taskId: params.id }), { mutating: true })
 route('POST', '/clear', async () => call('clear', {}), { mutating: true })
 route('POST', '/console/clear', async () => call('console.clear', {}), { mutating: true })

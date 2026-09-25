@@ -135,6 +135,7 @@ export class WorkspaceActionRegistry {
   }
   task(taskId: string) { return this.tasks.result(taskId) }
   taskEvents(after?: number, limit?: number) { return this.tasks.readEvents(after, limit) }
+  start(request: ActionRequest) { const key = request.idempotencyKey?.trim() || `async_${randomUUID()}`; const effective = { ...request, idempotencyKey: key }; void this.execute(effective).catch(() => undefined); const task = this.tasks.getByIdempotency(request.action, key); if (!task) throw new Error('长任务未能入队'); return task }
 
   diagnostics(): TaskJournalDiagnostics { return this.tasks.diagnostics() }
 

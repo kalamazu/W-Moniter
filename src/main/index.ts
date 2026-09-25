@@ -1089,6 +1089,7 @@ app.whenReady().then(async () => {
         },
         task: (taskId) => workspaceActions?.task(taskId) ?? null,
         taskEvents: (after, limit) => workspaceActions?.taskEvents(after, limit) ?? { rows: [], nextCursor: after ?? 0 }
+        ,start: (request) => { if (!workspaceActions) throw new Error('工作区动作服务还没准备好'); return workspaceActions.start(request) }
       })
       if (!controller) throw new Error('活动工作区没有可用的浏览器控制器')
       controlBridge.attach(controller)

@@ -136,6 +136,7 @@ export class TaskService {
     const stored = this.tasks.get(taskId)
     return stored ? copy(stored.snapshot) : null
   }
+  getByIdempotency(action: string, key: string): TaskSnapshot | null { const id = this.idempotency.get(`${action}:${key}`); return id ? this.get(id) : null }
   result(taskId: string): ActionResult | null { const stored = this.tasks.get(taskId); return stored ? { task: copy(stored.snapshot), output: stored.output } : null }
   readEvents(after = 0, limit = 200): { rows: TaskEvent[]; nextCursor: number } { const rows = this.events.filter((item) => item.cursor > after).slice(0, Math.max(1, Math.min(1000, limit))); return { rows: rows.map((item) => ({ ...item })), nextCursor: rows.at(-1)?.cursor ?? after } }
   progress(taskId: string, detail: unknown): void { if (!this.tasks.has(taskId)) throw new ActionError(`找不到任务：${taskId}`, 'invalid_action'); this.event(taskId, 'progress', detail) }
