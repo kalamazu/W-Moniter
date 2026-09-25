@@ -1,17 +1,17 @@
 import { randomUUID, createHash } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { join } from 'node:path'
 import { request as httpRequest } from 'node:http'
 import { request as httpsRequest } from 'node:https'
 import { ContentStore } from '../content/store'
 import type { ReplayRun, ReplayTemplate } from '../../shared/contracts/replay'
+import { VersionedJsonRepository } from '../repositories/versioned-json'
 
 interface ReplayState { schemaVersion: 1; templates: ReplayTemplate[]; runs: ReplayRun[] }
 export interface RawRequest { seq?: number; method: string; url: string; headers?: Record<string, string | string[]>; body?: string | null; status?: number | null }
 
 export class ReplayService {
-  private readonly path: string
-  constructor(private readonly root: string, private readonly content: ContentStore) { this.path = join(root, 'replay.json') }
+  private readonly repository: VersionedJsonRepository<ReplayState>
+  constructor(private readonly root: string, private readonly content: ContentStore) { this.repository = new VersionedJsonRepository<ReplayState>(join(root, 'replay.json'), () => ({ schemaVersion: 1, templates: [], runs: [] }), validateState) }
 
   list(): { templates: ReplayTemplate[]; runs: ReplayRun[] } { const state = this.read(); return { templates: state.templates, runs: state.runs.slice(-200).reverse() } }
 
@@ -63,9 +63,10 @@ export class ReplayService {
 
   record(run: ReplayRun): void { const state = this.read(); state.runs.push(run); state.runs = state.runs.slice(-2000); this.write(state) }
 
-  private read(): ReplayState { if (!existsSync(this.path)) return { schemaVersion: 1, templates: [], runs: [] }; const value = JSON.parse(readFileSync(this.path, 'utf8')) as ReplayState; if (value.schemaVersion !== 1) throw new Error('重放仓库版本不兼容'); return value }
-  private write(value: ReplayState): void { mkdirSync(dirname(this.path), { recursive: true }); const temporary = `${this.path}.${process.pid}.${randomUUID()}.tmp`; writeFileSync(temporary, JSON.stringify(value, null, 2) + '\n'); renameSync(temporary, this.path) }
+  private read(): ReplayState { return this.repository.read().value }
+  private write(value: ReplayState): void { this.repository.write(value) }
 }
+function validateState(value: ReplayState): void { if (value.schemaVersion !== 1 || !Array.isArray(value.templates) || !Array.isArray(value.runs)) throw new Error('重放仓库版本不兼容') }
 
 function validate(input: { method: string; url: string; headers: Array<{ name: string; value: string }>; body?: { kind: string; value: string }; cookiePolicy: string }): void {
   const url = new URL(input.url); if (!['http:', 'https:'].includes(url.protocol)) throw new Error('模板 URL 只允许 HTTP(S)')

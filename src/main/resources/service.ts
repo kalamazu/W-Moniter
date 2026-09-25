@@ -1,17 +1,17 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { join } from 'node:path'
 import type { Page, StoredRequest } from '../../shared/types'
 import type { EndpointOverride, ResourceIndexCoverage, ResourceNote, ResourceSearchHit, ResourceVersion, SiteDossier } from '../../shared/contracts/resources'
 import type { ContentStore } from '../content/store'
+import { VersionedJsonRepository } from '../repositories/versioned-json'
 
 interface SearchDocument { resourceId: string; text: string }
 interface ResourceState { schemaVersion: 1; resources: ResourceVersion[]; documents: SearchDocument[]; coverage: ResourceIndexCoverage | null; notes: ResourceNote[]; overrides: EndpointOverride[] }
 type PageProvider = (limit: number, offset: number) => Promise<Page<StoredRequest> | null>
 
 export class ResourceKnowledgeService {
-  private readonly path: string
-  constructor(root: string, private readonly content: ContentStore) { this.path = join(root, 'knowledge.json') }
+  private readonly repository: VersionedJsonRepository<ResourceState>
+  constructor(root: string, private readonly content: ContentStore) { this.repository = new VersionedJsonRepository<ResourceState>(join(root, 'knowledge.json'), () => ({ schemaVersion: 1, resources: [], documents: [], coverage: null, notes: [], overrides: [] }), validateState) }
 
   summary(): { coverage: ResourceIndexCoverage | null; dossiers: SiteDossier[]; notes: ResourceNote[]; overrides: EndpointOverride[] } {
     const state = this.read(); return { coverage: state.coverage, dossiers: dossiers(state.resources), notes: state.notes, overrides: state.overrides }
@@ -80,9 +80,10 @@ export class ResourceKnowledgeService {
   saveNote(input: { id?: string; resourceId?: string; origin?: string; text: string }): ResourceNote { if (!input.text.trim()) throw new Error('笔记不能为空'); const state = this.read(); const old = input.id ? state.notes.filter((item) => item.id === input.id).sort((a, b) => b.version - a.version)[0] : undefined; const now = Date.now(); const note: ResourceNote = { id: input.id ?? `note_${randomUUID()}`, ...(input.resourceId ? { resourceId: input.resourceId } : {}), ...(input.origin ? { origin: input.origin } : {}), text: input.text, version: (old?.version ?? 0) + 1, createdAt: old?.createdAt ?? now, updatedAt: now }; state.notes.push(note); this.write(state); return note }
   saveOverride(input: { id?: string; kind: 'merge' | 'split'; keys: string[]; label?: string }): EndpointOverride { if (!input.keys.length) throw new Error('人工纠正至少包含一个 endpoint key'); const state = this.read(); const old = input.id ? state.overrides.filter((item) => item.id === input.id).sort((a, b) => b.version - a.version)[0] : undefined; const value: EndpointOverride = { id: input.id ?? `eo_${randomUUID()}`, kind: input.kind, keys: [...input.keys], ...(input.label ? { label: input.label } : {}), version: (old?.version ?? 0) + 1, createdAt: Date.now() }; state.overrides.push(value); this.write(state); return value }
 
-  private read(): ResourceState { if (!existsSync(this.path)) return { schemaVersion: 1, resources: [], documents: [], coverage: null, notes: [], overrides: [] }; const value = JSON.parse(readFileSync(this.path, 'utf8')) as ResourceState; if (value.schemaVersion !== 1) throw new Error('知识库版本不兼容'); return value }
-  private write(value: ResourceState): void { mkdirSync(dirname(this.path), { recursive: true }); const temporary = `${this.path}.${process.pid}.${randomUUID()}.tmp`; writeFileSync(temporary, JSON.stringify(value) + '\n'); renameSync(temporary, this.path) }
+  private read(): ResourceState { return this.repository.read().value }
+  private write(value: ResourceState): void { this.repository.write(value) }
 }
+function validateState(value: ResourceState): void { if (value.schemaVersion !== 1 || !Array.isArray(value.resources) || !Array.isArray(value.documents) || !Array.isArray(value.notes) || !Array.isArray(value.overrides)) throw new Error('知识库版本不兼容') }
 
 function dossiers(resources: ResourceVersion[]): SiteDossier[] { const map = new Map<string, { row: SiteDossier; urls: Set<string> }>(); for (const item of resources) { const entry = map.get(item.origin) ?? { row: { origin: item.origin, visits: 0, resources: 0, versions: 0, bytes: 0, firstSeenAt: item.firstSeenAt, lastSeenAt: item.lastSeenAt, types: {} }, urls: new Set<string>() }; const row = entry.row; row.visits += item.evidence.length; entry.urls.add(item.url); row.resources = entry.urls.size; row.versions += 1; row.bytes += item.size; row.firstSeenAt = Math.min(row.firstSeenAt, item.firstSeenAt); row.lastSeenAt = Math.max(row.lastSeenAt, item.lastSeenAt); const type = item.resourceType ?? 'Other'; row.types[type] = (row.types[type] ?? 0) + 1; map.set(item.origin, entry) } return [...map.values()].map((item) => item.row).sort((a, b) => b.lastSeenAt - a.lastSeenAt) }
 function isText(mime?: string, type?: string): boolean { return Boolean(mime?.startsWith('text/') || /json|javascript|xml|svg|html|css|form/i.test(mime ?? '') || /Document|Script|Stylesheet|XHR|Fetch/i.test(type ?? '')) }

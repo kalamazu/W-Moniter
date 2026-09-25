@@ -1,6 +1,6 @@
 # A-029：持久工作流与 Agent 协作运行时验收
 
-状态：已通过 · 验收 2026-09-25 · 实现 `d77dd1a`、`5b5ff15`、`a0c989d` · 对应 [T-029](../tasks/T-029-workflow-agent-runtime.md)
+状态：纵向首版通过 · 验收 2026-09-25 · 实现 `d77dd1a`、`5b5ff15`、`a0c989d` · 对应 [T-029](../tasks/T-029-workflow-agent-runtime.md)
 
 ## 证据与结论
 

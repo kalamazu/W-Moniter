@@ -26,6 +26,8 @@ export interface WorkspaceControlApi {
   execute(request: ActionRequest): Promise<ActionResult>
   catalog(): ActionCatalog
   cancel(taskId: string): TaskSnapshot
+  task(taskId: string): ActionResult | null
+  taskEvents(after?: number, limit?: number): unknown
 }
 
 /**
@@ -138,12 +140,14 @@ export class ControlBridge {
   }
 
   private async dispatch(id: number, method: string, params: Record<string, unknown>): Promise<void> {
-    if (method === 'workspaces.list' || method === 'workspace.create' || method === 'workspace.open' || method === 'workspace.suspend' || method === 'tasks.diagnostics' || method === 'actions.catalog' || method === 'action.execute' || method === 'task.cancel') {
+    if (method === 'workspaces.list' || method === 'workspace.create' || method === 'workspace.open' || method === 'workspace.suspend' || method === 'tasks.diagnostics' || method === 'actions.catalog' || method === 'action.execute' || method === 'task.cancel' || method === 'task.get' || method === 'task.events') {
       const workspace = this.workspaceApi
       if (!workspace) return this.reply({ id, error: '工作区服务还没起来' })
       try {
         if (method === 'actions.catalog') return this.reply({ id, result: workspace.catalog() })
         if (method === 'task.cancel') return this.reply({ id, result: workspace.cancel(String(params.taskId ?? '')) })
+        if (method === 'task.get') return this.reply({ id, result: workspace.task(String(params.taskId ?? '')) })
+        if (method === 'task.events') return this.reply({ id, result: workspace.taskEvents(Number(params.after ?? 0), Number(params.limit ?? 200)) })
         if (method === 'action.execute') return this.reply({ id, result: await workspace.execute(params.request as ActionRequest) })
         let request: ActionRequest
         switch (method) {

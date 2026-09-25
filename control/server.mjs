@@ -210,6 +210,8 @@ route('GET', '/workspaces/:id/content/:hash/verify', (_req, { params }) => call(
 route('GET', '/workspaces/:id/content/:hash/range', (_req, { params, query }) => call('action.execute', { request: { action: 'content.readRange', input: { hash: params.hash, start: Number(query.get('start') ?? 0), end: Number(query.get('end')) }, target: { kind: 'workspace', workspaceId: params.id } } }))
 route('GET', '/actions/catalog', () => call('actions.catalog', {}))
 route('GET', '/tasks/diagnostics', () => call('tasks.diagnostics', {}))
+route('GET', '/tasks/events', (_req, { query }) => call('task.events', { after: num(query.get('after'), 0), limit: num(query.get('limit'), 200) }))
+route('GET', '/tasks/:id', (_req, { params }) => call('task.get', { taskId: params.id }))
 route('GET', '/dom/tree', (_req, { query }) =>
   call('dom.tree', { nodeId: query.has('nodeId') ? num(query.get('nodeId'), 0) : undefined, depth: query.has('depth') ? num(query.get('depth'), 1) : undefined }, 120000)
 )

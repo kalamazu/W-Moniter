@@ -133,6 +133,8 @@ export class WorkspaceActionRegistry {
   cancel(taskId: string) {
     return this.tasks.cancel(taskId)
   }
+  task(taskId: string) { return this.tasks.result(taskId) }
+  taskEvents(after?: number, limit?: number) { return this.tasks.readEvents(after, limit) }
 
   diagnostics(): TaskJournalDiagnostics { return this.tasks.diagnostics() }
 

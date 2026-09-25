@@ -1,8 +1,9 @@
 import { randomUUID } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { existsSync } from 'node:fs'
+import { join } from 'node:path'
 import type { ActionRequest, ActionResult, TargetRef } from '../../shared/contracts/action'
 import type { WorkflowDefinition, WorkflowEvent, WorkflowNode, WorkflowRun } from '../../shared/contracts/workflow'
+import { VersionedJsonRepository } from '../repositories/versioned-json'
 
 interface WorkflowState { schemaVersion: 1; definitions: WorkflowDefinition[]; runs: WorkflowRun[] }
 type Execute = (request: ActionRequest) => Promise<ActionResult>
@@ -10,8 +11,9 @@ type WaitRequest = (query: Record<string, unknown>) => Promise<unknown | null>
 
 export class WorkflowService {
   private readonly path: string
+  private readonly repository: VersionedJsonRepository<WorkflowState>
   private readonly signals = new Map<string, AbortController>()
-  constructor(root: string) { this.path = join(root, 'workflows.json'); this.recover() }
+  constructor(root: string) { this.path = join(root, 'workflows.json'); this.repository = new VersionedJsonRepository<WorkflowState>(this.path, () => ({ schemaVersion: 1, definitions: [], runs: [] }), validateState); this.recover() }
   list(): WorkflowState { const state = this.read(); return { ...state, runs: state.runs.slice(-200).reverse() } }
   save(input: { id?: string; name: string; nodes: WorkflowNode[] }): WorkflowDefinition { validate(input); const state = this.read(); const old = input.id ? state.definitions.filter((item) => item.id === input.id).sort((a, b) => b.version - a.version)[0] : undefined; const now = Date.now(); const value: WorkflowDefinition = { id: input.id ?? `wf_${randomUUID()}`, version: (old?.version ?? 0) + 1, name: input.name, nodes: structuredClone(input.nodes), createdAt: old?.createdAt ?? now, updatedAt: now }; state.definitions.push(value); this.write(state); return value }
   get(id: string, version?: number): WorkflowDefinition { const item = this.read().definitions.filter((row) => row.id === id && (version === undefined || row.version === version)).sort((a, b) => b.version - a.version)[0]; if (!item) throw new Error(`工作流不存在：${id}`); return item }
@@ -82,9 +84,10 @@ export class WorkflowService {
   private assertLease(run: WorkflowRun, token: string): void { if (run.leaseToken !== token) throw new Error(`执行租约已失效（当前 fencing=${run.lease}）`) }
   private update(run: WorkflowRun, append = false): void { run.updatedAt = Date.now(); const state = this.read(); const index = state.runs.findIndex((item) => item.id === run.id); if (index >= 0) state.runs[index] = structuredClone(run); else if (append) state.runs.push(structuredClone(run)); else throw new Error('运行记录不存在'); this.write(state) }
   private recover(): void { if (!existsSync(this.path)) return; const state = this.read(); let changed = false; for (const run of state.runs) if (run.state === 'running') { run.state = 'needsReview'; run.lease += 1; run.leaseToken = randomUUID(); for (const node of run.nodes) if (node.state === 'running') node.state = 'unknown'; event(run, 'run.recovered', undefined, '进程中断：在飞节点效果未知，未自动重发'); changed = true } if (changed) this.write(state) }
-  private read(): WorkflowState { if (!existsSync(this.path)) return { schemaVersion: 1, definitions: [], runs: [] }; const value = JSON.parse(readFileSync(this.path, 'utf8')) as WorkflowState; if (value.schemaVersion !== 1) throw new Error('工作流仓库版本不兼容'); return value }
-  private write(value: WorkflowState): void { mkdirSync(dirname(this.path), { recursive: true }); const temporary = `${this.path}.${process.pid}.${randomUUID()}.tmp`; writeFileSync(temporary, JSON.stringify(value) + '\n'); renameSync(temporary, this.path) }
+  private read(): WorkflowState { return this.repository.read().value }
+  private write(value: WorkflowState): void { this.repository.write(value) }
 }
+function validateState(value: WorkflowState): void { if (value.schemaVersion !== 1 || !Array.isArray(value.definitions) || !Array.isArray(value.runs)) throw new Error('工作流仓库版本不兼容') }
 
 async function wait(node: Extract<WorkflowNode, { kind: 'wait' }>, provider: WaitRequest, signal: AbortSignal): Promise<unknown> { if (node.wait.type === 'delay') { await delay(node.wait.ms, signal); return { waitedMs: node.wait.ms } } const end = Date.now() + node.wait.timeoutMs; while (Date.now() < end) { if (signal.aborted) throw new Error('等待已取消'); const found = await provider(node.wait.query); if (found) return found; await delay(Math.min(node.wait.pollMs ?? 100, Math.max(1, end - Date.now())), signal) } throw new Error('等待请求超时') }
 function delay(ms: number, signal: AbortSignal): Promise<void> { return new Promise((resolve, reject) => { const timer = setTimeout(resolve, Math.max(0, Math.min(ms, 120_000))); signal.addEventListener('abort', () => { clearTimeout(timer); reject(new Error('等待已取消')) }, { once: true }) }) }

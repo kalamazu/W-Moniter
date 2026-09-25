@@ -1,12 +1,12 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs'
 import { basename, dirname } from 'node:path'
 import {
   ActionError,
   RemoteEffectUnknownError,
   type ActionRequest,
   type ActionResult,
-  type TaskSnapshot
+  type TaskSnapshot, type TaskEvent
 } from '../../shared/contracts/action'
 
 export interface TaskExecutionContext {
@@ -42,6 +42,8 @@ export class TaskService {
   private readonly tasks = new Map<string, StoredTask>()
   private readonly idempotency = new Map<string, string>()
   private readonly journalPath?: string
+  private readonly events: TaskEvent[] = []
+  private nextCursor = 1
   private readonly health: TaskJournalDiagnostics = { journalExists: false, corrupt: false, recoveredUnknown: 0, taskCount: 0 }
 
   constructor(options: { journalPath?: string } = {}) {
@@ -78,11 +80,13 @@ export class TaskService {
     this.tasks.set(snapshot.id, stored)
     if (idempotencyKey) this.idempotency.set(`${request.action}:${idempotencyKey}`, snapshot.id)
     this.persist()
+    this.event(snapshot.id, 'queued')
 
     if (stored.controller.signal.aborted) return this.finishCanceled<O>(stored)
     snapshot.state = 'running'
     snapshot.startedAt = Date.now()
     this.persist()
+    this.event(snapshot.id, 'running')
     try {
       const output = await handler(request.input, { task: copy(snapshot), signal: stored.controller.signal })
       if (stored.controller.signal.aborted) return this.finishCanceled<O>(stored)
@@ -91,6 +95,7 @@ export class TaskService {
       snapshot.finishedAt = Date.now()
       stored.completed = true
       this.persist()
+      this.event(snapshot.id, 'succeeded')
       return { task: copy(snapshot), output }
     } catch (error) {
       snapshot.finishedAt = Date.now()
@@ -107,6 +112,7 @@ export class TaskService {
         }
       }
       this.persist()
+      this.event(snapshot.id, snapshot.state)
       return { task: copy(snapshot), output: null }
     }
   }
@@ -122,6 +128,7 @@ export class TaskService {
       stored.completed = true
     }
     this.persist()
+    this.event(stored.snapshot.id, stored.snapshot.state === 'canceled' ? 'canceled' : stored.snapshot.state as TaskEvent['type'])
     return copy(stored.snapshot)
   }
 
@@ -129,6 +136,9 @@ export class TaskService {
     const stored = this.tasks.get(taskId)
     return stored ? copy(stored.snapshot) : null
   }
+  result(taskId: string): ActionResult | null { const stored = this.tasks.get(taskId); return stored ? { task: copy(stored.snapshot), output: stored.output } : null }
+  readEvents(after = 0, limit = 200): { rows: TaskEvent[]; nextCursor: number } { const rows = this.events.filter((item) => item.cursor > after).slice(0, Math.max(1, Math.min(1000, limit))); return { rows: rows.map((item) => ({ ...item })), nextCursor: rows.at(-1)?.cursor ?? after } }
+  progress(taskId: string, detail: unknown): void { if (!this.tasks.has(taskId)) throw new ActionError(`找不到任务：${taskId}`, 'invalid_action'); this.event(taskId, 'progress', detail) }
 
   diagnostics(): TaskJournalDiagnostics {
     return { ...this.health, taskCount: this.tasks.size }
@@ -140,10 +150,12 @@ export class TaskService {
     stored.snapshot.error = { code: 'task_canceled', message: '任务已取消' }
     stored.completed = true
     this.persist()
+    this.event(stored.snapshot.id, 'canceled')
     return { task: copy(stored.snapshot), output: null }
   }
 
   private restore(): void {
+    this.restoreEvents()
     if (!this.journalPath || !existsSync(this.journalPath)) return
     this.health.journalExists = true
     try {
@@ -176,6 +188,9 @@ export class TaskService {
       }
     }
   }
+
+  private event(taskId: string, type: TaskEvent['type'], detail?: unknown): void { const item: TaskEvent = { cursor: this.nextCursor++, taskId, at: Date.now(), type, ...(detail === undefined ? {} : { detail }) }; this.events.push(item); if (this.events.length > 10_000) this.events.splice(0, this.events.length - 10_000); if (this.journalPath) { mkdirSync(dirname(this.journalPath), { recursive: true }); appendFileSync(`${this.journalPath}.events.jsonl`, JSON.stringify(item) + '\n') } }
+  private restoreEvents(): void { if (!this.journalPath || !existsSync(`${this.journalPath}.events.jsonl`)) return; try { for (const line of readFileSync(`${this.journalPath}.events.jsonl`, 'utf8').split(/\r?\n/).filter(Boolean).slice(-10_000)) { const item = JSON.parse(line) as TaskEvent; if (item.cursor > 0 && item.taskId) this.events.push(item) } this.nextCursor = (this.events.at(-1)?.cursor ?? 0) + 1 } catch { /* task journal remains authoritative */ } }
 
   private persist(): void {
     if (!this.journalPath) return

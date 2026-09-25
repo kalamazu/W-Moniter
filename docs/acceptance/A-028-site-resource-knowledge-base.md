@@ -1,6 +1,6 @@
 # A-028：站点档案与资源知识库验收
 
-状态：已通过 · 验收 2026-09-25 · 实现 `d77dd1a`、`b89b0db` · 对应 [T-028](../tasks/T-028-site-resource-knowledge-base.md)
+状态：纵向首版通过 · 验收 2026-09-25 · 实现 `d77dd1a`、`b89b0db` · 对应 [T-028](../tasks/T-028-site-resource-knowledge-base.md)
 
 ## 证据与结论
 
@@ -10,4 +10,3 @@
 - 所有 Action 需要显式 workspace TargetRef；不同工作区使用独立 `knowledge.json` 与 ContentStore，不做跨 scope 聚合。
 
 结论：M7 本地首版通过。索引正文大小、中文子串算法和未来独立 indexer/FTS 的升级条件已写入 ADR-0012，不把派生摘要当成事实源。
-

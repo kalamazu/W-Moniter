@@ -48,6 +48,7 @@ export interface TaskSnapshot {
   finishedAt?: number
   error?: { code: string; message: string }
 }
+export interface TaskEvent { cursor: number; taskId: string; at: number; type: 'queued' | 'running' | 'succeeded' | 'failed' | 'canceled' | 'unknown' | 'progress'; detail?: unknown }
 
 /** 每个入口返回相同外壳；output 才是领域结果。 */
 export interface ActionResult<O = unknown> {

@@ -1,17 +1,17 @@
 import { randomUUID } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { join } from 'node:path'
 import { Script, createContext } from 'node:vm'
 import type { ReplayRun, ReplayTemplate } from '../../shared/contracts/replay'
 import type { TestAssertion, TestCaseResult, TestRunReport, TestSuite } from '../../shared/contracts/testing'
 import type { ContentStore } from '../content/store'
+import { VersionedJsonRepository } from '../repositories/versioned-json'
 
 interface TestingState { schemaVersion: 1; suites: TestSuite[]; runs: TestRunReport[] }
 type Execute = (template: ReplayTemplate, signal?: AbortSignal) => Promise<ReplayRun>
 
 export class TestingService {
-  private readonly path: string
-  constructor(root: string, private readonly content: ContentStore) { this.path = join(root, 'testing.json') }
+  private readonly repository: VersionedJsonRepository<TestingState>
+  constructor(root: string, private readonly content: ContentStore) { this.repository = new VersionedJsonRepository<TestingState>(join(root, 'testing.json'), () => ({ schemaVersion: 1, suites: [], runs: [] }), validateState) }
   list(): TestingState { const state = this.read(); return { ...state, runs: state.runs.slice(-100).reverse() } }
   save(input: Omit<TestSuite, 'id' | 'version' | 'createdAt' | 'updatedAt'> & { id?: string }): TestSuite {
     validate(input); const state = this.read(); const now = Date.now(); const previous = input.id ? state.suites.filter((item) => item.id === input.id).sort((a, b) => b.version - a.version)[0] : undefined
@@ -50,9 +50,10 @@ export class TestingService {
     if (stopped || signal?.aborted) for (const item of cases) if (item.state === 'notStarted') item.state = signal?.aborted ? 'cancelled' : 'notStarted'
     const report = makeReport(suite, startedAt, cases, signal?.aborted === true); const state = this.read(); state.runs.push(report); state.runs = state.runs.slice(-500); this.write(state); return report
   }
-  private read(): TestingState { if (!existsSync(this.path)) return { schemaVersion: 1, suites: [], runs: [] }; const value = JSON.parse(readFileSync(this.path, 'utf8')) as TestingState; if (value.schemaVersion !== 1) throw new Error('测试仓库版本不兼容'); return value }
-  private write(value: TestingState): void { mkdirSync(dirname(this.path), { recursive: true }); const temporary = `${this.path}.${process.pid}.${randomUUID()}.tmp`; writeFileSync(temporary, JSON.stringify(value, null, 2) + '\n'); renameSync(temporary, this.path) }
+  private read(): TestingState { return this.repository.read().value }
+  private write(value: TestingState): void { this.repository.write(value) }
 }
+function validateState(value: TestingState): void { if (value.schemaVersion !== 1 || !Array.isArray(value.suites) || !Array.isArray(value.runs)) throw new Error('测试仓库版本不兼容') }
 
 function validate(input: { name: string; iterations: number; concurrency: number; intervalMs: number; retries: number; datasets: unknown[]; assertions: unknown[] }): void { if (!input.name.trim()) throw new Error('套件名称不能为空'); if (!Number.isInteger(input.iterations) || input.iterations < 1 || input.iterations > 1000) throw new Error('次数范围 1–1000'); if (!Number.isInteger(input.concurrency) || input.concurrency < 1 || input.concurrency > 32) throw new Error('并发范围 1–32'); if (input.intervalMs < 0 || input.retries < 0 || input.retries > 5) throw new Error('间隔或重试无效') }
 function substitute(template: ReplayTemplate, variables: Record<string, unknown>): ReplayTemplate { const replace = (value: string) => value.replace(/\$\{([A-Za-z0-9_.-]+)\}/g, (_, key) => String(variables[key] ?? '')); return { ...template, url: replace(template.url), headers: template.headers.map((item) => ({ name: item.name, value: replace(item.value) })), ...(template.body ? { body: { ...template.body, value: template.body.kind === 'text' ? replace(template.body.value) : template.body.value } } : {}) } }

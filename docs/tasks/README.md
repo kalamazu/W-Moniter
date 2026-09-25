@@ -33,12 +33,17 @@
 | [T-022](T-022-workspace-cockpit-state-history.md) | 已通过 | 工作区驾驶舱与浏览器状态历史 | M2 收口 | Codex | [A-022](../acceptance/A-022-workspace-cockpit-state-history.md) |
 | [T-023](T-023-environment-proxy-center.md) | 已通过 | 代理与环境配置中心 | M3 | Codex | [A-023](../acceptance/A-023-environment-proxy-center.md) |
 | [T-024](T-024-site-storage-control-center.md) | 已通过 | Cookie 与站点存储控制中心 | M4 | Codex | [A-024](../acceptance/A-024-site-storage-control-center.md) |
-| [T-025](T-025-browser-control-center.md) | 已通过 | 浏览器完全控制中心 | M4 | Codex | [A-025](../acceptance/A-025-browser-control-center.md) |
-| [T-026](T-026-request-replay-workbench.md) | 已通过 | 请求模板与单次重放工作台 | M5 | Codex | [A-026](../acceptance/A-026-request-replay-workbench.md) |
-| [T-027](T-027-batch-testing-script-runner.md) | 已通过 | 批量测试、断言与脚本运行器 | M6 | Codex | [A-027](../acceptance/A-027-batch-testing-script-runner.md) |
-| [T-028](T-028-site-resource-knowledge-base.md) | 已通过 | 站点档案与资源知识库 | M7 | Codex | [A-028](../acceptance/A-028-site-resource-knowledge-base.md) |
-| [T-029](T-029-workflow-agent-runtime.md) | 已通过 | 持久工作流与 Agent 协作运行时 | M8 | Codex | [A-029](../acceptance/A-029-workflow-agent-runtime.md) |
+| [T-025](T-025-browser-control-center.md) | 纵向首版通过 | 浏览器完全控制中心 | M4 | Codex | [A-025](../acceptance/A-025-browser-control-center.md) |
+| [T-026](T-026-request-replay-workbench.md) | 纵向首版通过 | 请求模板与单次重放工作台 | M5 | Codex | [A-026](../acceptance/A-026-request-replay-workbench.md) |
+| [T-027](T-027-batch-testing-script-runner.md) | 纵向首版通过 | 批量测试、断言与脚本运行器 | M6 | Codex | [A-027](../acceptance/A-027-batch-testing-script-runner.md) |
+| [T-028](T-028-site-resource-knowledge-base.md) | 纵向首版通过 | 站点档案与资源知识库 | M7 | Codex | [A-028](../acceptance/A-028-site-resource-knowledge-base.md) |
+| [T-029](T-029-workflow-agent-runtime.md) | 纵向首版通过 | 持久工作流与 Agent 协作运行时 | M8 | Codex | [A-029](../acceptance/A-029-workflow-agent-runtime.md) |
 | [T-030](T-030-intelligence-protocol-experiments.md) | 可认领 | 证据化智能分析与协议实验 | M9 | 未认领 | 待创建 |
+| [Q-001](Q-001-acceptance-calibration.md) | 开发中 | 验收口径纠偏 | 质量收口 | Codex | 待创建 |
+| [Q-002](Q-002-worker-runtime.md) | 开发中 | Runner/Indexer 独立进程 | 质量收口 | Codex | 待创建 |
+| [Q-003](Q-003-versioned-repositories.md) | 开发中 | 版本仓库与迁移 | 质量收口 | Codex | 待创建 |
+| [Q-004](Q-004-long-task-protocol.md) | 开发中 | 长任务事件协议 | 质量收口 | Codex | 待创建 |
+| [Q-005](Q-005-core-modularization.md) | 开发中 | Core 模块化 | 质量收口 | Codex | 待创建 |
 
 2026-09-24 已完成 T-006～T-015 独立验收；T-014 经 `6905516` 返工和真实启停复验后也已通过。T-010 通过的是“缺口真值矩阵”，不代表 M1 全量采集门槛已达成。
 

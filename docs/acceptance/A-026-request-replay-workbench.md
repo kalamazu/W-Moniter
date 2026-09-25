@@ -1,6 +1,6 @@
 # A-026：请求模板与单次重放工作台验收
 
-状态：已通过 · 验收 2026-09-25 · 实现 `f923b34`、`5df97a0` · 对应 [T-026](../tasks/T-026-request-replay-workbench.md)
+状态：纵向首版通过 · 验收 2026-09-25 · 实现 `f923b34`、`5df97a0` · 对应 [T-026](../tasks/T-026-request-replay-workbench.md)
 
 ## 证据与结论
 
@@ -10,4 +10,3 @@
 - cURL/HAR 只解析不执行 shell；8 MiB/1000 entry 有界，`@file` 被拒；非只读方法缺少 `confirmWrite=true` 时任务失败。
 
 结论：M5 首版单次重放纵向链路通过。浏览器和独立模式能力差异明确；逐 part multipart 编辑、SecretRef 刷新签名和 TLS 指纹复制不在本次通过结论内。
-
